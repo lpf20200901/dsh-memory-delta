@@ -292,6 +292,22 @@ window.__ModuleLoader__.load({
 }
 .dsh-memory-delta-flow-now { color: var(--dsw-alias-label-primary, #1f1f1f); font-weight: 600; }
 .dsh-memory-delta-flow-dim { color: var(--dsw-alias-label-tertiary, #8c8c8c); }
+/* 全局规范的预览：等宽 + 可滚动 + 不撑破面板（它是 Markdown 原文，不是渲染后的） */
+.dsh-memory-delta-preview {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22));
+  background: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.06));
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .dsh-memory-delta-where {
   flex: none;
   font-size: 10px;
@@ -572,7 +588,9 @@ window.__ModuleLoader__.load({
        * 把用户刚收起来的分组重新弹开，而且原生 marker 又被样式藏了 ——
        * 结果是"看不出能点、点了也记不住"。
        */
-      const [collapsed, setCollapsed] = useState({});
+      // 「全局规范」默认**折叠**：它是工作区外的整篇指令文件，展开会把面板淹掉
+      //（也避免截图时把里面的个人信息带出去）。
+      const [collapsed, setCollapsed] = useState({ 'stage:global': true });
       const [groupBy, setGroupBy] = useState('type');
       const [actionError, setActionError] = useState(null);
       const [notice, setNotice] = useState(null);
@@ -1017,6 +1035,53 @@ window.__ModuleLoader__.load({
               groupSection('other', '其它', null, other, 'type 未识别'),
             ];
 
+      /* -------------------------------------------------- 全局规范（工作区外）
+         这份是 **DSH 自己**注入的用户级指令文件（`$DSH_HOME/AGENTS.md`），每个工作区都生效 ——
+         它不是本插件注入的，但"已经在生效的东西"不该在界面上完全看不见，否则用户会以为
+         全局规范没起作用。它放在「已在用」里最前面（和常驻条目是同一类东西：**每轮都会进上下文**），
+         但默认**折叠**：标题上给路径与大小就够，不把整篇糊在脸上。 */
+      const glob = state.global && typeof state.global === 'object' ? state.global : null;
+      const globalBlock = glob
+        ? section(
+            {
+              key: 'stage:global',
+              title: '全局规范',
+              slug: null,
+              count: glob.exists ? 1 : 0,
+              hint: glob.exists
+                ? `${glob.displayPath} · ${glob.bytes} 字节 · 每个工作区都生效（DSH 注入，不是本插件）`
+                : `${glob.displayPath} 还不存在`,
+              open: isOpen('stage:global'),
+              onToggle: () => toggleSection('stage:global'),
+            },
+            [
+              h(
+                'div',
+                { className: 'dsh-memory-delta-dim', key: 'why' },
+                '这份文件由 DSH 自带的指令管道注入 —— 不管在哪个工作区、开哪个新会话，它都在上下文里。本插件的记忆库只管当前工作区（`<工作区>/memory`）。',
+              ),
+              glob.exists && Array.isArray(glob.preview) && glob.preview.length
+                ? h(
+                    'pre',
+                    { className: 'dsh-memory-delta-preview', key: 'preview' },
+                    `${glob.preview.join('\n')}\n${glob.truncated ? `…（共 ${glob.lines} 行，面板只显示前 ${glob.preview.length} 行）` : ''}`,
+                  )
+                : h(
+                    'div',
+                    { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
+                    glob.exists ? '文件是空的' : '还没有这份文件 —— 建了它，每个工作区的新会话都会自动带上',
+                  ),
+              glob.source
+                ? h(
+                    'div',
+                    { className: 'dsh-memory-delta-dim', key: 'source' },
+                    `本库源文件 ${glob.source.name}（${glob.source.bytes} 字节）—— 改完它要同步到上面那份才生效。`,
+                  )
+                : null,
+            ],
+          )
+        : null;
+
       const standing = entries.length
         ? section(
             {
@@ -1028,7 +1093,7 @@ window.__ModuleLoader__.load({
               open: isOpen('stage:standing'),
               onToggle: () => toggleSection('stage:standing'),
             },
-            standingBody,
+            [globalBlock].concat(standingBody),
           )
         : section(
             {
@@ -1062,7 +1127,8 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'dsh-memory-delta-dim', key: 'hint' },
-            '这些都是模型自己写的候选（它只能写这里）。点「提升到 facts/ decisions/」确认后才会进「已在用」，才会每轮带给模型。',          ),
+            '这些都是模型自己写的候选（它只能写这里）。点「提升到 facts/ decisions/」确认后才会进「已在用」，才会每轮带给模型。',
+          ),
           inbox.length === 0
             ? h(
                 'div',
@@ -1154,7 +1220,7 @@ window.__ModuleLoader__.load({
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
         // 有搜索词时**只显示结果**（否则一屏里两套列表，谁也看不清）
-        // 分组顺序 = 流程顺序：待你确认 → 已在用 → 已归档（待复核是跨阶段的提醒，放最前面）
+        // 分组顺序 = 流程顺序：待你确认 → 已在用（含全局规范）→ 已归档（待复核是跨阶段提醒，放最前）
         searching_ ? searchBlock : [dueBlock, inboxBlock, standing, archiveBlock],
       );
     }

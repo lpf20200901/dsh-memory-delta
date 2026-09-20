@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the M5 improvements below are covered by 695 assertions
+> verified inside a real DSH session, and the M5 improvements below are covered by 721 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 
 ## Why
@@ -211,7 +211,7 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 695 assertions, zero dependencies
+npm test        # 721 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -221,8 +221,8 @@ npm test        # 695 assertions, zero dependencies
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 181 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks) |
-| `test/client-tests.mjs` | 117 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, entry click → `openFile`, promote/tidy, failure states) |
+| `test/plugin-tests.mjs` | 190 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks) |
+| `test/client-tests.mjs` | 134 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, entry click → `openFile`, promote/tidy, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable

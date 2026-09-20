@@ -23,6 +23,7 @@
  * 而且天然绕开"GET 被缓存 / 被预取"的问题。
  */
 
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -49,6 +50,9 @@ export const PANEL_ENTRY_LIMIT = 200;
 
 /** 收件箱候选在状态里最多带几条（只带首行，足够"提示还有这些"。 */
 export const PANEL_INBOX_LIMIT = 50;
+
+/** 全局规范在面板里只带前多少行 —— 它是"看一眼"用的，整篇塞进 state 既没必要也白占带宽。 */
+export const GLOBAL_PREVIEW_LINES = 40;
 
 /* ------------------------------------------------------------ 小工具 */
 
@@ -118,6 +122,58 @@ export function resolvePanelRoot({ configRoot, workspace } = {}) {
   return { root: path.join(ws, 'memory'), workspace: ws };
 }
 
+/* ------------------------------------------------------ 全局规范（工作区外） */
+
+/**
+ * 用户级指令文件 —— **每个工作区、每次新会话都会被 DSH 注入**的那一份。
+ *
+ * 注意：这份**不是本插件注入的**，是 DSH 自带的 `dsh-agent-instructions`：
+ * 它读 `$DSH_HOME/AGENTS.md`（用户全局）+ `<项目根>/AGENTS.md`（项目）。面板把它显示出来，
+ * 只是因为"已经在生效的东西"不该在界面上完全看不见 —— 用户会以为全局规范没生效。
+ *
+ * ⚠️ 只显示**展示形式**的路径（`~/.dsh/AGENTS.md`），不显示绝对路径：绝对路径里带用户名，
+ * 而这个面板会被截图放进公开仓库（截图脚本只裁了「库：」那一行）。
+ */
+export function globalInstructionOf(opts = {}) {
+  const home = opts.dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  const file = path.join(home, 'AGENTS.md');
+  const out = { file, displayPath: '~/.dsh/AGENTS.md', exists: false, bytes: 0, lines: 0, mtime: null, preview: [] };
+  try {
+    if (!fs.existsSync(file)) return out;
+    const text = fs.readFileSync(file, 'utf8');
+    const all = text.split(/\r?\n/);
+    out.exists = true;
+    out.bytes = Buffer.byteLength(text, 'utf8');
+    out.lines = all.length;
+    out.mtime = fs.statSync(file).mtime.toISOString();
+    // 预览只带前 N 行：面板是"看一眼"的，整篇塞进 state 既没必要也白占带宽
+    out.preview = all.slice(0, opts.previewLines ?? GLOBAL_PREVIEW_LINES);
+    out.truncated = all.length > out.preview.length;
+    return out;
+  } catch {
+    // 读不了不是"面板打不开"的理由（权限/编码问题都退化成"看不见内容"）
+    return out;
+  }
+}
+
+/**
+ * 本库里的全局规范**源文件**（`<库根>/global-AGENTS.md`）。
+ *
+ * 这是我们这套工作流自己的约定：源文件在库里（可 review / 可 diff），同步一份到
+ * `$DSH_HOME/AGENTS.md` 才真正生效。面板把两者并排显示，就是为了让"改了源文件但忘了同步"
+ * 这件事看得见。
+ */
+export function globalSourceOf(L) {
+  const file = path.join(L.root, 'global-AGENTS.md');
+  try {
+    if (!fs.existsSync(file)) return null;
+    const text = fs.readFileSync(file, 'utf8');
+    return { name: 'global-AGENTS.md', bytes: Buffer.byteLength(text, 'utf8'), mtime: fs.statSync(file).mtime.toISOString() };
+  } catch {
+    return null;
+  }
+}
+
 /* ------------------------------------------------------------ 状态拼装 */
 
 /** 空状态：结构完整、数组为空 —— 客户端不需要为"还没有记忆库"写第二条渲染分支。 */
@@ -133,6 +189,7 @@ function emptyState(root, scope, budget, workspace = null) {
     entries: [],
     due: [],
     inbox: [],
+    global: null,
     counts: { active: 0, facts: 0, decisions: 0, inbox: 0, archive: 0, due: 0 },
   };
 }
@@ -210,6 +267,11 @@ export function buildMemoryState(L, opts = {}) {
     inbox: inboxEntries.slice(0, inboxLimit).map((e) =>
       defined({ id: e.id, type: e.data.type, line: firstLine(e.body), date: e.data.date, file: e.file }),
     ),
+    // 全局规范（工作区外、DSH 自己注入的那份）+ 本库里的源文件 —— 面板要能看见"已经在生效"的东西
+    global: defined({
+      ...globalInstructionOf({ dshHome: opts.dshHome, previewLines: opts.globalPreviewLines }),
+      source: globalSourceOf(L) ?? undefined,
+    }),
     counts,
   };
 }
@@ -261,7 +323,12 @@ export function memoryStateOf(input = {}) {
     // 记忆库还没建（全新工作区）是**正常状态**，不是错误：返回结构化的空状态。
     // 仍然带 `ok: true` —— spec 明确要求"workspace 缺失或目录不存在 → ok:true + 空数组"，
     // 客户端因此只需要一条"没有记忆"的渲染分支，不用去分辨"空"和"坏"。
-    return { ok: true, ...emptyState(root ?? '', scope, budget, workspace) };
+    return {
+      ok: true,
+      ...emptyState(root ?? '', scope, budget, workspace),
+      // 全局规范是**工作区外**的一份文件，跟记忆库存不存在无关 —— 空状态也要带上
+      global: globalInstructionOf({ dshHome: input.dshHome, previewLines: input.globalPreviewLines }),
+    };
   }
 
   try {
@@ -272,6 +339,8 @@ export function memoryStateOf(input = {}) {
       dueWithin: input.dueWithin,
       entryLimit: input.entryLimit,
       inboxLimit: input.inboxLimit,
+      dshHome: input.dshHome,
+      globalPreviewLines: input.globalPreviewLines,
     });
     return { ok: true, ...state };
   } catch (error) {

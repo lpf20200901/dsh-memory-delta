@@ -738,6 +738,67 @@ section('组件：搜索');
   globalThis.fetch = originalFetch;
 }
 
+/* --------------------- 组件：全局规范（工作区外，DSH 自己注入的那份） */
+
+section('组件：全局规范');
+{
+  const originalFetch = globalThis.fetch;
+  const withGlobal = {
+    ...SAMPLE,
+    global: {
+      file: 'C:\\Users\\someone\\AppData\\Roaming\\dsh-desktop\\harness\\AGENTS.md',
+      displayPath: '~/.dsh/AGENTS.md',
+      exists: true,
+      bytes: 4173,
+      lines: 120,
+      mtime: '2026-09-20T05:00:00.000Z',
+      preview: ['# 全局记忆', '', '- 中文交流，直接给结论'],
+      truncated: true,
+      source: { name: 'global-AGENTS.md', bytes: 4173, mtime: '2026-09-20T04:00:00.000Z' },
+    },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withGlobal) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('「已在用」里有「全局规范」一节', headers.includes('全局规范'), headers);
+  check('说明它是"每个工作区都生效"（DSH 注入，不是本插件）', headers.includes('每个工作区都生效') && headers.includes('不是本插件'), headers);
+  check('标题上给出文件大小与展示路径（不显示绝对路径）', headers.includes('~/.dsh/AGENTS.md') && headers.includes('4173 字节'), headers);
+  check('不把绝对路径（带用户名）带到界面上', !allText(mounted.tree()).includes('someone'), allText(mounted.tree()).slice(0, 300));
+
+  // 默认折叠：只给标题，不把整篇糊在脸上（也避免截图泄露里面的个人信息）
+  const globalToggle = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) => collectStrings(n.kids, []).join('').includes('全局规范'));
+  check('全局规范默认折叠（箭头不是 is-open）', !findByClass(globalToggle, 'dsh-memory-delta-caret').props.className.includes('is-open'), String(globalToggle.props['aria-expanded']));
+  check('折叠时不渲染预览内容', !allText(mounted.tree()).includes('中文交流，直接给结论'));
+
+  globalToggle.props.onClick({});
+  const expanded = allText(mounted.tree());
+  check('展开后显示预览', expanded.includes('中文交流，直接给结论'), expanded.slice(0, 400));
+  check('展开后说明只是前几行', expanded.includes('共 120 行'), expanded.slice(0, 500));
+  check('展开后说明本库有源文件、改完要同步', expanded.includes('global-AGENTS.md') && expanded.includes('同步'), expanded.slice(0, 500));
+  check('说明这份是 DSH 的管道注入、本插件只管当前工作区', expanded.includes('DSH 自带') || expanded.includes('DSH 自带的指令管道'), expanded.slice(0, 500));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：没有全局文件时也要说清状态 */
+
+section('组件：全局规范不存在');
+{
+  const originalFetch = globalThis.fetch;
+  const noGlobal = { ...SAMPLE, global: { displayPath: '~/.dsh/AGENTS.md', exists: false, bytes: 0, lines: 0, mtime: null, preview: [] } };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(noGlobal) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('文件不存在时给出提示而不是空白', headers.includes('全局规范') && headers.includes('还不存在'), headers);
+  const toggle = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) => collectStrings(n.kids, []).join('').includes('全局规范'));
+  toggle.props.onClick({});
+  check('展开后说清"建了它就会生效"', allText(mounted.tree()).includes('还没有这份文件'), allText(mounted.tree()).slice(0, 400));
+  globalThis.fetch = originalFetch;
+}
+
 /* --------------------- 组件：搜索失败要回显宿主的原因 */
 
 section('组件：搜索失败');

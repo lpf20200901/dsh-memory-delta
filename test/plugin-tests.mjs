@@ -666,6 +666,55 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ROUTE_PATH && noEffectRoutes.length === 1, String(returned?.path));
 }
 
+/* ------------------------------- 「全局规范」（工作区外、DSH 注入的那份） */
+
+section('「全局规范」：显示 DSH 的用户级指令文件（不是本插件注入的）');
+{
+  // 造一个假的 DSH_HOME：里面放一份 AGENTS.md
+  const fakeHome = path.join(SANDBOX, 'dshhome');
+  fs.mkdirSync(fakeHome, { recursive: true });
+  const lines = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 行：全局规范内容`);
+  fs.writeFileSync(path.join(fakeHome, 'AGENTS.md'), `# 全局记忆\n\n${lines.join('\n')}\n`, 'utf8');
+
+  const state = memoryStateOf({ configRoot: ROOT, dshHome: fakeHome });
+  check('状态里带 global 段', state.global && typeof state.global === 'object', JSON.stringify(state.global).slice(0, 120));
+  check(
+    'global.exists = true 且带字节/行数/修改时间',
+    state.global.exists === true && state.global.bytes > 0 && state.global.lines > 0 && typeof state.global.mtime === 'string',
+    JSON.stringify(state.global).slice(0, 160),
+  );
+  check(
+    '只给**展示形式**的路径（绝对路径带用户名，截图会泄露）',
+    state.global.displayPath === '~/.dsh/AGENTS.md' && !String(state.global.displayPath).includes('\\'),
+    String(state.global.displayPath),
+  );
+  check('预览确实是文件内容', Array.isArray(state.global.preview) && state.global.preview.some((l) => l.includes('全局记忆')), JSON.stringify(state.global.preview.slice(0, 2)));
+  check(
+    '预览有行数上限（不把整篇塞进 state）',
+    state.global.preview.length <= 40 && state.global.truncated === true,
+    `${state.global.preview.length} / truncated=${state.global.truncated}`,
+  );
+  check('响应仍然是无损 JSON', losslessError(state) === null, losslessError(state) ?? '');
+
+  // 文件不存在时也要有结构（面板显示"还没有这份文件"）
+  const none = memoryStateOf({ configRoot: ROOT, dshHome: path.join(SANDBOX, 'no-dshhome') });
+  check('没有这份文件时 exists=false 且不抛错', none.global.exists === false && none.global.preview.length === 0, JSON.stringify(none.global).slice(0, 120));
+
+  // 记忆库不存在（全新工作区）时也要带上 global —— 它跟库在不在没关系
+  const emptyWs = memoryStateOf({ workspace: path.join(SANDBOX, 'no-such-ws'), dshHome: fakeHome });
+  check('记忆库不存在时也带 global', emptyWs.global && emptyWs.global.exists === true, JSON.stringify(emptyWs.global).slice(0, 120));
+
+  // 本库里的源文件（改完要同步过去的那份）
+  fs.writeFileSync(path.join(ROOT, 'global-AGENTS.md'), '# 全局记忆（源）\n', 'utf8');
+  const withSource = memoryStateOf({ configRoot: ROOT, dshHome: fakeHome });
+  check(
+    '显示本库源文件 global-AGENTS.md',
+    withSource.global.source?.name === 'global-AGENTS.md' && withSource.global.source.bytes > 0,
+    JSON.stringify(withSource.global.source),
+  );
+  fs.unlinkSync(path.join(ROOT, 'global-AGENTS.md'));
+}
+
 /* ------------------------------------- 「搜索」路由（与 CLI / 工具同一份实现） */
 
 section('「搜索」路由');
