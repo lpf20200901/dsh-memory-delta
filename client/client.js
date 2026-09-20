@@ -894,6 +894,17 @@ window.__ModuleLoader__.load({
                 `${counts.inbox} 条`,
               )
             : null,
+          // 归档层平时不出现在面板里（条目不算"常驻"），但**它存在**这件事得让用户看见 ——
+          // 否则"我记过、后来被取代了"的东西像是凭空消失了
+          counts.archive
+            ? h(
+                'span',
+                { key: 'a', className: 'dsh-memory-delta-muted' },
+                '归档',
+                h('span', { className: 'dsh-memory-delta-slug' }, '（archive）'),
+                `${counts.archive} 条`,
+              )
+            : null,
         ].filter(Boolean),
       );
 
@@ -942,7 +953,7 @@ window.__ModuleLoader__.load({
       const renderItem = (e, extra) =>
         item(e, Object.assign({ onOpen: openMemoryFile, showType: false, actions: [tidyButton(e)], extraRow: renameRow(e) }, extra || {}));
 
-      const groupSection = (key, title, slug, list) =>
+      const groupSection = (key, title, slug, list, hint) =>
         list.length
           ? section(
               {
@@ -950,6 +961,9 @@ window.__ModuleLoader__.load({
                 title,
                 slug,
                 count: list.length,
+                // 分组名只说明"是什么"，hint 说明"在流程哪一步、管不管注入" ——
+                // 光看 `facts` 这个名字判断不出它在流程里的位置（真实反馈）。
+                hint,
                 open: isOpen(`type:${key}`),
                 onToggle: () => toggleSection(`type:${key}`),
               },
@@ -1000,10 +1014,10 @@ window.__ModuleLoader__.load({
                   ),
                 )
               : [
-                  groupSection('facts', '事实', 'facts', facts),
-                  groupSection('decisions', '决策', 'decisions', decisions),
+                  groupSection('facts', '事实', 'facts', facts, '已确认的世界结论 · 参与注入'),
+                  groupSection('decisions', '决策', 'decisions', decisions, '已确认的约定 · 参与注入'),
                   // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
-                  groupSection('other', '其它', null, other),
+                  groupSection('other', '其它', null, other, 'type 未识别'),
                 ],
           )
         : h('div', { className: 'dsh-memory-delta-section' }, h('div', { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' }, '还没有常驻记忆'));
@@ -1015,6 +1029,7 @@ window.__ModuleLoader__.load({
           title: '收件箱候选',
           slug: 'inbox',
           count: typeof counts.inbox === 'number' ? counts.inbox : inbox.length,
+          hint: '待确认 · 不注入',
           open: isOpen('inbox'),
           onToggle: () => toggleSection('inbox'),
         },

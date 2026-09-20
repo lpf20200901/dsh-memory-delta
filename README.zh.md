@@ -39,6 +39,21 @@ AI 编码助手有两个反复出现的毛病：
              journal.md  流水（永不注入）
 ```
 
+**目录名要分两个轴看**（这一点以前没写清，容易被 `facts` 这个词误导）：
+
+| 目录 | 在流程哪一步 | 记什么 | 谁能写 | 参与注入 |
+| --- | --- | --- | --- | --- |
+| `inbox/` | **候选**（还没确认） | 模型觉得值得长期留住的结论 | **只有模型**（`memory_write`） | ❌ 从不 |
+| `facts/` | **常驻** | 关于**世界**的结论 —— 能被现实证伪（环境限制、工具行为、踩过的坑） | **只有人**（promote） | ✅ 每轮 |
+| `decisions/` | **常驻** | **我们**定的约定与取舍 —— 只有我们改主意才会失效 | **只有人**（promote） | ✅ 每轮 |
+| `archive/` | **归档** | 被取代（supersede）或标过期的旧结论 | 取代时自动搬 | ❌ 永不（但仍搜得到） |
+
+主流程：**模型只能写 `inbox/` → 人确认后 `promote` 进 `facts/` 或 `decisions/` → 被取代的进 `archive/`**。
+拿不准放哪边就问："**明天世界变了，这条会不会失效？**" 会 → `facts/`；只有我们改主意才失效 → `decisions/`。
+
+> 这四个目录名（以及 `journal.md` / `index.md` / `memory.config.json`）的完整说明，`mem init`
+> 会写进**库自己**的 `README.md` —— 打开记忆库目录就能看到，不用回来翻项目文档。
+
 七条纪律：
 
 - **推送的东西必须极小**：注入层里的内容每次会话都要花 token。所以流水、设计文档都不进注入层。
@@ -179,18 +194,18 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 681 个断言，零依赖
+npm test        # 695 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 137 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名） |
+| `test/run-tests.mjs` | 147 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名） |
 | `test/planner-tests.mjs` | 43 | 差分算法（纯逻辑） |
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
 | `test/plugin-tests.mjs` | 181 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
-| `test/client-tests.mjs` | 113 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
+| `test/client-tests.mjs` | 117 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。

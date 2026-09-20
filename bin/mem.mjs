@@ -69,11 +69,70 @@ function loadConfig(root) {
   }
 }
 
+/**
+ * 记忆库自述（写在库根的 `README.md`）。
+ *
+ * 为什么要让**库自己带一份说明书**：目录名本来只表达"内容是什么类型"（facts / decisions），
+ * 而同一条目在流程里的位置（候选 → 常驻 → 归档）是靠目录混着表达的 —— 单看 `facts/`
+ * 这个名字，人既看不出它属于流程哪一步，也看不出"为什么它和 decisions 分家"。
+ * 所以把两个轴、判据、命令都写在库里，谁打开这个目录都能立刻看懂。
+ *
+ * **只有库不存在这个文件时才写**：用户改过就永远不覆盖（它首先是给用户看的）。
+ */
+const STORAGE_README = `# 记忆库（dsh-memory-delta）
+
+模型每轮会话会自动收到这里**已确认的结论**（\`facts/\` + \`decisions/\` 里的 active 条目）。
+
+一句话记住流程：**模型只能写 \`inbox/\` → 人确认后进 \`facts/\` 或 \`decisions/\` → 被取代的进 \`archive/\`**。
+
+## 四个目录：先看"在流程哪一步"，再看"内容是什么性质"
+
+| 目录 | 流程位置 | 记什么 | 谁能写 | 参与注入 |
+| --- | --- | --- | --- | --- |
+| \`inbox/\` | **候选**（还没确认） | 模型觉得值得长期留住的结论 | **只有模型**（\`memory_write\`） | ❌ 从不 |
+| \`facts/\` | **常驻** | 关于**世界**的结论 —— 能被现实证伪（环境限制、工具行为、踩过的坑） | **只有人**（promote） | ✅ 每轮 |
+| \`decisions/\` | **常驻** | **我们**定的约定与取舍 —— 只有我们改主意才会失效 | **只有人**（promote） | ✅ 每轮 |
+| \`archive/\` | **归档** | 被取代（supersede）或标过期的旧结论 | 取代时自动搬 | ❌ 永不（但仍搜得到） |
+
+拿不准一条该放哪边，问一句：**"明天世界变了，这条会不会失效？"**
+- 会 → \`facts/\`（比如"沙箱禁止命名管道"—— 换个环境就可能不成立）
+- 只有我们改主意才失效 → \`decisions/\`（比如"事实层只能由人确认后写入"）
+- 还是拿不准 → 放 \`decisions/\`：对现实下断言，错了的代价更大。
+
+## 根目录的三个文件
+
+| 文件 | 是什么 | 参与注入 |
+| --- | --- | --- |
+| \`journal.md\` | 流水：过程、调查、一次性结论 —— 可以随便长 | ❌（但搜得到） |
+| \`index.md\` | 全部条目的**派生视图**（\`mem index\` 生成，别手改） | ❌（默认也不参与检索，否则每条记忆都会重复命中一次） |
+| \`memory.config.json\` | 库配置：默认 scope、注入字节预算 | — |
+
+## 常用命令
+
+\`\`\`bash
+mem list / show <id> / due / recall "<词>"   # 看、查、搜索
+mem promote <id> [--supersedes <旧id>]       # 人确认：inbox → facts|decisions
+mem set <id> --key k --verify-when "3个月后" # 补语义键 / 约定复核时间（到期会在会话里提醒）
+mem rename <旧id> <新id>                     # 安全改名（id + 文件名 + 引用一起改）
+mem validate                                 # 自检：格式 / id / 双向链接 / 同 key 冲突 / 注入预算
+\`\`\`
+
+> 本文件由 \`mem init\` 生成，**可以随便改**；\`mem\` 不会覆盖它。
+`;
+
+/** 把自述写进库根 —— 已存在就一个字都不动。 */
+function writeStorageReadme(L) {
+  const file = path.join(L.root, 'README.md');
+  if (fs.existsSync(file)) return false;
+  fs.writeFileSync(file, STORAGE_README, 'utf8');
+  return true;
+}
+
 function ensureLayout(root, { create = true } = {}) {
   if (create) {
     for (const d of ['facts', 'decisions', 'inbox', 'archive']) fs.mkdirSync(path.join(root, d), { recursive: true });
   }
-  return {
+  const L = {
     root,
     facts: path.join(root, 'facts'),
     decisions: path.join(root, 'decisions'),
@@ -83,6 +142,9 @@ function ensureLayout(root, { create = true } = {}) {
     journal: path.join(root, 'journal.md'),
     config: path.join(root, CONFIG_FILE),
   };
+  // 只在**真要写**的路径上补自述（读路径 create:false，绝不产生副作用）
+  if (create) writeStorageReadme(L);
+  return L;
 }
 
 /* -------------------------------------------------- frontmatter 解析/序列化 */
@@ -227,7 +289,8 @@ function cmdInit(opts) {
     );
   }
   ok(`记忆库就绪：${root}`);
-  console.log(dim('  facts/ decisions/ inbox/ archive/ journal.md index.md'));
+  console.log(dim('  inbox/（候选）→ facts/ decisions/（常驻，参与注入）→ archive/（归档）'));
+  console.log(dim('  journal.md index.md README.md（每个目录干什么、流程怎么走，见 README.md）'));
 }
 
 /**

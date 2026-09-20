@@ -416,6 +416,14 @@ section('组件：正常数据');
     headers,
   );
   check('收件箱分目标出 inbox 目录', headers.includes('收件箱候选（inbox）'), headers);
+  // 目录名只说明"是什么"，还要说明"在流程哪一步、管不管注入"
+  //（真实反馈：光看 `facts` 这个名字判断不出它在流程里的位置）
+  check(
+    '分组头写清流程位置与是否注入',
+    headers.includes('已确认的世界结论 · 参与注入') && headers.includes('已确认的约定 · 参与注入'),
+    headers,
+  );
+  check('收件箱分组头标明"待确认 · 不注入"', headers.includes('待确认 · 不注入'), headers);
   check('收件箱说明里点名 inbox/ → facts/decisions 的去向', text.includes('inbox/ 目录') && text.includes('facts/ 或 decisions/'), text.slice(0, 500));
   check('带 key 的条目显示 key（等宽、不带方括号）', text.includes('node-rm-nonascii'), text.slice(0, 400));
   check('收件箱候选有数量与提示', text.includes('收件箱候选') && text.includes('确认后才成为常驻记忆'), text.slice(0, 500));
@@ -761,6 +769,27 @@ section('组件：超预算');
     text.includes('没有到复核期的记忆') && text.includes('verify_when 到期后才会出现'),
     text.slice(0, 400),
   );
+  globalThis.fetch = originalFetch;
+}
+
+/* ------------------------- 组件：归档层要露个面（不然像凭空消失） */
+
+section('组件：状态行标出归档条数');
+{
+  const originalFetch = globalThis.fetch;
+  const withArchive = { ...SAMPLE, counts: { ...SAMPLE.counts, archive: 4 } };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withArchive) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  const text = allText(mounted.tree());
+  check('有归档时状态行标出「归档（archive）N 条」', text.includes('归档') && text.includes('（archive）') && text.includes('4 条'), text.slice(0, 240));
+  globalThis.fetch = originalFetch;
+
+  // 没有归档时不显示（避免噪音）
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const clean = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  check('没有归档时不显示这一项', !allText(clean.tree()).includes('（archive）'), allText(clean.tree()).slice(0, 240));
   globalThis.fetch = originalFetch;
 }
 

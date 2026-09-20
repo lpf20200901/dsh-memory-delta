@@ -93,6 +93,7 @@ section('基础流程（ASCII 路径）');
   check('init 建出四个目录', ['facts', 'decisions', 'inbox', 'archive'].every((d) => fs.existsSync(path.join(root, d))));
   check('init 生成 config 与 journal', fs.existsSync(path.join(root, 'memory.config.json')) && fs.existsSync(path.join(root, 'journal.md')));
 
+
   r = run(['new', '--root', root, '--type', 'fact', '--conclusion', '结论一', '--reason', '理由一', '--tags', 'a,b', '--source', 's1']);
   check('new 成功', r.code === 0, r.err);
   check('new 落在 inbox', md(path.join(root, 'inbox')).length === 1);
@@ -556,6 +557,34 @@ section('M6：mem rename —— id / 文件名 / 引用一起改');
   check('归档条目的 superseded_by 也同步了', archived.out.includes('new-one'), flat(archived.out));
   const v2 = run(['validate', '--root', root]);
   check('改名 + 引用同步之后 validate 依然通过', v2.code === 0, flat(v2.out));
+}
+
+/* ------------------------------- 库自带说明书（库根 README.md） */
+
+section('库自带说明书：目录名说不清"在流程哪一步"，说明书说清');
+{
+  const root = freshRoot('readme');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  const readme = path.join(root, 'README.md');
+  check('init 在库根写了 README.md', fs.existsSync(readme), readme);
+
+  const text = fs.existsSync(readme) ? fs.readFileSync(readme, 'utf8') : '';
+  check('四个目录都在说明书里', ['inbox/', 'facts/', 'decisions/', 'archive/'].every((d) => text.includes(d)), text.slice(0, 120));
+  check('讲清主流程（模型只能写 inbox → 人 promote → 归档）', /模型只能写/.test(text) && /promote/.test(text) && /归档/.test(text), text.slice(0, 200));
+  check('给出"放 facts 还是 decisions"的判据', /会不会失效/.test(text), text.slice(0, 200));
+  check('标出哪些参与注入、哪些不参与', /参与注入/.test(text) && /从不/.test(text), text.slice(0, 200));
+  check('提到 journal / index / config 三个根文件', /journal\.md/.test(text) && /index\.md/.test(text) && /memory\.config\.json/.test(text));
+  check('附上常用命令', /mem promote/.test(text) && /mem validate/.test(text));
+
+  // 用户改过就永远不覆盖（它首先是给用户看的）
+  fs.writeFileSync(readme, '# 我自己改的\n', 'utf8');
+  run(['init', '--root', root]);
+  check('再跑 init 不覆盖用户改过的 README', fs.readFileSync(readme, 'utf8') === '# 我自己改的\n', fs.readFileSync(readme, 'utf8').slice(0, 40));
+  run(['new', '--root', root, '--type', 'fact', '--id', 'readme-probe', '--conclusion', 'x', '--source', 's']);
+  run(['promote', '--root', root, 'readme-probe']);
+  check('后续 new / promote 也不动 README', fs.readFileSync(readme, 'utf8') === '# 我自己改的\n', fs.readFileSync(readme, 'utf8').slice(0, 40));
+  const v = run(['validate', '--root', root]);
+  check('库里有 README.md 不影响 validate', v.code === 0, flat(v.out));
 }
 
 /* ------------------------------------------------------------- 汇总 */
