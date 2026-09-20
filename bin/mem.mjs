@@ -178,6 +178,21 @@ function requireOne(L, id) {
   return hits[0];
 }
 
+/**
+ * `requireOne` 的**抛异常**版本。
+ *
+ * 写操作现在有两个调用方：CLI（`bin/mem.mjs` 自己被 node 执行）和
+ * **DSH 宿主的动作路由**（`src/panel.mjs` 的面板按钮）。后者跑在宿主进程里，
+ * 一旦走到 `fail()` 就会 `process.exit(1)` —— 用户点一下按钮，整个 DSH 就没了。
+ * 所以共用逻辑必须是"能抛错"的，由各自的外层决定是打印还是回 JSON。
+ */
+function requireOneOrThrow(L, id) {
+  const hits = findById(L, id);
+  if (hits.length === 0) throw new Error(`找不到条目：${id}`);
+  if (hits.length > 1) throw new Error(`id 重复（${hits.length} 处）：${id}`);
+  return hits[0];
+}
+
 /** 把结论压成 id 片段。默认只取 20 字符 —— 派生 id 要短，否则中文结论会变成很长的一串。 */
 function slugify(s, max = 20) {
   const base = String(s || '')
@@ -392,17 +407,26 @@ function moveEntry(from, to, content) {
   removeFile(from);
 }
 
-function cmdPromote(opts) {
-  const root = resolveRoot(opts.root);
-  const L = ensureLayout(root, { create: false });
-  const id = opts._[0] || fail('用法：mem promote <id> [--supersedes <旧id>]');
-  const e = requireOne(L, id);
-  if (e.where !== 'inbox') fail(`条目不在 inbox 里（当前在 ${e.where}/），无需提升`);
+/**
+ * 把 inbox 里的候选提升到事实层（`facts/` 或 `decisions/`，由条目的 `type` 决定）。
+ *
+ * **CLI（`mem promote`）与侧边栏面板的按钮共用这一份实现** —— 面板里那个"提升"按钮
+ * 如果自己再写一遍"一个 key 一个真相"的闸门，迟早会和 CLI 分叉。
+ *
+ * 与 CLI 版本的唯一区别：**抛异常**而不是 `process.exit`（见 `requireOneOrThrow`）。
+ *
+ * @param {object} L `ensureLayout` 的结果
+ * @param {string} id inbox 条目的 id
+ * @param {{supersedes?: string|string[]}} [opts] 显式指定被取代的旧条目
+ * @returns {{id: string, target: string, superseded: string[]}}
+ */
+export function promoteEntry(L, id, opts = {}) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where !== 'inbox') throw new Error(`条目不在 inbox 里（当前在 ${e.where}/），无需提升`);
   const target = DIR_OF[e.data.type];
-  if (!target) fail(`未知 type：${e.data.type}`);
+  if (!target) throw new Error(`未知 type：${e.data.type}（只支持 ${TYPES.join(' / ')}）`);
 
-  const supersededIds = [];
-  const raw = opts.supersedes ? [].concat(opts.supersedes) : [];
+  const raw = [].concat(opts.supersedes ?? []).filter(Boolean);
 
   // 「一个 key 一个真相」—— 同一 scope+key 上已有 active 条目时，必须显式说明谁取代谁。
   // 这是把"记忆腐化"挡在常驻层之外的关键闸门：不显式取代，就别想把矛盾的东西推进事实层。
@@ -419,7 +443,7 @@ function cmdPromote(opts) {
         !covered.has(x.id),
     );
     if (clash.length) {
-      fail(
+      throw new Error(
         `同一个 key（${e.data.key}）上已经有 active 条目：${clash.map((x) => x.id).join(', ')}\n` +
           `  一个 key 只能有一个真相。显式取代：mem promote ${e.id} --supersedes ${clash[0].id}\n` +
           `  或者换一个 key —— 如果它们其实是两件事。`,
@@ -427,21 +451,105 @@ function cmdPromote(opts) {
     }
   }
 
+  const superseded = [];
   for (const oldId of raw) {
-    const old = requireOne(L, oldId);
-    if (old.id === e.id) fail('不能自己取代自己');
+    const old = requireOneOrThrow(L, oldId);
+    if (old.id === e.id) throw new Error('不能自己取代自己');
     old.data.status = 'superseded';
     old.data.superseded_by = e.id;
     const archived = path.join(L.archive, `${old.id}.md`);
     if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
     else moveEntry(old.file, archived, serializeEntry(old));
     e.data.supersedes = [...new Set([...(e.data.supersedes || []), old.id])];
-    supersededIds.push(old.id);
+    superseded.push(old.id);
   }
 
   moveEntry(e.file, path.join(L[target], `${e.id}.md`), serializeEntry(e));
-  ok(`已提升 ${c(1, e.id)} → ${target}/`);
-  if (supersededIds.length) ok(`并标记 ${supersededIds.join(', ')} 为 superseded 并归档`);
+  return { id: e.id, target, superseded };
+}
+
+/**
+ * **安全改名**：`id`（frontmatter）与文件名一起改，并同步别处对它的引用。
+ *
+ * 为什么需要它：条目的 `id` 写在 frontmatter 里，**文件名必须与之一致**
+ * （`validate` 强制）。没给 `key` 的条目会拿到 `2026-09-17-<截断的结论>.md` 这种
+ * 自动生成的长名 —— 想整理就得**同时**改三处：frontmatter 的 id、文件名、
+ * 以及其它条目里指向它的 `supersedes` / `superseded_by`。
+ * 手改或用文件树改名只会造出 `id 与文件名不一致`。
+ *
+ * @returns {{from: string, to: string, file: string, refs: string[]}} refs = 被顺带改过的条目 id
+ */
+export function renameEntry(L, oldId, newId) {
+  const to = String(newId ?? '').trim();
+  if (!to) throw new Error('新 id 不能为空');
+  if (!/^[A-Za-z0-9\u4e00-\u9fa5._-]+$/.test(to)) throw new Error(`新 id 含非法字符：${to}（只允许字母/数字/._-/中文）`);
+  if (to === oldId) throw new Error('新旧 id 一样，什么也没做');
+
+  const e = requireOneOrThrow(L, oldId);
+  const taken = findById(L, to).filter((x) => x.id !== oldId);
+  if (taken.length) throw new Error(`目标 id 已被占用：${to}（${taken[0].file}）`);
+
+  const dest = path.join(path.dirname(e.file), `${to}.md`);
+  if (path.resolve(dest) !== path.resolve(e.file) && fs.existsSync(dest)) {
+    throw new Error(`目标文件已存在：${dest}`);
+  }
+
+  const from = e.id;
+  e.data.id = to;
+  moveEntry(e.file, dest, serializeEntry(e));
+
+  // 引用同步：别的条目里 supersedes / superseded_by 指向旧 id 的，一起改掉
+  const refs = [];
+  for (const other of readAll(L)) {
+    if (other.error || other.id === from) continue;
+    let touched = false;
+    if (Array.isArray(other.data.supersedes) && other.data.supersedes.includes(from)) {
+      other.data.supersedes = [...new Set(other.data.supersedes.map((x) => (x === from ? to : x)))];
+      touched = true;
+    }
+    if (other.data.superseded_by === from) {
+      other.data.superseded_by = to;
+      touched = true;
+    }
+    if (touched) {
+      fs.writeFileSync(other.file, serializeEntry(other), 'utf8');
+      refs.push(other.id);
+    }
+  }
+
+  writeIndex(L);
+  return { from, to, file: dest, refs };
+}
+
+function cmdPromote(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const id = opts._[0] || fail('用法：mem promote <id> [--supersedes <旧id>]');
+  let result;
+  try {
+    result = promoteEntry(L, id, { supersedes: opts.supersedes });
+  } catch (error) {
+    // CLI 的契约是"出错打印一行并退出 1"；共用实现抛异常，这里翻译回来。
+    fail(error.message);
+  }
+  ok(`已提升 ${c(1, result.id)} → ${result.target}/`);
+  if (result.superseded.length) ok(`并标记 ${result.superseded.join(', ')} 为 superseded 并归档`);
+}
+
+/** `mem rename <旧id> <新id>` —— 见 `renameEntry` 的说明（这是"整理文件名"的正确姿势）。 */
+function cmdRename(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const [oldId, newId] = opts._;
+  if (!oldId || !newId) fail('用法：mem rename <旧id> <新id>');
+  let result;
+  try {
+    result = renameEntry(L, oldId, newId);
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`${c(1, result.from)} → ${c(1, result.to)}（${path.basename(result.file)}）`);
+  if (result.refs.length) ok(`顺带更新了引用：${result.refs.join(', ')}`);
 }
 
 function cmdSupersede(opts) {
@@ -990,6 +1098,7 @@ if (isMain) {
     case 'list': cmdList(opts); break;
     case 'show': cmdShow(opts); break;
     case 'promote': cmdPromote(opts); break;
+    case 'rename': cmdRename(opts); break;
     case 'supersede': cmdSupersede(opts); break;
     case 'set': cmdSet(opts); break;
     case 'validate': cmdValidate(opts); break;
@@ -1046,6 +1155,7 @@ function usage() {
   list [--status --type --scope --tag --where --all --json]
   show <id> [--json]
   promote <id> [--supersedes <旧id>]     inbox → facts/decisions
+  rename <旧id> <新id>                   安全改名（id + 文件名 + 引用一起改）
                           同 key 已有 active 时必须显式 --supersedes
   supersede <旧id> <新id>                标记取代 + 归档 + 双向链接
   set <id> [--key k] [--tags a,b] [--scope s] [--status …] [--conclusion "…"]

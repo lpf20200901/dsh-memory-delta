@@ -88,9 +88,13 @@ AI 编码助手有两个反复出现的毛病：
        - id: dsh-memory-delta
          name: dsh-memory-delta
          config:
-           root: ''          # 留空 = 会话工作目录下的 memory/
-           maxBytes: 3072    # baseline 注入的字节预算
+           root: ''             # 留空 = 会话工作目录下的 memory/
+           maxBytes: 3072       # baseline 注入的字节预算
            enabled: true
+           dueWithin: 0         # verify_when 提前几天提醒复核（0 = 只在已到期时）
+           panel: true          # 侧边栏「记忆」页签的两条数据/动作路由
+           allowWrite: true     # 允许面板按钮写记忆库（收件箱提升 / 整理文件名）
+           allowOpenFolder: true # 允许面板用系统文件管理器打开 facts/ decisions/ …
    ```
 
 3. 保存即可 —— patch 层有 `watchUserPatches`，**会热加载，不需要重启**。
@@ -109,7 +113,7 @@ AI 编码助手有两个反复出现的毛病：
 | 蒸馏提醒 | 会话跑过若干轮而记忆已是最新时，提醒模型把本次结论落到 inbox；每会话只提醒一次，且提醒消息**不带状态**，不污染差分基线 |
 | 到期复核提醒 | `verify_when` 不再是死字段：条目到了当初约定的复核期，会话里会**提醒一次**"这条结论可能过时了，请复核"，并给出该用哪条命令取代/标过期。写成**人话**的值（`等换机器时`）永远不会触发它（否则每个会话都弹一次、怎么改都消不掉）；只在"本轮本来不注入任何记忆"时才提醒，同样**不带状态** |
 | 侧边栏「记忆」页签 | 装了 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 后，侧边栏多一个**记忆**页：可折叠分组（自绘箭头，一眼看出能展开）、常驻条目、到期待复核项、收件箱候选、当前注入体积。**点某条记忆 = 打开它那个 `.md`**（走 better-sidebar 的官方 `openFile`，在侧边栏编辑器里预览/编辑）；**点分组头右边的「打开目录」= 用系统文件管理器打开 `facts/`、`decisions/`、`inbox/`**。分组可按**类型**（事实/决策）或**标签**看（取每条第一个标签）。客户端半边是**手写的零构建浏览器 bundle**（`window.__ModuleLoader__.load({id, factory})` 包装，不引入任何打包器）；数据来自本插件自己的只读路由 `POST /dsh-memory-delta/state` —— 仅回环、JSON 进 JSON 出、只读记忆库，不碰别的文件。唯一会**动作**的路由是 `POST /dsh-memory-delta/reveal`：只接受白名单目录名（`root` / `facts` / `decisions` / `inbox` / `archive`），由宿主用系统文件管理器打开，可用配置 `allowOpenFolder: false` 关掉 |
-| 为什么不把"编辑/删除记忆"做进面板 | 侧边栏**本来就有**编辑器（点条目即打开）和文件树（重命名/删除带确认）。在面板里再造一套增删改 = 重复实现 + 长期维护负担，所以面板只做「入口」：打开文件、打开目录。⚠️ 但**不要**用文件树直接给记忆条目改名 —— `id` 写在 frontmatter 里且必须与文件名一致，`mem validate` 会报 `id 与文件名不一致` |
+| 为什么不把"编辑/删除记忆"做进面板 | 侧边栏**本来就有**编辑器（点条目即打开）和文件树（重命名/删除带确认）。在面板里再造一套完整增删改 = 重复实现 + 长期维护负担，所以面板只做**入口**加**两个真正需要判断的动作**：打开文件、打开目录、把收件箱候选**一键提升**（`promote`，人确认这一步终于有了界面）、以及**整理文件名**（`mem rename`：id + 文件名 + 引用一起改）。⚠️ **不要**用文件树直接给记忆条目改名 —— `id` 写在 frontmatter 里且必须与文件名一致，`mem validate` 会报 `id 与文件名不一致`；这正是不做自由改名、只做"安全改名"的原因 |
 
 为什么插件**不去 spawn CLI**：DSH 沙箱禁止命名管道，捕获子进程输出会 EPERM；而且没必要 ——
 插件直接 `import` 同一份 store 逻辑（`bin/mem.mjs` 只在被直接执行时才跑 CLI）。
@@ -140,6 +144,8 @@ mem promote win-update-cache
 mem promote win-update-cache-v2 --supersedes win-update-cache
 
 mem set <id> --key k --tags a,b --conclusion "…"   # 改已有条目（补 key / 改措辞 / 标 expired）
+mem rename <旧id> <新id>    # 安全改名：frontmatter 的 id、文件名、别处的 supersedes 引用一起改
+                           # （别用文件树手动改名 —— id 与文件名必须一致）
 mem list --status active --tag windows
 mem show <id>
 mem validate [--fix]       # 格式/id/双向链接/环/同 key 冲突/索引/注入预算
@@ -172,18 +178,18 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 596 个断言，零依赖
+npm test        # 652 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 109 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`） |
+| `test/run-tests.mjs` | 128 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步） |
 | `test/planner-tests.mjs` | 43 | 差分算法（纯逻辑） |
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 153 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + 打开目录的白名单/来源校验） |
-| `test/client-tests.mjs` | 84 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、点目录调 reveal、失败态） |
+| `test/plugin-tests.mjs` | 177 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
+| `test/client-tests.mjs` | 97 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、点目录调 reveal、提升/整理文件名、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。

@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **596 个断言全绿**（CLI 109 + planner 43 + search 51 + due 93 + hook 63 + plugin 153 + client 84），
+  - 测试 **652 个断言全绿**（CLI 128 + planner 43 + search 51 + due 93 + hook 63 + plugin 177 + client 97），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 
@@ -329,4 +329,18 @@ verify_when: Windows 大版本更新后重新评估
 组间按条数排序）+ **条目按日期倒序** + 把 `tags` / `date` / **文件名**显示出来。
 显示文件名是刻意的：它是"内容混乱"的根源（没给 `key` 的条目会拿到
 `2026-09-17-<截断的结论>.md` 这种自动名），**先在界面上暴露出来**，再让 `mem rename` 去修。
+
+**⑤ 面板的写动作必须复用 CLI 的实现，而不是"再写一遍"。**
+面板上加了两类按钮：收件箱**一键提升**（`promote`）和**整理文件名**（`rename`）。
+它们会真的改记忆库，所以：
+
+- `bin/mem.mjs` 里把逻辑抽成 `promoteEntry()` / `renameEntry()` 并导出，CLI（`cmdPromote` /
+  `cmdRename`）与宿主动作路由**共用同一份** —— 面板里再写一遍"一个 key 一个真相"的闸门，
+  迟早和 CLI 分叉，而分叉的后果是"模型看到的记忆"和"面板显示的真相"不一致。
+- 这两个函数**抛异常**，不调 `fail()`：`fail()` 会 `process.exit(1)`，而动作路由跑在
+  **宿主进程**里 —— 用户点一下按钮，整个 DSH 就没了。CLI 侧负责把异常翻译成打印 + exit 1，
+  路由侧翻译成 400 + 原因（界面把原因显示出来，"点了没反应"是最难查的体验）。
+- `renameEntry` 必须同时改三处：frontmatter 的 `id`、文件名、以及别的条目里指向它的
+  `supersedes` / `superseded_by`，最后重建 `index.md`。少改一处就是一条静默腐化的引用。
+- 路由只认白名单 op（`promote` / `rename`），**不做"通用改写"后门**；`allowWrite:false` 可整体关掉。
 

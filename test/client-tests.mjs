@@ -200,12 +200,19 @@ function mountPanel(props) {
   const exportsOf = factory(fakeRequire);
 
   let tree = null;
-  let depth = 0;
+  // ⚠️ 这里数的是**渲染嵌套深度**，不是"总渲染次数"：
+  // 一个用例里点十几次按钮本来就是正常的（每次 setState 都是一次重渲染），
+  // 而"渲染过程中又 setState"才会让深度无限增长 —— 那才是 hooks 死循环。
+  let renderDepth = 0;
   react.setStateAt = () => {
-    if (depth > 20) throw new Error('重渲染次数过多（hooks 里可能有死循环）');
-    depth += 1;
+    if (renderDepth > 20) throw new Error('重渲染嵌套过深（hooks 里可能有死循环）');
+    renderDepth += 1;
     react.cursor = 0;
-    tree = exportsOf.MemoryPanel(props);
+    try {
+      tree = exportsOf.MemoryPanel(props);
+    } finally {
+      renderDepth -= 1;
+    }
   };
   react.cursor = 0;
   tree = exportsOf.MemoryPanel(props);
@@ -542,6 +549,87 @@ section('组件：打开失败的原因要显示出来');
   await flush();
   const deniedText = allText(denied.tree());
   check('被拒绝时回显宿主的原因（而不是静默）', deniedText.includes('打开目录失败') && deniedText.includes('allowOpenFolder'), deniedText.slice(0, 300));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------------- 组件：收件箱提升 / 整理文件名（写记忆库） */
+
+section('组件：收件箱提升与整理文件名');
+{
+  const originalFetch = globalThis.fetch;
+  const actionCalls = [];
+  let stateCalls = 0;
+  const respond = (url, options) => {
+    if (url === '/dsh-memory-delta/action') {
+      const body = JSON.parse(options?.body ?? '{}');
+      actionCalls.push(body);
+      if (body.op === 'promote') {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: 'promote', id: body.id, target: 'facts', superseded: [] }) });
+      }
+      if (body.to === 'bad-name') {
+        return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ ok: false, error: '目标 id 已被占用：bad-name' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: 'rename', from: body.id, to: body.to, refs: ['new-one'] }) });
+    }
+    stateCalls += 1;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+  globalThis.fetch = respond;
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  // ⑤ 收件箱一键提升
+  const inboxItem = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('沙箱禁止命名管道'));
+  const promoteBtn = findAllByClass(inboxItem, 'dsh-memory-delta-mini').find((n) => allText(n).includes('提升到'));
+  check('收件箱条目上有「提升到 facts/」按钮', allText(promoteBtn).includes('提升到 facts/'), allText(promoteBtn));
+  const before = stateCalls;
+  promoteBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('提升发的是 op=promote + 条目 id', actionCalls[0]?.op === 'promote' && actionCalls[0]?.id === 'cand-1', JSON.stringify(actionCalls[0]));
+  check('提升请求带上 workspace（宿主据此定位记忆库）', actionCalls[0]?.workspace === 'D:\\proj', JSON.stringify(actionCalls[0]));
+  check('提升成功后重新拉状态（界面立刻与磁盘一致）', stateCalls > before, `${before} → ${stateCalls}`);
+  check('提升成功后给出提示', allText(mounted.tree()).includes('已提升 cand-1 → facts/'), allText(mounted.tree()).slice(0, 200));
+
+  // ⑥ 整理文件名：内联输入 → rename
+  const tidyItem = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('旧的一条事实'));
+  const tidyBtn = findAllByClass(tidyItem, 'dsh-memory-delta-mini').find((n) => allText(n).includes('整理文件名'));
+  check('文件名与 key 不一致的条目会给「整理文件名」入口', Boolean(tidyBtn));
+  tidyBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const input = findByClass(mounted.tree(), 'dsh-memory-delta-rename')?.kids?.find?.((n) => n.type === 'input');
+  check('点开后出现内联输入框', Boolean(input), JSON.stringify(findByClass(mounted.tree(), 'dsh-memory-delta-rename')));
+  check('输入框预填已有的 key', input?.props?.value === 'old-key', String(input?.props?.value));
+
+  input.props.onChange({ target: { value: 'renamed-entry' } });
+  const okBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-rename'), 'dsh-memory-delta-mini')[0];
+  okBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  const renameCall = actionCalls.find((c) => c.op === 'rename');
+  check('改名发的是 op=rename + 新名字', renameCall?.id === 'fact-old' && renameCall?.to === 'renamed-entry', JSON.stringify(renameCall));
+  check('改名成功后提示里带上同步的引用数', allText(mounted.tree()).includes('已改名 fact-old → renamed-entry') && allText(mounted.tree()).includes('1 处引用'), allText(mounted.tree()).slice(0, 240));
+
+  // 失败态：宿主拒绝时把原因原样显示
+  tidyBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const input2 = findByClass(mounted.tree(), 'dsh-memory-delta-rename').kids.find((n) => n.type === 'input');
+  input2.props.onChange({ target: { value: 'bad-name' } });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-rename'), 'dsh-memory-delta-mini')[0].props.onClick({
+    stopPropagation() {},
+    preventDefault() {},
+  });
+  await flush();
+  check('改名被拒绝时回显宿主原因', allText(mounted.tree()).includes('改名失败') && allText(mounted.tree()).includes('已被占用'), allText(mounted.tree()).slice(0, 260));
+
+  // 空名字：本地就挡住，不发请求
+  const callsBeforeEmpty = actionCalls.length;
+  input2.props.onChange({ target: { value: '   ' } });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-rename'), 'dsh-memory-delta-mini')[0].props.onClick({
+    stopPropagation() {},
+    preventDefault() {},
+  });
+  await flush();
+  check('空名字不请求宿主（本地就拦）', actionCalls.length === callsBeforeEmpty, String(actionCalls.length - callsBeforeEmpty));
+  check('空名字给出可操作提示', allText(mounted.tree()).includes('新文件名不能为空'), allText(mounted.tree()).slice(0, 240));
 
   globalThis.fetch = originalFetch;
 }

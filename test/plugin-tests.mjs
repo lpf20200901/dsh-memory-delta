@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
 import { createEntry, ensureLayout, injectPayload, readAll } from '../bin/mem.mjs';
-import { MEMORY_REVEAL_PATH, MEMORY_ROUTE_PATH, createMemoryRoute, createRevealRoute, memoryStateOf, registerMemoryRoute, registerRevealRoute, resolvePanelRoot, resolveRevealDir } from '../src/panel.mjs';
+import { MEMORY_ACTION_PATH, MEMORY_REVEAL_PATH, MEMORY_ROUTE_PATH, createActionRoute, createMemoryRoute, createRevealRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerRevealRoute, resolvePanelRoot, resolveRevealDir } from '../src/panel.mjs';
 import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -474,12 +474,14 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('工具照常注册（不等 webServer）', panelCtx.registered.length === 2, String(panelCtx.registered.length));
 
   panelCtx.pendingInjects[0](); // webServer 出现了
-  check('webServer 出现后注册了 2 条路由（状态 + 打开目录）', panelCtx.routes.length === 2, String(panelCtx.routes.length));
+  check('webServer 出现后注册了 3 条路由（状态 + 打开目录 + 动作）', panelCtx.routes.length === 3, String(panelCtx.routes.length));
   const route = panelCtx.routes.find((r) => r.path === MEMORY_ROUTE_PATH) ?? panelCtx.routes[0];
   check('路由 kind 是 exact', route.kind === 'exact', String(route.kind));
   check('路由路径是 /dsh-memory-delta/state', route.path === MEMORY_ROUTE_PATH && route.path === '/dsh-memory-delta/state', String(route.path));
   const revealRoute = panelCtx.routes.find((r) => r.path === MEMORY_REVEAL_PATH);
   check('第二条路由是「打开目录」', revealRoute?.path === '/dsh-memory-delta/reveal', panelCtx.routes.map((r) => r.path).join(','));
+  const actionRoute = panelCtx.routes.find((r) => r.path === MEMORY_ACTION_PATH);
+  check('第三条路由是「动作」（写记忆库）', actionRoute?.path === '/dsh-memory-delta/action', panelCtx.routes.map((r) => r.path).join(','));
 
   // 路径在**两处**各写了一遍（宿主 `src/panel.mjs`、客户端 `client/client.js`）——
   // 写歪一处就是"页签一直是空的"这种最难查的故障。这里直接把两边钉成同一个字符串。
@@ -490,14 +492,15 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('客户端 bundle 的 id 是包名 dsh-memory-delta', clientId === 'dsh-memory-delta', String(clientId));
   // 客户端必须用 POST —— 宿主路由只认 POST，用 GET 会得到 405（而且回退服务器也回 405，极易误判）
   check('客户端用 POST 请求这条路由', /fetch\(STATE_URL,\s*\{\s*\n\s*method:\s*'POST'/.test(clientSrc), 'client/client.js 里的 fetch 选项');
-  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 2, JSON.stringify(panelCtx.effects));
+  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 3, JSON.stringify(panelCtx.effects));
   check('effect 带可读的标签（含新包名）', panelCtx.effects[0] === 'dsh-memory-delta: /dsh-memory-delta/state route', String(panelCtx.effects[0]));
   check('「打开目录」路由也受 ctx.effect 托管', panelCtx.effects[1] === 'dsh-memory-delta: /dsh-memory-delta/reveal route', String(panelCtx.effects[1]));
+  check('「动作」路由也受 ctx.effect 托管', panelCtx.effects[2] === 'dsh-memory-delta: /dsh-memory-delta/action route', String(panelCtx.effects[2]));
 
   // 服务早就就绪的组合（late=false）→ 回调立刻跑
   const earlyCtx = fakeCtxWithWebServer({ late: false });
   apply(earlyCtx, { root: ROOT, maxBytes: 3072 });
-  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 2, String(earlyCtx.routes.length));
+  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 3, String(earlyCtx.routes.length));
 
   // 没有 ctx.inject 的极简 ctx（老版本 / 测试替身）→ 退回 ctx.get，有就注册、没有不抛
   const plainCtx = fakeCtx();
@@ -654,6 +657,76 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   const returned = registerMemoryRoute({ register: (r) => noEffectRoutes.push(r) }, memoryStateOf);
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ROUTE_PATH && noEffectRoutes.length === 1, String(returned?.path));
   check('webServer 缺失时 registerRevealRoute 返回 null', registerRevealRoute(undefined, {}) === null);
+}
+
+/* ------------------------------------- 「动作」路由（真的写记忆库） */
+
+section('「动作」路由（promote / rename）');
+{
+  const actionRoot = path.join(SANDBOX, 'action', 'memory');
+  const L = ensureLayout(actionRoot);
+  const route = createActionRoute({ configRoot: actionRoot });
+
+  // ① 收件箱提升：面板按钮对应的就是这一步
+  const candidate = createEntry(L, { type: 'fact', conclusion: '面板提升按钮应当复用 CLI 的实现', key: 'panel-promote', tags: ['panel'] });
+  check('候选先落在 inbox/', fs.existsSync(path.join(L.inbox, `${candidate.id}.md`)), candidate.id);
+
+  const promoted = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: candidate.id }) });
+  check('promote → 200', promoted.status === 200 && promoted.json.ok === true, JSON.stringify(promoted.json));
+  check('响应说明提到哪个目录', promoted.json.target === 'facts', JSON.stringify(promoted.json));
+  check('文件真的从 inbox/ 移到 facts/', fs.existsSync(path.join(L.facts, `${candidate.id}.md`)) && !fs.existsSync(path.join(L.inbox, `${candidate.id}.md`)), candidate.id);
+  check('提升后的条目带 active 状态、能进注入载荷', injectPayload(L, 3072).entries.some((e) => e.id === candidate.id), candidate.id);
+
+  // ② 同一个 key 上已有 active 条目 → 拒绝（且**宿主不能退出进程**：
+  //    这正是 promoteEntry 必须"抛异常"而不是 fail() 的原因，走了 fail 这个测试进程会直接死）
+  const clash = createEntry(L, { type: 'fact', conclusion: '同一个 key 的第二条真相', key: 'panel-promote', tags: [] });
+  const refused = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: clash.id }) });
+  check('key 撞车 → 400 而不是崩溃', refused.status === 400, String(refused.status));
+  check('拒绝理由说清是哪个 key 撞了', /panel-promote/.test(String(refused.json.error)) && /一个 key 只能有一个真相/.test(String(refused.json.error)), String(refused.json.error).slice(0, 120));
+  check('拒绝之后文件仍在 inbox/（没有半途改动）', fs.existsSync(path.join(L.inbox, `${clash.id}.md`)), clash.id);
+
+  // ③ 安全改名
+  const renamed = await callRoute(route, { body: JSON.stringify({ op: 'rename', id: candidate.id, to: 'panel-promote-renamed' }) });
+  check('rename → 200', renamed.status === 200 && renamed.json.to === 'panel-promote-renamed', JSON.stringify(renamed.json));
+  check('文件名与 frontmatter 的 id 一起改了', fs.existsSync(path.join(L.facts, 'panel-promote-renamed.md')) && readAll(L).some((e) => e.id === 'panel-promote-renamed'), JSON.stringify(renamed.json));
+  const renameClash = await callRoute(route, { body: JSON.stringify({ op: 'rename', id: 'panel-promote-renamed', to: clash.id }) });
+  check('改成已存在的 id → 400', renameClash.status === 400 && /已被占用/.test(String(renameClash.json.error)), String(renameClash.json.error));
+  const renameIllegal = await callRoute(route, { body: JSON.stringify({ op: 'rename', id: 'panel-promote-renamed', to: 'a b' }) });
+  check('非法名字 → 400', renameIllegal.status === 400 && /非法字符/.test(String(renameIllegal.json.error)), String(renameIllegal.json.error));
+
+  // ④ 白名单：不做"通用改写"后门
+  const unknownOp = await callRoute(route, { body: JSON.stringify({ op: 'delete', id: candidate.id }) });
+  check('不在白名单的 op 一律 400（没有通用删改后门）', unknownOp.status === 400 && /不认识的 op/.test(String(unknownOp.json.error)), String(unknownOp.json.error));
+  check('未知 op 不会碰文件', readAll(L).some((e) => e.id === 'panel-promote-renamed'), 'entry survived');
+  const noId = await callRoute(route, { body: JSON.stringify({ op: 'promote' }) });
+  check('缺 id → 400', noId.status === 400 && /缺少 id/.test(String(noId.json.error)), String(noId.json.error));
+
+  // ⑤ 来源与配置开关
+  const crossSite = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: 'x' }), headers: { host: '127.0.0.1:23278', origin: 'https://evil.example' } });
+  check('跨站 Origin → 403', crossSite.status === 403, String(crossSite.status));
+  const getMethod = await callRoute(route, { method: 'GET', url: MEMORY_ACTION_PATH });
+  check('GET → 405', getMethod.status === 405, String(getMethod.status));
+  const writeOff = await callRoute(createActionRoute({ configRoot: actionRoot, allow: false }), { body: JSON.stringify({ op: 'promote', id: 'x' }) });
+  check('allowWrite:false → 403 + 说明原因', writeOff.status === 403 && /allowWrite/.test(String(writeOff.json.error)), String(writeOff.json.error));
+
+  // ⑥ workspace 解析（没配 root 时按 <workspace>/memory）
+  const wsRoute = createActionRoute({});
+  const wsCandidate = createEntry(ensureLayout(path.join(SANDBOX, 'action2', 'memory')), {
+    type: 'decision',
+    conclusion: '按 workspace 解析记忆库',
+    key: 'ws-resolve',
+    tags: [],
+  });
+  const byWorkspace = await callRoute(wsRoute, { body: JSON.stringify({ op: 'promote', id: wsCandidate.id, workspace: path.join(SANDBOX, 'action2') }) });
+  check('没配 root 时按 workspace 解析到 <workspace>/memory', byWorkspace.status === 200 && byWorkspace.json.target === 'decisions', JSON.stringify(byWorkspace.json));
+  const noRoot = await callRoute(createActionRoute({}), { body: JSON.stringify({ op: 'promote', id: 'x' }) });
+  check('既没 root 也没 workspace → 400 而不是 500', noRoot.status === 400, JSON.stringify(noRoot.json));
+
+  // 注册函数
+  check('webServer 缺失时 registerActionRoute 返回 null', registerActionRoute(undefined, {}) === null);
+  const registered = [];
+  const returned = registerActionRoute({ register: (r) => registered.push(r) }, { configRoot: actionRoot });
+  check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ACTION_PATH && registered.length === 1, String(returned?.path));
 }
 
 /* ------------------------------------------- 「打开目录」路由（写动作） */

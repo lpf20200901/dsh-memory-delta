@@ -466,6 +466,65 @@ section('注入载荷：每条带 date 与 verifyWhen（只增不改）');
     payload.entries.every((e) => ['id', 'type', 'scope', 'key', 'tags', 'status', 'where', 'hash', 'line'].every((k) => k in e)),
     flat(JSON.stringify(Object.keys(payload.entries[0]))));
   check('hash 仍是 12 位（差分不受新字段影响）', payload.entries.every((e) => /^[0-9a-f]{12}$/.test(e.hash)), flat(JSON.stringify(payload.entries.map((e) => e.hash))));
+  // 面板要"点一下打开这条记忆"，所以每条必须带**绝对路径**
+  check('每条带绝对 file 路径（侧边栏点条目要打开它）', payload.entries.every((e) => typeof e.file === 'string' && path.isAbsolute(e.file) && e.file.endsWith('.md')), flat(JSON.stringify(payload.entries.map((e) => e.file))));
+  check('file 指向真实存在的文件', payload.entries.every((e) => fs.existsSync(e.file)), flat(JSON.stringify(payload.entries.map((e) => e.file))));
+}
+
+/* --------------------------------------------- M6：mem rename（安全改名） */
+
+section('M6：mem rename —— id / 文件名 / 引用一起改');
+{
+  const root = freshRoot('rename');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  // 不给 key → 派生 id 是"日期 + 截断的结论"，正是界面上那些难看文件名的来源
+  run(['new', '--root', root, '--type', 'fact', '--conclusion', '这条结论很长很长很长很长很长很长很长', '--source', 's']);
+  const derived = md(path.join(root, 'inbox'))[0].replace(/\.md$/, '');
+  check('不给 key 时派生的 id 是日期 + 截断结论', /^\d{4}-\d{2}-\d{2}-/.test(derived), derived);
+  run(['promote', '--root', root, derived]);
+
+  const r1 = run(['rename', '--root', root, derived, 'sandbox-no-pipe']);
+  check('rename 成功', r1.code === 0, flat(r1.out + r1.err));
+  check('文件真的改名了（facts/ 下只剩新名字）', md(path.join(root, 'facts')).join(',') === 'sandbox-no-pipe.md', md(path.join(root, 'facts')).join(','));
+  check('inbox 里没有残留', md(path.join(root, 'inbox')).length === 0, md(path.join(root, 'inbox')).join(','));
+
+  const shown = run(['show', '--root', root, 'sandbox-no-pipe']);
+  check('新 id 能查到', shown.code === 0 && shown.out.includes('sandbox-no-pipe'), flat(shown.out));
+  const payload = JSON.parse(run(['inject', '--root', root, '--json']).out);
+  check('frontmatter 的 id 也改了（注入载荷里是新 id）', payload.entries.some((e) => e.id === 'sandbox-no-pipe'), flat(JSON.stringify(payload.entries.map((e) => e.id))));
+  const v1 = run(['validate', '--root', root]);
+  check('validate 通过（id 与文件名一致）', v1.code === 0 && !/不一致/.test(v1.out), flat(v1.out));
+
+  // 旧 id 已经不存在了
+  const gone = run(['show', '--root', root, derived]);
+  check('旧 id 查不到了', gone.code !== 0, flat(gone.out + gone.err));
+
+  // 冲突与非法输入
+  run(['new', '--root', root, '--type', 'fact', '--conclusion', '另一条', '--id', 'other', '--source', 's']);
+  run(['promote', '--root', root, 'other']);
+  const clash = run(['rename', '--root', root, 'other', 'sandbox-no-pipe']);
+  check('目标 id 已存在 → 报错拒绝', clash.code !== 0 && /已被占用/.test(clash.out + clash.err), flat(clash.out + clash.err));
+  const illegal = run(['rename', '--root', root, 'other', '有 空格']);
+  check('非法字符 → 报错拒绝', illegal.code !== 0 && /非法字符/.test(illegal.out + illegal.err), flat(illegal.out + illegal.err));
+  const same = run(['rename', '--root', root, 'other', 'other']);
+  check('新旧同名 → 报错拒绝', same.code !== 0, flat(same.out + same.err));
+  const missing = run(['rename', '--root', root, 'nope', 'x']);
+  check('找不到条目 → 报错拒绝', missing.code !== 0 && /找不到条目/.test(missing.out + missing.err), flat(missing.out + missing.err));
+
+  // 引用同步：B 取代 A，之后把 A 改名，B 的 supersedes 必须跟着改
+  run(['new', '--root', root, '--type', 'fact', '--id', 'old-one', '--key', 'k1', '--conclusion', '旧结论', '--source', 's']);
+  run(['promote', '--root', root, 'old-one']);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'new-one', '--key', 'k1', '--conclusion', '新结论', '--source', 's']);
+  run(['promote', '--root', root, 'new-one', '--supersedes', 'old-one']);
+  const r2 = run(['rename', '--root', root, 'old-one', 'old-renamed']);
+  check('归档条目也能改名', r2.code === 0, flat(r2.out + r2.err));
+  check('顺带更新了引用它的条目', /顺带更新了引用/.test(r2.out), flat(r2.out));
+  const newOne = run(['show', '--root', root, 'new-one']);
+  check('新结论里的 supersedes 指向改名后的 id', newOne.out.includes('old-renamed') && !newOne.out.includes('old-one'), flat(newOne.out));
+  const archived = run(['show', '--root', root, 'old-renamed']);
+  check('归档条目的 superseded_by 也同步了', archived.out.includes('new-one'), flat(archived.out));
+  const v2 = run(['validate', '--root', root]);
+  check('改名 + 引用同步之后 validate 依然通过', v2.code === 0, flat(v2.out));
 }
 
 /* ------------------------------------------------------------- 汇总 */

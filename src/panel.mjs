@@ -21,13 +21,19 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, ensureLayout, firstLine, injectPayload, readEntryFile, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, renameEntry, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
 export const MEMORY_ROUTE_PATH = '/dsh-memory-delta/state';
 
-/** 动作路由：用系统文件管理器打开记忆库里的某个目录。 */
+/** 动作路由（写记忆库）：收件箱提升、安全改名。 */
+export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
+
+/** `action` 路由认的操作 —— 白名单，别的一律 400。 */
+export const ACTION_OPS = ['promote', 'rename'];
+
+/** 动作路由（只读系统动作）：用系统文件管理器打开记忆库里的某个目录。 */
 export const MEMORY_REVEAL_PATH = '/dsh-memory-delta/reveal';
 
 /** 面板一次最多列的常驻条目数 —— 面板是"给用户信心"的，不是监控台。 */
@@ -501,6 +507,82 @@ export function registerMemoryRoute(webServer, stateOf, effect) {
   if (!webServer || typeof webServer.register !== 'function') return null;
   const route = createMemoryRoute(stateOf);
   if (typeof effect === 'function') effect(() => webServer.register(route), 'dsh-memory-delta: /dsh-memory-delta/state route');
+  else webServer.register(route);
+  return route;
+}
+
+/**
+ * 「动作」路由：面板里那些**会写记忆库**的按钮（收件箱提升、安全改名）。
+ *
+ * 结构与只读状态路由完全一致（loopback → POST → JSON），唯一的区别是它**会改文件**，
+ * 所以两条纪律写死在这里：
+ *   1. 只认 `ACTION_OPS` 里的 op，别的一律 400 —— 不做一个"通用改写"后门；
+ *   2. 逻辑**必须复用 CLI 的实现**（`promoteEntry` / `renameEntry`），
+ *      面板里再写一遍"一个 key 一个真相"的闸门迟早会和 CLI 分叉。
+ *      那两个函数是"抛异常"版（CLI 侧负责把异常翻译成 exit 1），这里翻译成 400 + 原因，
+ *      所以宿主进程永远不会因为用户点一下按钮就退出。
+ *
+ * @param {{configRoot?: string, allow?: boolean}} [opts]
+ */
+export function createActionRoute(opts = {}) {
+  return {
+    kind: 'exact',
+    path: MEMORY_ACTION_PATH,
+    async handler(req, res) {
+      try {
+        if (opts.allow === false) {
+          writeJson(res, 403, { ok: false, error: '配置里关掉了「面板写记忆库」（allowWrite=false）' });
+          return;
+        }
+        const body = await readAllowedBody(req, res);
+        if (body === null) return;
+
+        const op = typeof body?.op === 'string' ? body.op : '';
+        if (!ACTION_OPS.includes(op)) {
+          writeJson(res, 400, { ok: false, error: `不认识的 op：${op || '（空）'}（只支持 ${ACTION_OPS.join(' / ')}）` });
+          return;
+        }
+        const { root } = resolvePanelRoot({ configRoot: opts.configRoot ?? body?.configRoot, workspace: body?.workspace });
+        if (!root) {
+          writeJson(res, 400, { ok: false, error: '不知道记忆库在哪：请求里既没有 workspace，插件也没配 root' });
+          return;
+        }
+        const L = ensureLayout(root, { create: false });
+        const id = typeof body?.id === 'string' ? body.id : '';
+        if (!id) {
+          writeJson(res, 400, { ok: false, error: '缺少 id' });
+          return;
+        }
+
+        if (op === 'promote') {
+          const r = promoteEntry(L, id, { supersedes: body?.supersedes });
+          writeJson(res, 200, { ok: true, op, id: r.id, target: r.target, superseded: r.superseded });
+          return;
+        }
+        const to = typeof body?.to === 'string' ? body.to : '';
+        const r = renameEntry(L, id, to);
+        writeJson(res, 200, { ok: true, op, from: r.from, to: r.to, refs: r.refs });
+      } catch (error) {
+        // 拒绝的理由（key 撞车 / 目标 id 占用 / 非法字符 / 找不到条目）原样交给界面显示 ——
+        // "点了没反应"是最难查的体验。
+        writeJson(res, 400, { ok: false, error: error?.message ?? String(error) });
+      }
+    },
+  };
+}
+
+/**
+ * 注册「动作」路由。
+ *
+ * @param {object} webServer `ctx.get('webServer')` 的结果
+ * @param {{configRoot?: string, allow?: boolean}} [opts]
+ * @param {(body: () => any, label?: string) => unknown} [effect] `ctx.effect`
+ * @returns {object|null} 路由对象；webServer 不可用时返回 null
+ */
+export function registerActionRoute(webServer, opts = {}, effect) {
+  if (!webServer || typeof webServer.register !== 'function') return null;
+  const route = createActionRoute(opts);
+  if (typeof effect === 'function') effect(() => webServer.register(route), 'dsh-memory-delta: /dsh-memory-delta/action route');
   else webServer.register(route);
   return route;
 }

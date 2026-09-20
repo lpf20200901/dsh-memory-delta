@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
     const STATE_URL = '/dsh-memory-delta/state';
     // 动作路由：让宿主用系统文件管理器打开记忆库里的某个目录（白名单 + 回环校验在宿主侧）。
     const REVEAL_URL = '/dsh-memory-delta/reveal';
+    // 写记忆库的动作（收件箱提升 / 安全改名）—— 宿主侧复用 CLI 的 promoteEntry / renameEntry。
+    const ACTION_URL = '/dsh-memory-delta/action';
     const PLUGIN_ID = 'dsh-memory-delta';
     const STYLE_ID = 'dsh-memory-delta/memory-tab.css';
 
@@ -260,6 +262,21 @@ window.__ModuleLoader__.load({
   padding: 4px 8px;
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
+.dsh-memory-delta-ok { border-color: var(--dsw-alias-state-success-secondary, rgba(46,125,50,.35)); }
+/* 「整理文件名」的内联输入行（改 id 是危险动作，所以不做猜名字的自动操作，让用户自己填） */
+.dsh-memory-delta-rename { display: flex; gap: 4px; margin-top: 3px; }
+.dsh-memory-delta-rename > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4));
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: inherit;
+  font: inherit;
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
 `;
 
     /** 样式只注入一次（宿主也可能加载多个 dsh-memory-delta 实例，靠 STYLE_ID 去重）。 */
@@ -417,12 +434,15 @@ window.__ModuleLoader__.load({
      *
      * **整行可点 = 打开这条记忆的 .md**（走 `ctx.betterSidebar.openFile`）。
      * `showType` 只在"按标签分组"时开 —— 那时分组头是标签，条目得自己说明是事实还是决策。
+     * `actions` 是行内按钮（提升 / 整理文件名），它们**必须自己 stopPropagation**，
+     * 否则点按钮会连带触发整行的"打开文件"。
      */
     function item(e, opts) {
       const file = typeof e.file === 'string' && e.file ? e.file : null;
       const tags = Array.isArray(e.tags) ? e.tags : [];
       const typeLabel = e.type === 'decision' ? '决策' : e.type === 'fact' ? '事实' : null;
       const canOpen = Boolean(file) && typeof opts.onOpen === 'function';
+      const actions = Array.isArray(opts.actions) ? opts.actions.filter(Boolean) : [];
       return h(
         'div',
         {
@@ -449,11 +469,13 @@ window.__ModuleLoader__.load({
             { className: 'dsh-memory-delta-meta' },
             tags.slice(0, 3).map((t) => h('span', { className: 'dsh-memory-delta-tag', key: t }, String(t))),
             e.date ? h('span', { className: 'dsh-memory-delta-dim' }, String(e.date)) : null,
+            actions,
             canOpen ? h('span', { className: 'dsh-memory-delta-mini' }, '打开') : null,
           ),
         ),
         h('div', { className: 'dsh-memory-delta-line' }, e.line),
         file ? h('div', { className: 'dsh-memory-delta-file', title: file }, baseNameOf(file)) : null,
+        opts.extraRow || null,
       );
     }
 
@@ -509,6 +531,11 @@ window.__ModuleLoader__.load({
       const [collapsed, setCollapsed] = useState({});
       const [groupBy, setGroupBy] = useState('type');
       const [actionError, setActionError] = useState(null);
+      const [notice, setNotice] = useState(null);
+      // 「整理文件名」的内联输入：{ id, value }。改名会同时改 frontmatter 的 id 与别处的引用，
+      // 所以**不猜名字**（猜错就是一次全库引用改写），让用户自己填。
+      const [renaming, setRenaming] = useState(null);
+      const [pendingId, setPendingId] = useState(null);
       const toggleSection = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
       const isOpen = (key) => !collapsed[key];
 
@@ -543,6 +570,160 @@ window.__ModuleLoader__.load({
           .then(() => setActionError(null))
           .catch((err) => setActionError(`打开目录失败：${err && err.message ? err.message : String(err)}`));
       };
+
+      const actionWorkspace = () =>
+        state && typeof state.workspace === 'string' && state.workspace ? state.workspace : workspace;
+
+      /** 行内按钮必须挡住冒泡 —— 否则点「提升」会连带触发整行的"打开文件"。 */
+      const stop = (ev) => {
+        if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+        if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+      };
+
+      /**
+       * 写记忆库的动作（宿主侧复用 CLI 的 `promoteEntry` / `renameEntry`）。
+       * 成功后**重新拉一次状态** —— 面板显示的内容必须立刻和磁盘一致。
+       */
+      const callAction = (payload) => {
+        const ws = actionWorkspace();
+        return fetch(ACTION_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(ws ? { ...payload, workspace: ws } : payload),
+        }).then(async (res) => {
+          let data = null;
+          try {
+            data = await res.json();
+          } catch {
+            data = null;
+          }
+          if (!res.ok || !data || data.ok === false) throw new Error((data && data.error) || `HTTP ${res.status}`);
+          return data;
+        });
+      };
+
+      const promote = (e) => {
+        setPendingId(e.id);
+        return callAction({ op: 'promote', id: e.id })
+          .then((r) => {
+            setActionError(null);
+            setNotice(`已提升 ${r.id} → ${r.target}/，下一轮会话起参与注入`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`提升失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      const startRename = (e) => {
+        const base = baseNameOf(e.file || '').replace(/\.md$/, '');
+        setRenaming((prev) => (prev && prev.id === e.id ? null : { id: e.id, value: e.key && e.key !== base ? e.key : '' }));
+      };
+
+      const doRename = (id, to) => {
+        const value = String(to || '').trim();
+        if (!value) {
+          setActionError('改名失败：新文件名不能为空（建议给一条语义键，比如 sandbox-no-pipe）');
+          return Promise.resolve();
+        }
+        setPendingId(id);
+        return callAction({ op: 'rename', id, to: value })
+          .then((r) => {
+            setRenaming(null);
+            setActionError(null);
+            setNotice(`已改名 ${r.from} → ${r.to}${r.refs && r.refs.length ? `（同步了 ${r.refs.length} 处引用）` : ''}`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`改名失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /**
+       * 这条记忆的文件名"需要整理"吗？
+       * 没给 key 的条目拿到的是 `<日期>-<截断的结论>.md`（截断还截在词中间），
+       * 而有 key 的条目应当以 key 作文件名 —— 面板把这件事**显示出来**并给一个入口。
+       */
+      const needsTidy = (e) => {
+        const base = baseNameOf(e.file || '').replace(/\.md$/, '');
+        if (!base) return false;
+        if (e.key) return base !== e.key;
+        return /^\d{4}-\d{2}-\d{2}/.test(base);
+      };
+
+      /** 收件箱条目上的「提升到 facts/ decisions/」按钮。 */
+      const promoteButton = (e) => {
+        const target = e.type === 'decision' ? 'decisions' : e.type === 'fact' ? 'facts' : null;
+        if (!target) return null;
+        return h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: `提升到 ${target}/（确认后才成为常驻记忆）`,
+            onClick: (ev) => {
+              stop(ev);
+              promote(e);
+            },
+          },
+          pendingId === e.id ? '提升中…' : `提升到 ${target}/`,
+        );
+      };
+
+      /** 条目上的「整理文件名」按钮（id + 文件名 + 引用一起改）。 */
+      const tidyButton = (e) =>
+        needsTidy(e)
+          ? h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-memory-delta-mini',
+                title: '把文件名改成规范 slug：同时改 frontmatter 的 id、文件名与别处的引用（等价于 mem rename）',
+                onClick: (ev) => {
+                  stop(ev);
+                  startRename(e);
+                },
+              },
+              renaming && renaming.id === e.id ? '取消' : '整理文件名',
+            )
+          : null;
+
+      /** 展开的内联改名输入行。 */
+      const renameRow = (e) =>
+        renaming && renaming.id === e.id
+          ? h(
+              'div',
+              { className: 'dsh-memory-delta-rename', key: `${e.id}:rename`, onClick: stop },
+              h('input', {
+                value: renaming.value,
+                placeholder: '新文件名（字母/数字/._-，建议用语义键）',
+                'aria-label': '新文件名',
+                onChange: (ev) => setRenaming({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
+                onKeyDown: (ev) => {
+                  stop(ev);
+                  if (ev && ev.key === 'Enter') doRename(e.id, renaming.value);
+                },
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini',
+                  disabled: pendingId === e.id,
+                  onClick: (ev) => {
+                    stop(ev);
+                    doRename(e.id, renaming.value);
+                  },
+                },
+                pendingId === e.id ? '改名中…' : '改',
+              ),
+            )
+          : null;
 
       const head = h(
         'div',
@@ -650,7 +831,10 @@ window.__ModuleLoader__.load({
       /** 新的排前面（同一天按 id 稳定排序）—— "最近记了什么"比字母序有用得多。 */
       const byDateDesc = (list) =>
         [...list].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(a.id).localeCompare(String(b.id)));
-      const itemOpts = { onOpen: openMemoryFile, showType: false };
+
+      /** 统一渲染一条条目：可点开、带「整理文件名」入口、需要时展开改名输入行。 */
+      const renderItem = (e, extra) =>
+        item(e, Object.assign({ onOpen: openMemoryFile, showType: false, actions: [tidyButton(e)], extraRow: renameRow(e) }, extra || {}));
 
       const groupSection = (key, title, slug, list) =>
         list.length
@@ -664,7 +848,7 @@ window.__ModuleLoader__.load({
                 onToggle: () => toggleSection(`type:${key}`),
                 onReveal: slug ? () => revealFolder(slug) : null,
               },
-              byDateDesc(list).map((e) => item(e, itemOpts)),
+              byDateDesc(list).map((e) => renderItem(e)),
             )
           : null;
 
@@ -707,7 +891,7 @@ window.__ModuleLoader__.load({
                       open: isOpen(`tag:${tag}`),
                       onToggle: () => toggleSection(`tag:${tag}`),
                     },
-                    byDateDesc(list).map((e) => item(e, { ...itemOpts, showType: true })),
+                    byDateDesc(list).map((e) => renderItem(e, { showType: true })),
                   ),
                 )
               : [
@@ -742,7 +926,7 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '还没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : inbox.map((e) => item(e, { ...itemOpts, showType: true })),
+            : inbox.map((e) => renderItem(e, { showType: true, actions: [promoteButton(e), tidyButton(e)] })),
         ],
       );
 
@@ -752,6 +936,7 @@ window.__ModuleLoader__.load({
         head,
         statusRow,
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
+        notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
         dueBlock,
         standing,
         inboxBlock,
