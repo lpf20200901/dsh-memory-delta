@@ -1,7 +1,9 @@
-# 运行/测试产物
+# 运行 / 测试产物
+# ⚠️ gitignore **不支持行尾注释**：# 只在行首才是注释，写在模式后面会被当成模式的一部分
+# （历史踩坑：`.test-sandbox-*/       # 按进程分…` 因此从未生效，测试沙箱被提交进仓库）。
 node_modules/
-.test-sandbox/         # 旧路径（留着，免得历史残留被提交）
-.test-sandbox-*/       # 按进程分的测试沙箱：两套测试并行跑不会互相覆盖（见 test/run-tests.mjs 注释）
+.test-sandbox/
+.test-sandbox-*/
 .preflight-store/
 .tmp-*/
 .dbg/
