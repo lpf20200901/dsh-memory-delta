@@ -17,7 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { collectDocs, createEntry, ensureLayout, injectPayload, loadConfig } from '../bin/mem.mjs';
 import { createMemoryHook } from './hook.mjs';
-import { memoryStateOf, registerMemoryRoute } from './panel.mjs';
+import { memoryStateOf, registerMemoryRoute, registerRevealRoute } from './panel.mjs';
 import { MEMORY_SOURCE_KIND } from './planner.mjs';
 import { rankDocs } from './search.mjs';
 
@@ -35,6 +35,12 @@ export const Config = z.object({
   dueWithin: z.number().step(1).min(0).default(0),
   /** 关掉侧边栏「记忆」页签的数据路由（无 webServer 时本来就不注册）。 */
   panel: z.boolean().default(true),
+  /**
+   * 允许面板里的目录名触发**系统文件管理器**打开该目录（默认开）。
+   * 只在回环来源 + 白名单目录（facts/decisions/inbox/archive/库根）下生效；
+   * 不想要这个动作就关掉它（关掉后面板会显示一句提示，而不是静默失效）。
+   */
+  allowOpenFolder: z.boolean().default(true),
 });
 
 /** 把 (config, cwd) 解析成一次可用的记忆库句柄。 */
@@ -258,6 +264,12 @@ export function apply(ctx, config = {}) {
           workspace: input?.workspace,
           dueWithin: config.dueWithin ?? 0,
         }),
+      effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
+    );
+    // 只读状态路由之外，再挂一条"打开目录"（白名单 + 回环来源 + 系统文件管理器）。
+    registerRevealRoute(
+      target,
+      { configRoot: config.root || undefined, allow: config.allowOpenFolder !== false },
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );
   };

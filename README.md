@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the M5 improvements below are covered by 544 assertions
+> verified inside a real DSH session, and the M5 improvements below are covered by 596 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 
 ## Why
@@ -120,7 +120,8 @@ Seven rules:
 | `memory_write` | Record a candidate into the inbox — **the model cannot touch the standing layer** |
 | Distillation nudge | Once a session has run a few steps and memory is already current, it reminds the model to record conclusions with `memory_write`; one nudge per session, and the nudge message carries **no state**, so it cannot corrupt the diff baseline |
 | Due-for-review reminder | `verify_when` is no longer a dead field: when an entry reaches its review date, the session is told once — "this conclusion may be stale, re-check it" — with the exact command to supersede or expire it. Prose values (`等换机器时`) never trigger it, so the reminder can always be resolved; it fires only on a step that injects nothing else, and it carries **no state** either |
-| Sidebar memory tab | With [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) installed, a **记忆** tab lists the standing entries, the due-for-review items and the inbox candidates, plus the current injection size. The client half is a **hand-written, zero-build browser bundle** (a `window.__ModuleLoader__.load({id, factory})` wrapper, no bundler); its data comes from a read-only `POST /dsh-memory-delta/state` route owned by this plugin — loopback-only, JSON in / JSON out, and it reads nothing but the memory store |
+| Sidebar memory tab | With [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) installed, a **记忆** tab lists collapsible groups (a drawn caret, so it is obvious they open), the standing entries, the due-for-review items and the inbox candidates, plus the current injection size. **Clicking an entry opens its `.md`** through better-sidebar's official `openFile` (preview/edit in the sidebar editor); **"打开目录" next to a group header hands `facts/` / `decisions/` / `inbox/` to the OS file manager**. Groups are viewable by **type** (facts/decisions) or by **tag** (each entry's first tag). The client half is a **hand-written, zero-build browser bundle** (a `window.__ModuleLoader__.load({id, factory})` wrapper, no bundler); its data comes from a read-only `POST /dsh-memory-delta/state` route owned by this plugin — loopback-only, JSON in / JSON out, reading nothing but the memory store. The one route that *acts* is `POST /dsh-memory-delta/reveal`: it accepts only whitelisted directory names (`root` / `facts` / `decisions` / `inbox` / `archive`) and hands the directory to the OS file manager; turn it off with `allowOpenFolder: false` |
+| Why editing/deleting memory is *not* built into the panel | The sidebar already ships an editor (opening an entry is enough) and a file tree with confirmed rename/delete. Re-implementing CRUD in the panel would be duplication plus a permanent maintenance tax, so the panel stays an **entry point**: open file, open folder. ⚠️ Do **not** rename memory entries through the file tree — the `id` lives in the frontmatter and must match the file name, or `mem validate` reports `id 与文件名不一致` |
 
 The plugin never spawns the CLI: the DSH sandbox forbids named pipes (capturing a child's output fails
 with EPERM), and there is no need — it imports the same store module directly (`bin/mem.mjs` only runs
@@ -130,9 +131,11 @@ plugin unchanged and simply skips the panel route.
 
 ![The 记忆 tab in the sidebar](assets/sidebar-memory-tab.png)
 
-<sub>The **记忆** tab, opened from the sidebar's `+` menu: standing entries with their keys, the
+<sub>The **记忆** tab, opened from the sidebar's `+` menu: collapsible groups (the monospace text after a
+title is the directory on disk), standing entries with their keys/tags/dates/file names, the
 due-for-review section, the inbox candidates, and how many bytes the current store costs per session.
-Read-only — it never writes to the store.</sub>
+**Clicking an entry opens it in the editor, "打开目录" hands the folder to the OS file manager** — the
+panel itself never writes to the store.</sub>
 
 ## CLI usage
 
@@ -184,7 +187,7 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 544 assertions, zero dependencies
+npm test        # 596 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -194,8 +197,8 @@ npm test        # 544 assertions, zero dependencies
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 130 | plugin integration (stubbed DSH modules, real `apply()` + both tools + the sidebar route) |
-| `test/client-tests.mjs` | 55 | the sidebar panel bundle (fake React + fake `fetch`, incl. the store-folder labels) |
+| `test/plugin-tests.mjs` | 153 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + the reveal whitelist/origin checks) |
+| `test/client-tests.mjs` | 84 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, entry click → `openFile`, folder click → `reveal`, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable

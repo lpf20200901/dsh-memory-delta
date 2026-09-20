@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     require('react-dom');
 
     const STATE_URL = '/dsh-memory-delta/state';
+    // 动作路由：让宿主用系统文件管理器打开记忆库里的某个目录（白名单 + 回环校验在宿主侧）。
+    const REVEAL_URL = '/dsh-memory-delta/reveal';
     const PLUGIN_ID = 'dsh-memory-delta';
     const STYLE_ID = 'dsh-memory-delta/memory-tab.css';
 
@@ -96,16 +98,151 @@ window.__ModuleLoader__.load({
   font-size: .92em;
   font-weight: 400;
 }
-.dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 8px; }
-.dsh-memory-delta-section > summary {
-  cursor: pointer;
-  list-style: none;
-  font-weight: 600;
+
+/* ---------------------------------------------------------------- 层级
+   分节 = 一行「分组头」（可点，带箭头）+ 缩进的条目体。
+   之前用原生 <details> 又隐藏了 ::-webkit-details-marker，结果**没有任何可展开的标志**
+   —— 用户根本不知道能点。现在自绘箭头（CSS 三角），展开时旋转 90°。 */
+.dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 6px; }
+.dsh-memory-delta-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
 }
-.dsh-memory-delta-section > summary::-webkit-details-marker { display: none; }
+.dsh-memory-delta-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 4px;
+  margin: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-memory-delta-toggle:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14)); }
+.dsh-memory-delta-toggle:focus-visible { outline: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.5)); outline-offset: 1px; }
+.dsh-memory-delta-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  opacity: .65;
+  transform-origin: 2px 4px;
+  transition: transform .12s ease;
+}
+.dsh-memory-delta-caret.is-open { transform: rotate(90deg); }
+.dsh-memory-delta-section-title { flex: none; }
+.dsh-memory-delta-section-hint { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-memory-delta-count {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.16));
+  font-weight: 400;
+  font-size: 11px;
+  text-align: center;
+}
+.dsh-memory-delta-body {
+  margin: 2px 0 4px 15px;
+  padding-left: 8px;
+  border-left: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 小按钮：打开目录 / 打开文件 */
+.dsh-memory-delta-mini {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dsh-memory-delta-mini:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14)); color: inherit; }
+.dsh-memory-delta-seg { display: flex; gap: 4px; margin-left: auto; align-items: center; }
+.dsh-memory-delta-seg + .dsh-memory-delta-btn { margin-left: 6px; }
+.dsh-memory-delta-seg > button {
+  padding: 1px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-memory-delta-seg > button.is-on {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+  color: inherit;
+  font-weight: 600;
+}
+
+/* 条目：整行可点 = 打开这个 .md；缩进 + 右侧竖线已经把它和分组头分层 */
+.dsh-memory-delta-item {
+  margin: 0;
+  padding: 3px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.dsh-memory-delta-item:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.12)); }
+.dsh-memory-delta-item:focus-visible { outline: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.5)); outline-offset: -1px; }
+.dsh-memory-delta-item-head { display: flex; align-items: center; gap: 6px; }
+.dsh-memory-delta-badge {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 15px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+}
+.dsh-memory-delta-badge.is-decision { border-style: dashed; }
+.dsh-memory-delta-key {
+  flex: none;
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+}
+.dsh-memory-delta-meta { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.dsh-memory-delta-tag {
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 15px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14));
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+}
+.dsh-memory-delta-file {
+  margin-top: 1px;
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #8c8c8c);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;      /* 文件名太长时从**左边**截断，保留结尾的标识部分 */
+  text-align: left;
+}
 .dsh-memory-delta-due {
   border: 1px solid var(--dsw-alias-state-warn-primary, rgba(178,106,0,.4));
   border-radius: 6px;
@@ -114,10 +251,15 @@ window.__ModuleLoader__.load({
 .dsh-memory-delta-due-line { display: flex; gap: 6px; align-items: baseline; margin-top: 4px; }
 .dsh-memory-delta-due-line:first-of-type { margin-top: 0; }
 .dsh-memory-delta-flag { white-space: nowrap; font-weight: 600; }
-.dsh-memory-delta-item { margin-top: 4px; }
 .dsh-memory-delta-line { word-break: break-word; }
 .dsh-memory-delta-verify { margin-left: 10px; }
 .dsh-memory-delta-empty { padding: 2px 0; }
+.dsh-memory-delta-note {
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+}
 `;
 
     /** 样式只注入一次（宿主也可能加载多个 dsh-memory-delta 实例，靠 STYLE_ID 去重）。 */
@@ -186,35 +328,132 @@ window.__ModuleLoader__.load({
       return '今天到期';
     }
 
+    /**
+     * 让宿主打开一个目录（系统文件管理器）。
+     *
+     * 失败时**把宿主的原因原样抛出来** —— 「点了没反应」是最难查的用户体验，
+     * 面板会把这句话显示在状态行下面。
+     */
+    function requestReveal(where, workspace) {
+      return fetch(REVEAL_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(workspace ? { where, workspace } : { where }),
+      }).then(async (res) => {
+        let data = null;
+        try {
+          data = await res.json();
+        } catch {
+          data = null;
+        }
+        if (!res.ok || !data || data.ok === false) {
+          throw new Error((data && data.error) || `HTTP ${res.status}`);
+        }
+        return data;
+      });
+    }
+
     const row = (key, children) => h('div', { className: 'dsh-memory-delta-row', key }, children);
 
-    function item(key, line, tail) {
+    /** 只取文件名（`D:\...\facts\sandbox-no-egress.md` → `sandbox-no-egress.md`）。 */
+    function baseNameOf(file) {
+      const s = String(file || '');
+      const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+      return i >= 0 ? s.slice(i + 1) : s;
+    }
+
+    /**
+     * 分节：一行「分组头」（**可点**，带自绘箭头）+ 缩进的条目体。
+     *
+     * 折叠状态由父组件的 `collapsed` 管（不受控的 `<details>` 在 React 里
+     * 会被 `open` 属性来回覆盖，刷新后弹回全展开）。
+     *
+     * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, onReveal }`
+     *   `slug` 是磁盘上的文件夹名（facts / decisions / inbox）；没有对应目录的分组传 null。
+     *   `onReveal` 有值时分组头右侧多一个「打开目录」按钮。
+     */
+    function section(spec, children) {
+      const { key, title, slug, count, hint, open, onToggle, onReveal, className } = spec;
       return h(
         'div',
-        { className: 'dsh-memory-delta-item', key },
-        h('div', { className: 'dsh-memory-delta-line' }, line),
-        tail || null,
+        { className: className ? `dsh-memory-delta-section ${className}` : 'dsh-memory-delta-section', key },
+        h(
+          'div',
+          { className: 'dsh-memory-delta-section-head' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-memory-delta-toggle',
+              onClick: onToggle,
+              'aria-expanded': open ? 'true' : 'false',
+              title: open ? '收起' : '展开',
+            },
+            h('span', { className: open ? 'dsh-memory-delta-caret is-open' : 'dsh-memory-delta-caret' }, null),
+            h('span', { className: 'dsh-memory-delta-section-title' }, title),
+            slug ? h('span', { className: 'dsh-memory-delta-dim dsh-memory-delta-slug' }, `（${slug}）`) : null,
+            hint ? h('span', { className: 'dsh-memory-delta-dim dsh-memory-delta-section-hint' }, hint) : null,
+            h('span', { className: 'dsh-memory-delta-count' }, String(count)),
+          ),
+          onReveal
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini',
+                  onClick: onReveal,
+                  title: slug ? `在系统文件管理器里打开 ${slug} 目录` : '在系统文件管理器里打开该目录',
+                },
+                '打开目录',
+              )
+            : null,
+        ),
+        open ? h('div', { className: 'dsh-memory-delta-body' }, children) : null,
       );
     }
 
     /**
-     * 分节。
+     * 一条记忆。
      *
-     * @param slug 磁盘上的**文件夹名**（`facts` / `decisions` / `inbox`），显示在中文标题后面，
-     *   让用户能把界面上的分组和记忆库里的目录对上号。没有对应目录的分组传 null。
+     * **整行可点 = 打开这条记忆的 .md**（走 `ctx.betterSidebar.openFile`）。
+     * `showType` 只在"按标签分组"时开 —— 那时分组头是标签，条目得自己说明是事实还是决策。
      */
-    function section(key, title, count, children, slug) {
+    function item(e, opts) {
+      const file = typeof e.file === 'string' && e.file ? e.file : null;
+      const tags = Array.isArray(e.tags) ? e.tags : [];
+      const typeLabel = e.type === 'decision' ? '决策' : e.type === 'fact' ? '事实' : null;
+      const canOpen = Boolean(file) && typeof opts.onOpen === 'function';
       return h(
-        'details',
-        { className: 'dsh-memory-delta-section', key, open: true },
+        'div',
+        {
+          className: 'dsh-memory-delta-item',
+          key: e.id,
+          role: canOpen ? 'button' : undefined,
+          tabIndex: canOpen ? 0 : undefined,
+          title: file ? `打开 ${file}` : undefined,
+          onClick: canOpen ? () => opts.onOpen(file) : undefined,
+        },
         h(
-          'summary',
-          null,
-          title,
-          slug ? h('span', { className: 'dsh-memory-delta-dim dsh-memory-delta-slug' }, `（${slug}）`) : null,
-          h('span', { className: 'dsh-memory-delta-dim' }, `（${count}）`),
+          'div',
+          { className: 'dsh-memory-delta-item-head' },
+          opts.showType && typeLabel
+            ? h(
+                'span',
+                { className: e.type === 'decision' ? 'dsh-memory-delta-badge is-decision' : 'dsh-memory-delta-badge' },
+                typeLabel,
+              )
+            : null,
+          e.key ? h('span', { className: 'dsh-memory-delta-key' }, e.key) : null,
+          h(
+            'span',
+            { className: 'dsh-memory-delta-meta' },
+            tags.slice(0, 3).map((t) => h('span', { className: 'dsh-memory-delta-tag', key: t }, String(t))),
+            e.date ? h('span', { className: 'dsh-memory-delta-dim' }, String(e.date)) : null,
+            canOpen ? h('span', { className: 'dsh-memory-delta-mini' }, '打开') : null,
+          ),
         ),
-        children,
+        h('div', { className: 'dsh-memory-delta-line' }, e.line),
+        file ? h('div', { className: 'dsh-memory-delta-file', title: file }, baseNameOf(file)) : null,
       );
     }
 
@@ -260,10 +499,69 @@ window.__ModuleLoader__.load({
 
       const onRefresh = () => load(workspace);
 
+      /**
+       * 折叠状态：**由我们持有**，默认全展开。
+       *
+       * 之前用 `<details open>`：`open` 是受控属性，任何一次重渲染（比如点刷新）都会
+       * 把用户刚收起来的分组重新弹开，而且原生 marker 又被样式藏了 ——
+       * 结果是"看不出能点、点了也记不住"。
+       */
+      const [collapsed, setCollapsed] = useState({});
+      const [groupBy, setGroupBy] = useState('type');
+      const [actionError, setActionError] = useState(null);
+      const toggleSection = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+      const isOpen = (key) => !collapsed[key];
+
+      const hostCtx = props.hostCtx || props.ctx || null;
+
+      /**
+       * 点条目 → 在侧边栏编辑器里打开这条记忆的 `.md`。
+       *
+       * 用的是 better-sidebar 的**官方**客户端 API（`BetterSidebarService.openFile`，
+       * v0.12.0+ 的能力位 `openFile`）：它内部是 `openTab({type:'editor', path})`，
+       * 同一个文件重复点击会聚焦已有页签（tab id 由路径派生）。
+       * 这样"改内容/归档/删除"就不必在面板里再造一套 —— 交给现成的编辑器。
+       */
+      const openMemoryFile = (file) => {
+        const svc = hostCtx && hostCtx.betterSidebar;
+        if (!svc || typeof svc.openFile !== 'function') {
+          setActionError('这个版本的 better-sidebar 没有 openFile 接口，打不开文件（可以到记忆库目录里手动打开）。');
+          return;
+        }
+        try {
+          svc.openFile(scope, file, baseNameOf(file));
+          setActionError(null);
+        } catch (err) {
+          setActionError(`打开失败：${err && err.message ? err.message : String(err)}`);
+        }
+      };
+
+      /** 点「打开目录」→ 宿主用系统文件管理器打开（白名单目录 + 回环校验在宿主那侧）。 */
+      const revealFolder = (where) => {
+        const ws = state && typeof state.workspace === 'string' && state.workspace ? state.workspace : workspace;
+        requestReveal(where, ws)
+          .then(() => setActionError(null))
+          .catch((err) => setActionError(`打开目录失败：${err && err.message ? err.message : String(err)}`));
+      };
+
       const head = h(
         'div',
         { className: 'dsh-memory-delta-head' },
         h('span', { className: 'dsh-memory-delta-title' }, '记忆'),
+        h(
+          'span',
+          { className: 'dsh-memory-delta-seg' },
+          h(
+            'button',
+            { type: 'button', className: groupBy === 'type' ? 'is-on' : undefined, onClick: () => setGroupBy('type'), title: '按类型分组：事实（facts）/ 决策（decisions）' },
+            '类型',
+          ),
+          h(
+            'button',
+            { type: 'button', className: groupBy === 'tag' ? 'is-on' : undefined, onClick: () => setGroupBy('tag'), title: '按标签分组（取每条的第一个标签）' },
+            '标签',
+          ),
+        ),
         h(
           'button',
           { type: 'button', className: 'dsh-memory-delta-btn', onClick: onRefresh, disabled: busy },
@@ -313,15 +611,16 @@ window.__ModuleLoader__.load({
       );
 
       const dueList = Array.isArray(state.due) ? state.due : [];
-      const dueBlock = h(
-        'div',
-        { className: dueList.length ? 'dsh-memory-delta-section dsh-memory-delta-due' : 'dsh-memory-delta-section' },
-        h(
-          'div',
-          { className: 'dsh-memory-delta-title' },
-          '待复核',
-          h('span', { className: 'dsh-memory-delta-dim' }, `（${dueList.length}）`),
-        ),
+      const dueBlock = section(
+        {
+          key: 'due',
+          title: '待复核',
+          slug: null,
+          count: dueList.length,
+          className: dueList.length ? 'dsh-memory-delta-due' : null,
+          open: isOpen('due'),
+          onToggle: () => toggleSection('due'),
+        },
         dueList.length === 0
           ? h(
               'div',
@@ -348,57 +647,115 @@ window.__ModuleLoader__.load({
       );
 
       const entries = Array.isArray(state.entries) ? state.entries : [];
+      /** 新的排前面（同一天按 id 稳定排序）—— "最近记了什么"比字母序有用得多。 */
+      const byDateDesc = (list) =>
+        [...list].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(a.id).localeCompare(String(b.id)));
+      const itemOpts = { onOpen: openMemoryFile, showType: false };
+
+      const groupSection = (key, title, slug, list) =>
+        list.length
+          ? section(
+              {
+                key: `type:${key}`,
+                title,
+                slug,
+                count: list.length,
+                open: isOpen(`type:${key}`),
+                onToggle: () => toggleSection(`type:${key}`),
+                onReveal: slug ? () => revealFolder(slug) : null,
+              },
+              byDateDesc(list).map((e) => item(e, itemOpts)),
+            )
+          : null;
+
+      /**
+       * 按标签分组（"自动归纳"里唯一确定有用的那半）：
+       * 取每条**第一个**标签当主题，其余标签仍在条目行上显示；
+       * 没标签的归到最后一组。组间按条数从多到少 —— 大头在前。
+       */
+      const tagGroups = () => {
+        const map = new Map();
+        for (const e of entries) {
+          const tag = Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : '__untagged__';
+          if (!map.has(tag)) map.set(tag, []);
+          map.get(tag).push(e);
+        }
+        const named = [...map.entries()].filter(([k]) => k !== '__untagged__');
+        named.sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+        const untagged = map.get('__untagged__');
+        if (untagged) named.push(['__untagged__', untagged]);
+        return named;
+      };
+
       const facts = entries.filter((e) => e.type === 'fact');
       const decisions = entries.filter((e) => e.type === 'decision');
       const other = entries.filter((e) => e.type !== 'fact' && e.type !== 'decision');
-      const group = (key, title, list, slug) =>
-        list.length
-          ? section(
-              key,
-              title,
-              list.length,
-              list.map((e) =>
-                item(
-                  e.id,
-                  h('span', null, e.line, e.key ? h('span', { className: 'dsh-memory-delta-dim' }, ` [${e.key}]`) : null),
-                ),
-              ),
-              slug,
-            )
-          : null;
 
       const standing = entries.length
         ? h(
             'div',
             null,
-            group('facts', '事实', facts, 'facts'),
-            group('decisions', '决策', decisions, 'decisions'),
-            // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
-            group('other', '其它', other, null),
+            groupBy === 'tag'
+              ? tagGroups().map(([tag, list]) =>
+                  section(
+                    {
+                      key: `tag:${tag}`,
+                      title: tag === '__untagged__' ? '未加标签' : tag,
+                      slug: null,
+                      count: list.length,
+                      hint: '按标签',
+                      open: isOpen(`tag:${tag}`),
+                      onToggle: () => toggleSection(`tag:${tag}`),
+                    },
+                    byDateDesc(list).map((e) => item(e, { ...itemOpts, showType: true })),
+                  ),
+                )
+              : [
+                  groupSection('facts', '事实', 'facts', facts),
+                  groupSection('decisions', '决策', 'decisions', decisions),
+                  // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
+                  groupSection('other', '其它', null, other),
+                ],
           )
         : h('div', { className: 'dsh-memory-delta-section' }, h('div', { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' }, '还没有常驻记忆'));
 
       const inbox = Array.isArray(state.inbox) ? state.inbox : [];
       const inboxBlock = section(
-        'inbox',
-        '收件箱候选',
-        typeof counts.inbox === 'number' ? counts.inbox : inbox.length,
-        h(
-          'div',
-          null,
-          h('div', { className: 'dsh-memory-delta-dim' }, '候选放在 inbox/ 目录；确认后才成为常驻记忆（promote 后写进 facts/ 或 decisions/ 才会被注入）。'),
+        {
+          key: 'inbox',
+          title: '收件箱候选',
+          slug: 'inbox',
+          count: typeof counts.inbox === 'number' ? counts.inbox : inbox.length,
+          open: isOpen('inbox'),
+          onToggle: () => toggleSection('inbox'),
+          onReveal: () => revealFolder('inbox'),
+        },
+        [
+          h(
+            'div',
+            { className: 'dsh-memory-delta-dim', key: 'hint' },
+            '候选放在 inbox/ 目录；确认后才成为常驻记忆（promote 后写进 facts/ 或 decisions/ 才会被注入）。',
+          ),
           inbox.length === 0
             ? h(
                 'div',
-                { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' },
+                { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '还没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : inbox.map((e) => item(e.id, e.line, h('div', { className: 'dsh-memory-delta-dim' }, `${e.type || '—'}${e.date ? ` · ${e.date}` : ''}`))),
-        ),
-        'inbox',
+            : inbox.map((e) => item(e, { ...itemOpts, showType: true })),
+        ],
       );
 
-      return h('div', { className: 'dsh-memory-delta-tab' }, head, statusRow, dueBlock, standing, inboxBlock);
+      return h(
+        'div',
+        { className: 'dsh-memory-delta-tab' },
+        head,
+        statusRow,
+        actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
+        dueBlock,
+        standing,
+        inboxBlock,
+      );
     }
 
     /* ------------------------------------------------------------ 注册 */
@@ -414,7 +771,9 @@ window.__ModuleLoader__.load({
           order: 60,
           // 单实例：多次打开只聚焦已有页签，不会叠出好几个「记忆」页
           single: true,
-          component: MemoryPanel,
+          // 把 ctx 显式喂给组件：面板要调 `ctx.betterSidebar.openFile` 打开条目文件。
+          // 组件本身在模块顶层定义（不能闭包到 apply 的 ctx），所以这里包一层。
+          component: (props) => h(MemoryPanel, Object.assign({}, props, { hostCtx: ctx })),
         }),
       );
     }

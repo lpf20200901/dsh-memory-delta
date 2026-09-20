@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **544 个断言全绿**（CLI 109 + planner 43 + search 51 + due 93 + hook 63 + plugin 130 + client 55），
+  - 测试 **596 个断言全绿**（CLI 109 + planner 43 + search 51 + due 93 + hook 63 + plugin 153 + client 84），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 
@@ -296,4 +296,37 @@ verify_when: Windows 大版本更新后重新评估
    把差分基线清零，下一轮又全量重灌。
 
 `dueWithin`（提前 N 天）从 CLI（`mem due --within`）和插件 Config 两处都能配，默认 0（只看已到期）。
+
+### 侧边栏面板：为什么这样设计（M6）
+
+真实使用反馈暴露了四件事，逐条记下取舍：
+
+**① 折叠标志不能用样式藏掉。** 原来用原生 `<details open>` + `list-style:none` +
+隐藏 `::-webkit-details-marker`，结果**没有任何"可以展开"的视觉线索**，用户根本不知道能点；
+而且 `open` 是受控属性，任何一次重渲染（点刷新）都会把用户刚收起来的分组弹开。
+现在：自绘箭头（CSS 三角，展开时旋转 90°）+ 折叠状态由组件自己的 `useState` 持有 + 分组头是
+真正的 `<button>`（带 `aria-expanded`，键盘可用）。
+
+**② 面板不做编辑/删除，只做「入口」。** 侧边栏**本来就有**编辑器（`openFile`，预览/编辑/保存）
+和文件树（重命名/删除带确认弹窗，还会重定向已打开的页签）。在面板里再造一套增删改 =
+重复实现 + 永久维护税。所以：**点条目 → 打开它那个 `.md`**（better-sidebar 官方 API
+`BetterSidebarService.openFile`，能力位 `openFile`，v0.12.0+）。
+
+⚠️ **陷阱**：`id` 写在 frontmatter 里、且 `validate` 强制它与文件名一致 ——
+**别用文件树直接给记忆条目改名**，那会造出 `id 与文件名不一致`。安全改名得走
+`mem rename`（同时改 frontmatter、文件名与引用），面板只**提示**、绝不代替。
+
+**③ "打开目录"交给系统文件管理器，而不是 better-sidebar 内部的 `revealPaths`。**
+文件树里的"在文件夹中显示"走的是内部实现（`intercept.tsx` 的 `revealInExplorer` →
+`store.reduce(revealPaths)`），**没有进公开 API**；照抄它等于依赖未公开的内部状态，
+0.18 / 0.19 两代实现不同，一升级就碎。所以宿主机自己开一条
+`POST /dsh-memory-delta/reveal`：**白名单目录名**（`root`/`facts`/`decisions`/`inbox`/`archive`，
+绝不接受任意路径）+ 只认回环来源 + `allowOpenFolder:false` 可关；
+子进程用 `stdio:'ignore'`（DSH 沙箱禁命名管道，捕获输出会 EPERM，这里也不需要输出）。
+
+**④ "自动归纳"只做确定有用的那一半。** 语义聚类不做（结果不确定、用户还得纠错，
+和之前否掉的看板/计数器同类）。做的是：**按标签分组**（取每条第一个标签，没标签的归一组，
+组间按条数排序）+ **条目按日期倒序** + 把 `tags` / `date` / **文件名**显示出来。
+显示文件名是刻意的：它是"内容混乱"的根源（没给 `key` 的条目会拿到
+`2026-09-17-<截断的结论>.md` 这种自动名），**先在界面上暴露出来**，再让 `mem rename` 去修。
 

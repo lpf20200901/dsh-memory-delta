@@ -108,7 +108,8 @@ AI 编码助手有两个反复出现的毛病：
 | `memory_write` | 把候选条目写进 inbox —— **模型不允许直接改事实层** |
 | 蒸馏提醒 | 会话跑过若干轮而记忆已是最新时，提醒模型把本次结论落到 inbox；每会话只提醒一次，且提醒消息**不带状态**，不污染差分基线 |
 | 到期复核提醒 | `verify_when` 不再是死字段：条目到了当初约定的复核期，会话里会**提醒一次**"这条结论可能过时了，请复核"，并给出该用哪条命令取代/标过期。写成**人话**的值（`等换机器时`）永远不会触发它（否则每个会话都弹一次、怎么改都消不掉）；只在"本轮本来不注入任何记忆"时才提醒，同样**不带状态** |
-| 侧边栏「记忆」页签 | 装了 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 后，侧边栏多一个**记忆**页：常驻条目、到期待复核项、收件箱候选，以及当前注入体积。客户端半边是**手写的零构建浏览器 bundle**（`window.__ModuleLoader__.load({id, factory})` 包装，不引入任何打包器）；数据来自本插件自己的只读路由 `POST /dsh-memory-delta/state` —— 仅回环、JSON 进 JSON 出、只读记忆库，不碰别的文件 |
+| 侧边栏「记忆」页签 | 装了 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 后，侧边栏多一个**记忆**页：可折叠分组（自绘箭头，一眼看出能展开）、常驻条目、到期待复核项、收件箱候选、当前注入体积。**点某条记忆 = 打开它那个 `.md`**（走 better-sidebar 的官方 `openFile`，在侧边栏编辑器里预览/编辑）；**点分组头右边的「打开目录」= 用系统文件管理器打开 `facts/`、`decisions/`、`inbox/`**。分组可按**类型**（事实/决策）或**标签**看（取每条第一个标签）。客户端半边是**手写的零构建浏览器 bundle**（`window.__ModuleLoader__.load({id, factory})` 包装，不引入任何打包器）；数据来自本插件自己的只读路由 `POST /dsh-memory-delta/state` —— 仅回环、JSON 进 JSON 出、只读记忆库，不碰别的文件。唯一会**动作**的路由是 `POST /dsh-memory-delta/reveal`：只接受白名单目录名（`root` / `facts` / `decisions` / `inbox` / `archive`），由宿主用系统文件管理器打开，可用配置 `allowOpenFolder: false` 关掉 |
+| 为什么不把"编辑/删除记忆"做进面板 | 侧边栏**本来就有**编辑器（点条目即打开）和文件树（重命名/删除带确认）。在面板里再造一套增删改 = 重复实现 + 长期维护负担，所以面板只做「入口」：打开文件、打开目录。⚠️ 但**不要**用文件树直接给记忆条目改名 —— `id` 写在 frontmatter 里且必须与文件名一致，`mem validate` 会报 `id 与文件名不一致` |
 
 为什么插件**不去 spawn CLI**：DSH 沙箱禁止命名管道，捕获子进程输出会 EPERM；而且没必要 ——
 插件直接 `import` 同一份 store 逻辑（`bin/mem.mjs` 只在被直接执行时才跑 CLI）。
@@ -117,8 +118,9 @@ AI 编码助手有两个反复出现的毛病：
 
 ![侧边栏里的「记忆」页签](assets/sidebar-memory-tab.png)
 
-<sub>从侧边栏的 `+` 菜单打开的**「记忆」页签**：常驻条目与其语义键、待复核区、收件箱候选，
-以及当前记忆库每轮会话要花多少字节。**只读**，不会写记忆库。</sub>
+<sub>从侧边栏的 `+` 菜单打开的**「记忆」页签**：可折叠分组（标题后的等宽字是磁盘上的目录名）、
+常驻条目与其语义键/标签/日期/文件名、待复核区、收件箱候选，以及当前记忆库每轮会话要花多少字节。
+**点条目在编辑器里打开、点「打开目录」交给系统文件管理器**，面板本身从不写记忆库。</sub>
 
 ## CLI 用法
 
@@ -170,7 +172,7 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 544 个断言，零依赖
+npm test        # 596 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
@@ -180,8 +182,8 @@ npm test        # 544 个断言，零依赖
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 130 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 侧边栏路由） |
-| `test/client-tests.mjs` | 55 | 侧边栏面板 bundle（假 React + 假 `fetch`，含「中文 ↔ 存储目录名」标签） |
+| `test/plugin-tests.mjs` | 153 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + 打开目录的白名单/来源校验） |
+| `test/client-tests.mjs` | 84 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、点目录调 reveal、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。

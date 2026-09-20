@@ -73,20 +73,46 @@ function hasClassName(node, className) {
 }
 
 /**
- * 每个 `<summary>` 的直接文本，**相邻拼接**。
+ * 每个分组头（`.dsh-memory-delta-toggle`）的直接文本，**相邻拼接**。
  * allText 是按节点换行拼的，验证不了「事实（facts）」这种同一行内的相邻关系。
  */
-function summaryTexts(node, out = []) {
+function headerTexts(node, out = []) {
   if (!node || typeof node !== 'object') return out;
   if (Array.isArray(node)) {
-    for (const n of node) summaryTexts(n, out);
+    for (const n of node) headerTexts(n, out);
     return out;
   }
-  if (node.type === 'summary') {
+  if (typeof node.props?.className === 'string' && node.props.className.includes('dsh-memory-delta-toggle')) {
     out.push(collectStrings(node.kids, []).join(''));
     return out;
   }
-  summaryTexts(node.kids ?? node.children, out);
+  headerTexts(node.kids ?? node.children, out);
+  return out;
+}
+
+/** 深度优先找第一个 className 含某串的节点（找不到返回 null）。 */
+function findByClass(node, className) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = findByClass(n, className);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (typeof node.props?.className === 'string' && node.props.className.includes(className)) return node;
+  return findByClass(node.kids ?? node.children, className);
+}
+
+/** 找所有 className 含某串的节点。 */
+function findAllByClass(node, className, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const n of node) findAllByClass(n, className, out);
+    return out;
+  }
+  if (typeof node.props?.className === 'string' && node.props.className.includes(className)) out.push(node);
+  findAllByClass(node.kids ?? node.children, className, out);
   return out;
 }
 
@@ -269,7 +295,10 @@ section('apply：注册页签 descriptor');
   check('id 正确（包名:memory）', captured?.id === 'dsh-memory-delta:memory', String(captured?.id));
   check('title 是「记忆」', captured?.title === '记忆', String(captured?.title));
   check('component 是函数', typeof captured?.component === 'function');
-  check('component 就是导出的 MemoryPanel', captured?.component === mounted.exportsOf.MemoryPanel);
+  // component 现在是一层包装（把 ctx 喂给面板，面板要用 ctx.betterSidebar.openFile）
+  const wrapped = captured?.component?.({ scope: { sessionId: 's1' } });
+  check('component 包的是导出的 MemoryPanel', wrapped?.type === mounted.exportsOf.MemoryPanel, String(wrapped?.type?.name));
+  check('包装层把 ctx 传给面板（面板靠它调 openFile）', wrapped?.props?.hostCtx === fakeCtx, String(wrapped?.props?.hostCtx));
 }
 
 /* --------------------------------------------- 组件：正常数据能渲染出来 */
@@ -283,13 +312,55 @@ const SAMPLE = {
   budget: 3072,
   bytes: 953,
   entries: [
-    { id: 'fact-a', type: 'fact', key: 'node-rm-nonascii', status: 'active', tags: ['node'], line: '路径含非 ASCII 时不要用 rmSync' },
-    { id: 'dec-b', type: 'decision', status: 'active', tags: [], line: '记忆的事实层只能由人确认后写入' },
+    // 故意把**旧的**放前面：界面要按日期倒序（最近记的排前面），断言能抓到这个排序
+    {
+      id: 'fact-old',
+      type: 'fact',
+      key: 'old-key',
+      status: 'active',
+      tags: ['node'],
+      date: '2026-09-01',
+      file: 'D:\\proj\\memory\\facts\\fact-old.md',
+      line: '旧的一条事实',
+    },
+    {
+      id: 'fact-a',
+      type: 'fact',
+      key: 'node-rm-nonascii',
+      status: 'active',
+      tags: ['node', 'sandbox'],
+      date: '2026-09-17',
+      file: 'D:\\proj\\memory\\facts\\node-rm-nonascii.md',
+      line: '路径含非 ASCII 时不要用 rmSync',
+    },
+    {
+      id: 'dec-b',
+      type: 'decision',
+      status: 'active',
+      tags: [],
+      date: '2026-09-16',
+      file: 'D:\\proj\\memory\\decisions\\fact-layer-writer.md',
+      line: '记忆的事实层只能由人确认后写入',
+    },
   ],
   due: [{ id: 'fact-a', line: '路径含非 ASCII 时不要用 rmSync', verifyWhen: '2026-09-14', due: '2026-09-14', overdueDays: 3 }],
-  inbox: [{ id: 'cand-1', type: 'fact', line: '沙箱禁止命名管道', date: '2026-09-17' }],
-  counts: { active: 2, facts: 1, decisions: 1, inbox: 1, archive: 0, due: 1 },
+  inbox: [{ id: 'cand-1', type: 'fact', line: '沙箱禁止命名管道', date: '2026-09-17', file: 'D:\\proj\\memory\\inbox\\cand-1.md' }],
+  counts: { active: 3, facts: 2, decisions: 1, inbox: 1, archive: 0, due: 1 },
 };
+
+/** 面板要用 ctx.betterSidebar.openFile；这里给一个记账用的假服务。 */
+function fakeSidebar(overrides = {}) {
+  const opened = [];
+  return {
+    opened,
+    service: {
+      openFile(scope, path, title) {
+        opened.push({ scope, path, title });
+      },
+      ...overrides,
+    },
+  };
+}
 
 section('组件：正常数据');
 {
@@ -321,26 +392,178 @@ section('组件：正常数据');
   await flush();
   const text = allText(mounted.tree());
   check('显示记忆库 root', text.includes('D:\\proj\\memory'), text.slice(0, 200));
-  check('显示常驻条数', text.includes('常驻 2 条'), text.slice(0, 200));
+  check('显示常驻条数', text.includes('常驻 3 条'), text.slice(0, 200));
   check('显示注入字节与预算', text.includes('注入 953 / 3072 字节'), text.slice(0, 200));
   check('没有超出预算时不给超预算提示', !text.includes('超出预算'), text.slice(0, 200));
   check('列出待复核项', text.includes('待复核') && text.includes('已超期 3 天'), text.slice(0, 400));
   check('待复核项带上 verify_when', text.includes('verify_when: 2026-09-14'), text.slice(0, 400));
   check('待复核项显示结论行', text.includes('路径含非 ASCII 时不要用 rmSync'), text.slice(0, 400));
   check('常驻条目按事实/决策分组', text.includes('事实') && text.includes('决策'), text.slice(0, 400));
-  const summaries = summaryTexts(mounted.tree()).join(' | ');
+  const headers = headerTexts(mounted.tree()).join(' | ');
   check(
     '分组标题标出磁盘目录名（中文 ↔ 文件夹对照）',
-    summaries.includes('事实（facts）') && summaries.includes('决策（decisions）'),
-    summaries,
+    headers.includes('事实（facts）') && headers.includes('决策（decisions）'),
+    headers,
   );
-  check('收件箱分目标出 inbox 目录', summaries.includes('收件箱候选（inbox）'), summaries);
+  check('收件箱分目标出 inbox 目录', headers.includes('收件箱候选（inbox）'), headers);
   check('收件箱说明里点名 inbox/ → facts/decisions 的去向', text.includes('inbox/ 目录') && text.includes('facts/ 或 decisions/'), text.slice(0, 500));
-  check('带 key 的条目显示 [key]', text.includes('[node-rm-nonascii]'), text.slice(0, 400));
+  check('带 key 的条目显示 key（等宽、不带方括号）', text.includes('node-rm-nonascii'), text.slice(0, 400));
   check('收件箱候选有数量与提示', text.includes('收件箱候选') && text.includes('确认后才成为常驻记忆'), text.slice(0, 500));
   check('收件箱列出候选结论', text.includes('沙箱禁止命名管道'), text.slice(0, 500));
   check('有刷新按钮', text.includes('刷新'), text.slice(0, 200));
   check('读取完成后没有错误块', !hasClassName(mounted.tree(), 'dsh-memory-delta-error'));
+
+  // ④ 层级：箭头（可展开的标志）+ 条目上的标签/日期/文件名
+  const carets = findAllByClass(mounted.tree(), 'dsh-memory-delta-caret');
+  check('每个分组头都有自绘箭头（能看出可以展开）', carets.length >= 4, String(carets.length));
+  check('默认展开 → 箭头带 is-open', carets.every((c) => c.props.className.includes('is-open')), carets.map((c) => c.props.className).join('|'));
+  check('条目显示标签', text.includes('sandbox'), text.slice(0, 400));
+  check('条目显示日期', text.includes('2026-09-17'), text.slice(0, 400));
+  check('条目显示文件名（暴露难看的自动命名）', text.includes('node-rm-nonascii.md'), text.slice(0, 400));
+  check(
+    '条目按日期倒序（09-17 在 09-01 之前）',
+    text.indexOf('路径含非 ASCII 时不要用 rmSync') < text.indexOf('旧的一条事实'),
+    text.slice(0, 500),
+  );
+
+  globalThis.fetch = originalFetch;
+}
+
+/* ------------------------------------- 组件：抽屉（折叠）真的能收起来 */
+
+section('组件：折叠 / 展开');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+
+  const factsToggle = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) =>
+    collectStrings(n.kids, []).join('').includes('事实'),
+  );
+  check('找到「事实」分组头（是 button，键盘也能操作）', factsToggle?.type === 'button', String(factsToggle?.type));
+  check('展开时 aria-expanded=true', factsToggle?.props?.['aria-expanded'] === 'true', String(factsToggle?.props?.['aria-expanded']));
+
+  // ⚠️ 「路径含非 ASCII…」这句话在**待复核**块里也有一份（SAMPLE.due 用的同一行），
+  // 所以不能拿全文断言，得盯住「事实」分组里的条目节点。
+  const factItems = () =>
+    findAllByClass(mounted.tree(), 'dsh-memory-delta-item').filter((n) => allText(n).includes('路径含非 ASCII'));
+  check('收起前「事实」分组里有这条条目', factItems().length === 1, String(factItems().length));
+
+  factsToggle.props.onClick({});
+  check('收起后条目消失', factItems().length === 0, String(factItems().length));
+  const after = allText(mounted.tree());
+  check('收起后其它分组不受影响（决策仍在）', after.includes('记忆的事实层只能由人确认后写入'), after.slice(0, 300));
+  const factsHeader = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) =>
+    collectStrings(n.kids, []).join('').includes('事实'),
+  );
+  check('收起后该分组头的箭头不再带 is-open', !findByClass(factsHeader, 'dsh-memory-delta-caret').props.className.includes('is-open'));
+  check('分组头的展开标志变成"展开"（标题提示）', factsHeader.props.title === '展开', String(factsHeader.props.title));
+
+  // 重渲染（点刷新）之后折叠状态必须**记住** —— 早前用 <details open> 时会被弹回全展开
+  const refresh = findAllByClass(mounted.tree(), 'dsh-memory-delta-btn')[0];
+  refresh.props.onClick({});
+  await flush();
+  check('刷新后仍然是收起的（折叠状态由组件记着）', factItems().length === 0, String(factItems().length));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------------- 组件：点条目打开文件 / 点目录名打开目录 */
+
+section('组件：打开文件与打开目录');
+{
+  const originalFetch = globalThis.fetch;
+  const sidebar = fakeSidebar();
+  const revealCalls = [];
+  globalThis.fetch = (url, options) => {
+    if (url === '/dsh-memory-delta/reveal') {
+      revealCalls.push({ url, body: options?.body, method: options?.method });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ ok: true, dir: 'D:\\proj\\memory\\facts', opener: 'explorer.exe' }),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: sidebar.service } });
+  await flush();
+
+  // 点条目 → 在侧边栏编辑器里打开这条记忆（官方 openFile）
+  const item = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('路径含非 ASCII'));
+  check('条目行可点（role=button + 打开提示）', item?.props?.role === 'button' && allText(item).includes('打开'), String(item?.props?.role));
+  item.props.onClick({});
+  check('openFile 被调用，参数是绝对路径', sidebar.opened[0]?.path === 'D:\\proj\\memory\\facts\\node-rm-nonascii.md', JSON.stringify(sidebar.opened[0]));
+  check('openFile 带上 scope（会话作用域）', sidebar.opened[0]?.scope?.sessionId === 's1', JSON.stringify(sidebar.opened[0]?.scope));
+  check('openFile 的标题用文件名', sidebar.opened[0]?.title === 'node-rm-nonascii.md', String(sidebar.opened[0]?.title));
+
+  // 点「打开目录」→ POST /dsh-memory-delta/reveal（宿主用系统文件管理器打开）
+  const revealBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('打开目录'));
+  check('分组头上有「打开目录」按钮', Boolean(revealBtn));
+  revealBtn.props.onClick({});
+  await flush();
+  check('打开目录走 POST 动作路由', revealCalls[0]?.url === '/dsh-memory-delta/reveal' && revealCalls[0]?.method === 'POST', JSON.stringify(revealCalls[0]));
+  const revealBody = JSON.parse(revealCalls[0]?.body ?? '{}');
+  check('带上 where 与 workspace（宿主据此定位白名单目录）', revealBody.where === 'facts' && revealBody.workspace === 'D:\\proj', JSON.stringify(revealBody));
+  check('成功后不显示错误行', !hasClassName(mounted.tree(), 'dsh-memory-delta-note'), allText(mounted.tree()).slice(0, 200));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：打开失败要说清原因（不能"点了没反应"） */
+
+section('组件：打开失败的原因要显示出来');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+
+  // a) better-sidebar 没有 openFile（老版本）
+  const noApi = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: {} } });
+  await flush();
+  findByClass(noApi.tree(), 'dsh-memory-delta-item').props.onClick({});
+  check('没有 openFile 接口时给出可读提示', allText(noApi.tree()).includes('没有 openFile 接口'), allText(noApi.tree()).slice(0, 200));
+
+  // b) 宿主明确拒绝打开目录（例如 allowOpenFolder:false）→ 显示宿主的原因
+  globalThis.fetch = (url) => {
+    if (url === '/dsh-memory-delta/reveal') {
+      return Promise.resolve({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({ ok: false, error: '配置里关掉了「打开目录」（allowOpenFolder=false）' }),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+  const denied = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  findAllByClass(denied.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('打开目录')).props.onClick({});
+  await flush();
+  const deniedText = allText(denied.tree());
+  check('被拒绝时回显宿主的原因（而不是静默）', deniedText.includes('打开目录失败') && deniedText.includes('allowOpenFolder'), deniedText.slice(0, 300));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------------- 组件：按标签分组（自动归纳的廉价那半） */
+
+section('组件：类型 ↔ 标签 分组切换');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+
+  const seg = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
+  const tagBtn = seg.kids.find((n) => allText(n).includes('标签'));
+  check('头部有「类型 / 标签」切换', allText(seg).includes('类型') && allText(seg).includes('标签'), allText(seg));
+  tagBtn.props.onClick({});
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('切到标签视图：分组头变成标签名', headers.includes('node') && headers.includes('未加标签'), headers);
+  check('标签视图里没有再按类型分组', !headers.includes('（facts）'), headers);
+  const text = allText(mounted.tree());
+  check('标签视图里条目自己标出是事实还是决策', text.includes('事实') && text.includes('决策'), text.slice(0, 400));
 
   globalThis.fetch = originalFetch;
 }
@@ -446,7 +669,7 @@ section('组件：scope 里没有 cwd（从响应反推 workspace）');
     JSON.stringify(calls[0] ?? null),
   );
   check('从响应的 workspace 反推出后续请求的参数', calls.length >= 2 && calls[1].workspace === 'D:\\proj', JSON.stringify(calls));
-  check('反推之后仍然渲染成功', allText(mounted.tree()).includes('常驻 2 条'), allText(mounted.tree()).slice(0, 200));
+  check('反推之后仍然渲染成功', allText(mounted.tree()).includes('常驻 3 条'), allText(mounted.tree()).slice(0, 200));
   globalThis.fetch = originalFetch;
 }
 

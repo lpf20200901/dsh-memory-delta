@@ -636,6 +636,9 @@ function injectPayload(L, budget) {
     tags: e.data.tags || [],
     status: e.data.status,
     where: e.where,
+    // 条目文件（绝对路径）。给侧边栏面板"点一下直接打开这条记忆"用 ——
+    // 不参与 hash/差分（那是 id + type + key + scope + 结论首行算的）。
+    file: e.file,
     hash: entryHash(e),
     line: firstLine(e.body),
     // 下面两个字段是给"到期提醒"用的（src/due.mjs）：日期作相对写法的基准、
