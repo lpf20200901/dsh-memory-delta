@@ -27,7 +27,6 @@
   },
   "files": [
     "bin",
-    "assets",
     "src",
     "client",
     "cordis.patch.yml",
