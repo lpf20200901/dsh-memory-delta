@@ -128,6 +128,12 @@ the CLI when executed as the entry point). It also never *requires* the sidebar:
 through `ctx.get('webServer')` (an optional capability), so a headless or CLI-only composition loads the
 plugin unchanged and simply skips the panel route.
 
+![The 记忆 tab in the sidebar](assets/sidebar-memory-tab.png)
+
+<sub>The **记忆** tab, opened from the sidebar's `+` menu: standing entries with their keys, the
+due-for-review section, the inbox candidates, and how many bytes the current store costs per session.
+Read-only — it never writes to the store.</sub>
+
 ## CLI usage
 
 ```bash
