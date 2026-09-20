@@ -36,8 +36,6 @@ window.__ModuleLoader__.load({
     require('react-dom');
 
     const STATE_URL = '/dsh-memory-delta/state';
-    // 动作路由：让宿主用系统文件管理器打开记忆库里的某个目录（白名单 + 回环校验在宿主侧）。
-    const REVEAL_URL = '/dsh-memory-delta/reveal';
     // 写记忆库的动作（收件箱提升 / 安全改名）—— 宿主侧复用 CLI 的 promoteEntry / renameEntry。
     const ACTION_URL = '/dsh-memory-delta/action';
     const PLUGIN_ID = 'dsh-memory-delta';
@@ -163,7 +161,7 @@ window.__ModuleLoader__.load({
   gap: 4px;
 }
 
-/* 小按钮：打开目录 / 打开文件 */
+/* 小按钮：提升 / 整理文件名（只保留"要写库/要判断"的动作，纯跳转类的按钮都去掉了） */
 .dsh-memory-delta-mini {
   flex: none;
   padding: 1px 6px;
@@ -345,31 +343,6 @@ window.__ModuleLoader__.load({
       return '今天到期';
     }
 
-    /**
-     * 让宿主打开一个目录（系统文件管理器）。
-     *
-     * 失败时**把宿主的原因原样抛出来** —— 「点了没反应」是最难查的用户体验，
-     * 面板会把这句话显示在状态行下面。
-     */
-    function requestReveal(where, workspace) {
-      return fetch(REVEAL_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(workspace ? { where, workspace } : { where }),
-      }).then(async (res) => {
-        let data = null;
-        try {
-          data = await res.json();
-        } catch {
-          data = null;
-        }
-        if (!res.ok || !data || data.ok === false) {
-          throw new Error((data && data.error) || `HTTP ${res.status}`);
-        }
-        return data;
-      });
-    }
-
     const row = (key, children) => h('div', { className: 'dsh-memory-delta-row', key }, children);
 
     /** 只取文件名（`D:\...\facts\sandbox-no-egress.md` → `sandbox-no-egress.md`）。 */
@@ -385,12 +358,11 @@ window.__ModuleLoader__.load({
      * 折叠状态由父组件的 `collapsed` 管（不受控的 `<details>` 在 React 里
      * 会被 `open` 属性来回覆盖，刷新后弹回全展开）。
      *
-     * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, onReveal }`
+     * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, className }`
      *   `slug` 是磁盘上的文件夹名（facts / decisions / inbox）；没有对应目录的分组传 null。
-     *   `onReveal` 有值时分组头右侧多一个「打开目录」按钮。
      */
     function section(spec, children) {
-      const { key, title, slug, count, hint, open, onToggle, onReveal, className } = spec;
+      const { key, title, slug, count, hint, open, onToggle, className } = spec;
       return h(
         'div',
         { className: className ? `dsh-memory-delta-section ${className}` : 'dsh-memory-delta-section', key },
@@ -412,18 +384,6 @@ window.__ModuleLoader__.load({
             hint ? h('span', { className: 'dsh-memory-delta-dim dsh-memory-delta-section-hint' }, hint) : null,
             h('span', { className: 'dsh-memory-delta-count' }, String(count)),
           ),
-          onReveal
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-memory-delta-mini',
-                  onClick: onReveal,
-                  title: slug ? `在系统文件管理器里打开 ${slug} 目录` : '在系统文件管理器里打开该目录',
-                },
-                '打开目录',
-              )
-            : null,
         ),
         open ? h('div', { className: 'dsh-memory-delta-body' }, children) : null,
       );
@@ -470,7 +430,7 @@ window.__ModuleLoader__.load({
             tags.slice(0, 3).map((t) => h('span', { className: 'dsh-memory-delta-tag', key: t }, String(t))),
             e.date ? h('span', { className: 'dsh-memory-delta-dim' }, String(e.date)) : null,
             actions,
-            canOpen ? h('span', { className: 'dsh-memory-delta-mini' }, '打开') : null,
+            // 不再给「打开」小标签：整行本来就可点（hover 有底色 + title 提示），标签只是噪音
           ),
         ),
         h('div', { className: 'dsh-memory-delta-line' }, e.line),
@@ -561,14 +521,6 @@ window.__ModuleLoader__.load({
         } catch (err) {
           setActionError(`打开失败：${err && err.message ? err.message : String(err)}`);
         }
-      };
-
-      /** 点「打开目录」→ 宿主用系统文件管理器打开（白名单目录 + 回环校验在宿主那侧）。 */
-      const revealFolder = (where) => {
-        const ws = state && typeof state.workspace === 'string' && state.workspace ? state.workspace : workspace;
-        requestReveal(where, ws)
-          .then(() => setActionError(null))
-          .catch((err) => setActionError(`打开目录失败：${err && err.message ? err.message : String(err)}`));
       };
 
       const actionWorkspace = () =>
@@ -846,7 +798,6 @@ window.__ModuleLoader__.load({
                 count: list.length,
                 open: isOpen(`type:${key}`),
                 onToggle: () => toggleSection(`type:${key}`),
-                onReveal: slug ? () => revealFolder(slug) : null,
               },
               byDateDesc(list).map((e) => renderItem(e)),
             )
@@ -912,7 +863,6 @@ window.__ModuleLoader__.load({
           count: typeof counts.inbox === 'number' ? counts.inbox : inbox.length,
           open: isOpen('inbox'),
           onToggle: () => toggleSection('inbox'),
-          onReveal: () => revealFolder('inbox'),
         },
         [
           h(

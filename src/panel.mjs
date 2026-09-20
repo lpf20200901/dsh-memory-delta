@@ -1,13 +1,19 @@
 /**
- * 「记忆」侧边栏页签的**宿主半边** —— 一条只读状态路由 + 一条"打开目录"动作路由。
+ * 「记忆」侧边栏页签的**宿主半边** —— 一条只读状态路由 + 一条写记忆库的动作路由。
  *
  * 客户端插件（`client/client.js`）拿不到磁盘，所以数据的唯一来源是这里。
  * 这一层刻意做得很薄，而且**只做四件事**：
  *   1. 把 `workspace` / 插件 `root` 配置解析成记忆库根目录；
  *   2. 用**既有实现**（`bin/mem.mjs` 的 `injectPayload` / `readEntryFile`、
  *      `src/due.mjs` 的 `collectDue`）拼出一份面板要的状态；
- *   3. 在 webServer 上挂 `POST /dsh-memory-delta/state`（只读），带来源校验；
- *   4. 挂 `POST /dsh-memory-delta/reveal`（白名单目录 + 系统文件管理器打开）。
+ *   3. 在 webServer 上挂 `POST /dsh-memory-delta/state`（**只读**），带来源校验；
+ *   4. 挂 `POST /dsh-memory-delta/action`（**写库**：收件箱提升 / 安全改名），
+ *      逻辑复用 CLI 的 `promoteEntry` / `renameEntry`。
+ *
+ * 为什么**没有**"用系统文件管理器打开目录"那条路由：曾经有过（`/reveal`，白名单目录 +
+ * `explorer.exe`），但界面用不上 —— 用户判定"有折叠箭头 + 点条目打开详情就够了"。
+ * 一条没人调用的、会启动外部进程的路由纯粹是多余的安全面，于是连按钮带路由一起删掉了。
+ * 要恢复的话：宿主侧需要白名单 + `spawn(..., {stdio:'ignore'})`（沙箱禁命名管道）。
  *
  * 为什么不另写一套解析：`mem tell` / `memory_search` / `mem due` 已经有一套，
  * 面板再抄一份必然漂移 —— 面板显示"3 条常驻"而模型只收到 2 条，是最难查的那种 bug。
@@ -17,7 +23,6 @@
  * 而且天然绕开"GET 被缓存 / 被预取"的问题。
  */
 
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -32,9 +37,6 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
 
 /** `action` 路由认的操作 —— 白名单，别的一律 400。 */
 export const ACTION_OPS = ['promote', 'rename'];
-
-/** 动作路由（只读系统动作）：用系统文件管理器打开记忆库里的某个目录。 */
-export const MEMORY_REVEAL_PATH = '/dsh-memory-delta/reveal';
 
 /** 面板一次最多列的常驻条目数 —— 面板是"给用户信心"的，不是监控台。 */
 export const PANEL_ENTRY_LIMIT = 200;
@@ -377,96 +379,6 @@ async function readAllowedBody(req, res) {
   }
 }
 
-/* ---------------------------------------------------- 「打开目录」路由 */
-
-/**
- * 允许被"打开"的目标目录 —— **白名单**。
- *
- * 这条路由会去启动系统文件管理器（`explorer.exe` / `open` / `xdg-open`），
- * 所以绝不能让请求方指定任意路径：只认这几个**固定名字**，再由记忆库根目录拼出来。
- * `root` 是库本身（看 `index.md` / `journal.md` 那些不在子目录里的文件）。
- */
-export const REVEAL_WHERE = ['root', 'facts', 'decisions', 'inbox', 'archive'];
-
-/**
- * 把 `{configRoot, workspace, where}` 解析成一个**已确认存在**的目录。
- *
- * @returns {{dir: string}|{error: string, status: number}}
- */
-export function resolveRevealDir({ configRoot, workspace, where } = {}) {
-  const target = typeof where === 'string' && where ? where : 'root';
-  if (!REVEAL_WHERE.includes(target)) {
-    return { error: `不认识的目标：${target}（只允许 ${REVEAL_WHERE.join(' / ')}）`, status: 400 };
-  }
-  const { root } = resolvePanelRoot({ configRoot, workspace });
-  if (!root) return { error: '不知道记忆库在哪：请求里既没有 workspace，插件也没配 root', status: 400 };
-  const dir = target === 'root' ? root : path.join(root, target);
-  let stat;
-  try {
-    stat = fs.statSync(dir);
-  } catch {
-    return { error: `目录不存在：${dir}`, status: 404 };
-  }
-  if (!stat.isDirectory()) return { error: `不是目录：${dir}`, status: 404 };
-  return { dir };
-}
-
-/**
- * 用系统文件管理器打开一个目录。
- *
- * ⚠️ `stdio: 'ignore'` 是刻意的：DSH 沙箱里捕获子进程输出会因命名管道 EPERM
- * （见记忆库的 `sandbox-no-pipe`），而且这里本来也不需要它的输出。
- * `detached` + `unref` 让它活得比这次请求长 —— 我们只要"弹出来"。
- */
-export function openFolderInOs(dir) {
-  const [cmd, args] =
-    process.platform === 'win32'
-      ? ['explorer.exe', [dir]]
-      : process.platform === 'darwin'
-        ? ['open', [dir]]
-        : ['xdg-open', [dir]];
-  const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
-  child.unref();
-  return cmd;
-}
-
-/**
- * 「打开目录」路由：POST `{workspace?, where}` → 用系统文件管理器打开该目录。
- *
- * @param {{configRoot?: string, allow?: boolean, open?: (dir: string) => string}} [opts]
- * @returns {{kind: 'exact', path: string, handler: (req: any, res: any) => Promise<void>}}
- */
-export function createRevealRoute(opts = {}) {
-  const open = typeof opts.open === 'function' ? opts.open : openFolderInOs;
-  return {
-    kind: 'exact',
-    path: MEMORY_REVEAL_PATH,
-    async handler(req, res) {
-      try {
-        if (opts.allow === false) {
-          writeJson(res, 403, { ok: false, error: '配置里关掉了「打开目录」（allowOpenFolder=false）' });
-          return;
-        }
-        const body = await readAllowedBody(req, res);
-        if (body === null) return;
-        const resolved = resolveRevealDir({
-          configRoot: opts.configRoot ?? body?.configRoot,
-          workspace: body?.workspace,
-          where: body?.where,
-        });
-        if (resolved.error) {
-          writeJson(res, resolved.status, { ok: false, error: resolved.error });
-          return;
-        }
-        const cmd = open(resolved.dir);
-        writeJson(res, 200, { ok: true, dir: resolved.dir, opener: cmd ?? null });
-      } catch (error) {
-        writeJson(res, 500, { ok: false, error: `打开目录失败：${error?.message ?? String(error)}` });
-      }
-    },
-  };
-}
-
 /**
  * 造一个 webServer 路由对象：`{kind, path, handler}`。
  *
@@ -583,22 +495,6 @@ export function registerActionRoute(webServer, opts = {}, effect) {
   if (!webServer || typeof webServer.register !== 'function') return null;
   const route = createActionRoute(opts);
   if (typeof effect === 'function') effect(() => webServer.register(route), 'dsh-memory-delta: /dsh-memory-delta/action route');
-  else webServer.register(route);
-  return route;
-}
-
-/**
- * 注册「打开目录」路由。
- *
- * @param {object} webServer `ctx.get('webServer')` 的结果
- * @param {{configRoot?: string, allow?: boolean, open?: (dir: string) => string}} [opts]
- * @param {(body: () => any, label?: string) => unknown} [effect] `ctx.effect`
- * @returns {object|null} 路由对象；webServer 不可用时返回 null
- */
-export function registerRevealRoute(webServer, opts = {}, effect) {
-  if (!webServer || typeof webServer.register !== 'function') return null;
-  const route = createRevealRoute(opts);
-  if (typeof effect === 'function') effect(() => webServer.register(route), 'dsh-memory-delta: /dsh-memory-delta/reveal route');
   else webServer.register(route);
   return route;
 }

@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **662 个断言全绿**（CLI 137 + planner 43 + search 51 + due 93 + hook 63 + plugin 178 + client 97），
+  - 测试 **642 个断言全绿**（CLI 137 + planner 43 + search 51 + due 93 + hook 63 + plugin 160 + client 95），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 
@@ -316,13 +316,24 @@ verify_when: Windows 大版本更新后重新评估
 **别用文件树直接给记忆条目改名**，那会造出 `id 与文件名不一致`。安全改名得走
 `mem rename`（同时改 frontmatter、文件名与引用），面板只**提示**、绝不代替。
 
-**③ "打开目录"交给系统文件管理器，而不是 better-sidebar 内部的 `revealPaths`。**
-文件树里的"在文件夹中显示"走的是内部实现（`intercept.tsx` 的 `revealInExplorer` →
-`store.reduce(revealPaths)`），**没有进公开 API**；照抄它等于依赖未公开的内部状态，
-0.18 / 0.19 两代实现不同，一升级就碎。所以宿主机自己开一条
-`POST /dsh-memory-delta/reveal`：**白名单目录名**（`root`/`facts`/`decisions`/`inbox`/`archive`，
-绝不接受任意路径）+ 只认回环来源 + `allowOpenFolder:false` 可关；
-子进程用 `stdio:'ignore'`（DSH 沙箱禁命名管道，捕获输出会 EPERM，这里也不需要输出）。
+**③ "跳到目录"这类按钮**曾经做过，后来**按用户反馈删掉了**。
+当时的实现：宿主机开一条 `POST /dsh-memory-delta/reveal`（**白名单目录名**
+`root`/`facts`/`decisions`/`inbox`/`archive` + 只认回环来源 + `allowOpenFolder:false` 可关），
+用系统文件管理器打开该目录 —— 之所以不走 better-sidebar 内部的 `revealPaths`
+（`intercept.tsx` 的 `revealInExplorer` → `store.reduce(revealPaths)`），是因为它**没进公开 API**，
+照抄它等于依赖未公开的内部状态，0.18 / 0.19 两代实现不同，一升级就碎。
+
+删掉的理由值得记下来（这是"少即是多"的一次实践）：
+
+- 用户的原话是"有三角箭头和点击打开具体详情可以了" —— **折叠看内容 + 点条目打开详情**已经覆盖了
+  全部真实需求，"跳到目录"是给一个**不存在的需求**加的按钮；
+- 它同时是**唯一会启动外部进程**的路由（`spawn(explorer.exe)`）—— 一条没人调用的、
+  能拉起系统程序的路由是纯粹多出来的安全面，删掉比留着"以备将来"更对；
+- 条目行右侧那个「打开」小标签同理删掉了：整行本来就可点（hover 有底色 + `title` 提示），
+  再挂一个标签只是噪音。
+
+**留下的原则**：面板里只保留**必须写库或必须由人判断**的动作（收件箱提升、整理文件名），
+纯跳转/纯提示类的按钮一律不做 —— 交互靠 hover/可点区域本身表达，而不是再加一排按钮。
 
 **④ "自动归纳"只做确定有用的那一半。** 语义聚类不做（结果不确定、用户还得纠错，
 和之前否掉的看板/计数器同类）。做的是：**按标签分组**（取每条第一个标签，没标签的归一组，

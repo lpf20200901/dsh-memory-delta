@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
 import { createEntry, ensureLayout, injectPayload, readAll } from '../bin/mem.mjs';
-import { MEMORY_ACTION_PATH, MEMORY_REVEAL_PATH, MEMORY_ROUTE_PATH, createActionRoute, createMemoryRoute, createRevealRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerRevealRoute, resolvePanelRoot, resolveRevealDir } from '../src/panel.mjs';
+import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, createActionRoute, createMemoryRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -477,14 +477,17 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('工具照常注册（不等 webServer）', panelCtx.registered.length === 2, String(panelCtx.registered.length));
 
   panelCtx.pendingInjects[0](); // webServer 出现了
-  check('webServer 出现后注册了 3 条路由（状态 + 打开目录 + 动作）', panelCtx.routes.length === 3, String(panelCtx.routes.length));
+  check('webServer 出现后注册了 2 条路由（状态 + 动作）', panelCtx.routes.length === 2, String(panelCtx.routes.length));
   const route = panelCtx.routes.find((r) => r.path === MEMORY_ROUTE_PATH) ?? panelCtx.routes[0];
   check('路由 kind 是 exact', route.kind === 'exact', String(route.kind));
   check('路由路径是 /dsh-memory-delta/state', route.path === MEMORY_ROUTE_PATH && route.path === '/dsh-memory-delta/state', String(route.path));
-  const revealRoute = panelCtx.routes.find((r) => r.path === MEMORY_REVEAL_PATH);
-  check('第二条路由是「打开目录」', revealRoute?.path === '/dsh-memory-delta/reveal', panelCtx.routes.map((r) => r.path).join(','));
   const actionRoute = panelCtx.routes.find((r) => r.path === MEMORY_ACTION_PATH);
-  check('第三条路由是「动作」（写记忆库）', actionRoute?.path === '/dsh-memory-delta/action', panelCtx.routes.map((r) => r.path).join(','));
+  check('第二条路由是「动作」（写记忆库）', actionRoute?.path === '/dsh-memory-delta/action', panelCtx.routes.map((r) => r.path).join(','));
+  check(
+    '没有「打开目录」路由了（按用户要求删掉按钮，也不留没人调用的外部进程入口）',
+    !panelCtx.routes.some((r) => /reveal/.test(r.path)),
+    panelCtx.routes.map((r) => r.path).join(','),
+  );
 
   // 路径在**两处**各写了一遍（宿主 `src/panel.mjs`、客户端 `client/client.js`）——
   // 写歪一处就是"页签一直是空的"这种最难查的故障。这里直接把两边钉成同一个字符串。
@@ -495,15 +498,14 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('客户端 bundle 的 id 是包名 dsh-memory-delta', clientId === 'dsh-memory-delta', String(clientId));
   // 客户端必须用 POST —— 宿主路由只认 POST，用 GET 会得到 405（而且回退服务器也回 405，极易误判）
   check('客户端用 POST 请求这条路由', /fetch\(STATE_URL,\s*\{\s*\n\s*method:\s*'POST'/.test(clientSrc), 'client/client.js 里的 fetch 选项');
-  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 3, JSON.stringify(panelCtx.effects));
+  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 2, JSON.stringify(panelCtx.effects));
   check('effect 带可读的标签（含新包名）', panelCtx.effects[0] === 'dsh-memory-delta: /dsh-memory-delta/state route', String(panelCtx.effects[0]));
-  check('「打开目录」路由也受 ctx.effect 托管', panelCtx.effects[1] === 'dsh-memory-delta: /dsh-memory-delta/reveal route', String(panelCtx.effects[1]));
-  check('「动作」路由也受 ctx.effect 托管', panelCtx.effects[2] === 'dsh-memory-delta: /dsh-memory-delta/action route', String(panelCtx.effects[2]));
+  check('「动作」路由也受 ctx.effect 托管', panelCtx.effects[1] === 'dsh-memory-delta: /dsh-memory-delta/action route', String(panelCtx.effects[1]));
 
   // 服务早就就绪的组合（late=false）→ 回调立刻跑
   const earlyCtx = fakeCtxWithWebServer({ late: false });
   apply(earlyCtx, { root: ROOT, maxBytes: 3072 });
-  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 3, String(earlyCtx.routes.length));
+  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 2, String(earlyCtx.routes.length));
 
   // 没有 ctx.inject 的极简 ctx（老版本 / 测试替身）→ 退回 ctx.get，有就注册、没有不抛
   const plainCtx = fakeCtx();
@@ -659,7 +661,6 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   const noEffectRoutes = [];
   const returned = registerMemoryRoute({ register: (r) => noEffectRoutes.push(r) }, memoryStateOf);
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ROUTE_PATH && noEffectRoutes.length === 1, String(returned?.path));
-  check('webServer 缺失时 registerRevealRoute 返回 null', registerRevealRoute(undefined, {}) === null);
 }
 
 /* ------------------------------------- 「动作」路由（真的写记忆库） */
@@ -730,75 +731,6 @@ section('「动作」路由（promote / rename）');
   const registered = [];
   const returned = registerActionRoute({ register: (r) => registered.push(r) }, { configRoot: actionRoot });
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ACTION_PATH && registered.length === 1, String(returned?.path));
-}
-
-/* ------------------------------------------- 「打开目录」路由（写动作） */
-
-section('「打开目录」路由');
-{
-  // 真库：确保 facts/decisions 都存在（路由要求目录存在，不存在回 404）
-  const revealRoot = path.join(SANDBOX, 'reveal', 'memory');
-  ensureLayout(revealRoot);
-
-  const opened = [];
-  const route = createRevealRoute({
-    configRoot: revealRoot,
-    open: (dir) => {
-      opened.push(dir);
-      return 'fake-opener';
-    },
-  });
-
-  const ok = await callRoute(route, { body: JSON.stringify({ where: 'facts' }) });
-  check('POST {where:facts} → 200 并真的调了系统打开', ok.status === 200 && ok.json.ok === true, JSON.stringify(ok.json));
-  check('打开的是 <库>/facts 这个绝对目录', opened[0] === path.join(revealRoot, 'facts'), String(opened[0]));
-  check('响应里回显开了哪个目录（客户端可提示）', ok.json.dir === path.join(revealRoot, 'facts'), String(ok.json.dir));
-
-  const rootOpen = await callRoute(route, { body: JSON.stringify({ where: 'root' }) });
-  check('where:root → 打开库根目录本身', rootOpen.status === 200 && opened[1] === revealRoot, String(opened[1]));
-
-  const deflt = await callRoute(route, { body: '{}' });
-  check('不传 where 默认开库根目录', deflt.status === 200 && deflt.json.dir === revealRoot, JSON.stringify(deflt.json));
-
-  // 白名单：这条路由会启动系统文件管理器，绝不能接受任意路径
-  const arbitrary = await callRoute(route, { body: JSON.stringify({ where: '..' }) });
-  check('不在白名单里的目标一律 400', arbitrary.status === 400 && arbitrary.json.ok === false, JSON.stringify(arbitrary.json));
-  check('路径穿越（..）被白名单挡下，没有把库外目录交出去', !opened.some((d) => !d.startsWith(revealRoot)), opened.join('|'));
-  const absolute = await callRoute(route, { body: JSON.stringify({ where: 'C:\\Windows' }) });
-  check('绝对路径不是合法目标（按目录名匹配）', absolute.status === 400, JSON.stringify(absolute.json));
-
-  // 来源 / 方法 / body 三道前门与状态路由同一套
-  const badOrigin = await callRoute(route, {
-    body: JSON.stringify({ where: 'facts' }),
-    headers: { host: '127.0.0.1:23278', origin: 'https://evil.example' },
-  });
-  check('跨站 Origin 一律 403', badOrigin.status === 403, JSON.stringify(badOrigin.json));
-  const getMethod = await callRoute(route, { method: 'GET', url: MEMORY_REVEAL_PATH });
-  check('GET 一律 405（这条路由只做动作）', getMethod.status === 405, JSON.stringify(getMethod.json));
-  const badBody = await callRoute(route, { body: '{oops' });
-  check('body 不是 JSON → 400', badBody.status === 400, JSON.stringify(badBody.json));
-
-  // 目录不存在（例如还没 init 的库）→ 404，而不是"静默什么都没发生"
-  const missing = await callRoute(createRevealRoute({ configRoot: path.join(SANDBOX, 'reveal-nope'), open: () => 'never' }), {
-    body: JSON.stringify({ where: 'inbox' }),
-  });
-  check('目录不存在时 404 并说清是哪个目录', missing.status === 404 && String(missing.json.error).includes('不存在'), JSON.stringify(missing.json));
-
-  // 没有 workspace 也没配 root → 400（不是 500）
-  const noRoot = await callRoute(createRevealRoute({ open: () => 'never' }), { body: JSON.stringify({ where: 'facts' }) });
-  check('不知道库在哪时 400 而不是 500', noRoot.status === 400, JSON.stringify(noRoot.json));
-
-  // 配置关掉时明确拒绝（客户端会显示这句话，而不是"点了没反应"）
-  const off = await callRoute(createRevealRoute({ configRoot: revealRoot, allow: false, open: () => 'never' }), {
-    body: JSON.stringify({ where: 'facts' }),
-  });
-  check('allowOpenFolder:false → 403 + 说明原因', off.status === 403 && String(off.json.error).includes('allowOpenFolder'), JSON.stringify(off.json));
-
-  // 解析函数本身（不看 HTTP 层）
-  const dir = resolveRevealDir({ configRoot: revealRoot, where: 'decisions' });
-  check('resolveRevealDir 拼出 <root>/decisions', dir.dir === path.join(revealRoot, 'decisions'), JSON.stringify(dir));
-  const ws = resolveRevealDir({ workspace: path.join(SANDBOX, 'reveal'), where: 'inbox' });
-  check('没配 root 时按 <workspace>/memory 解析', ws.dir === path.join(SANDBOX, 'reveal', 'memory', 'inbox'), JSON.stringify(ws));
 }
 
 /* ------------------------------------------------------------ 配置与容错 */

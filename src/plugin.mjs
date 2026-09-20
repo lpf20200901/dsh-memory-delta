@@ -17,7 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { collectDocs, createEntry, ensureLayout, injectPayload, loadConfig } from '../bin/mem.mjs';
 import { createMemoryHook } from './hook.mjs';
-import { memoryStateOf, registerActionRoute, registerMemoryRoute, registerRevealRoute } from './panel.mjs';
+import { memoryStateOf, registerActionRoute, registerMemoryRoute } from './panel.mjs';
 import { MEMORY_SOURCE_KIND } from './planner.mjs';
 import { rankDocs } from './search.mjs';
 
@@ -40,12 +40,6 @@ export const Config = z.object({
    * 默认开；关掉后按钮会显示"配置里关掉了"，而不是静默失效。
    */
   allowWrite: z.boolean().default(true),
-  /**
-   * 允许面板里的目录名触发**系统文件管理器**打开该目录（默认开）。
-   * 只在回环来源 + 白名单目录（facts/decisions/inbox/archive/库根）下生效；
-   * 不想要这个动作就关掉它（关掉后面板会显示一句提示，而不是静默失效）。
-   */
-  allowOpenFolder: z.boolean().default(true),
 });
 
 /** 把 (config, cwd) 解析成一次可用的记忆库句柄。 */
@@ -271,14 +265,8 @@ export function apply(ctx, config = {}) {
         }),
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );
-    // 只读状态路由之外，再挂两条动作路由：
-    //   · 「打开目录」= 白名单目录 + 系统文件管理器
-    //   · 「动作」= 写记忆库（promote / rename），复用 CLI 的 promoteEntry / renameEntry
-    registerRevealRoute(
-      target,
-      { configRoot: config.root || undefined, allow: config.allowOpenFolder !== false },
-      effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
-    );
+    // 只读状态路由之外，再挂"动作"路由（写记忆库：promote / rename），
+    // 逻辑复用 CLI 的 promoteEntry / renameEntry。
     registerActionRoute(
       target,
       { configRoot: config.root || undefined, allow: config.allowWrite !== false },

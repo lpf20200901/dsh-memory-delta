@@ -476,22 +476,15 @@ section('组件：折叠 / 展开');
   globalThis.fetch = originalFetch;
 }
 
-/* --------------------------- 组件：点条目打开文件 / 点目录名打开目录 */
+/* --------------------------- 组件：点条目打开文件（唯一的外跳入口） */
 
-section('组件：打开文件与打开目录');
+section('组件：点条目打开文件');
 {
   const originalFetch = globalThis.fetch;
   const sidebar = fakeSidebar();
-  const revealCalls = [];
+  const fetched = [];
   globalThis.fetch = (url, options) => {
-    if (url === '/dsh-memory-delta/reveal') {
-      revealCalls.push({ url, body: options?.body, method: options?.method });
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ ok: true, dir: 'D:\\proj\\memory\\facts', opener: 'explorer.exe' }),
-      });
-    }
+    fetched.push({ url, body: options?.body });
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
   };
 
@@ -500,21 +493,16 @@ section('组件：打开文件与打开目录');
 
   // 点条目 → 在侧边栏编辑器里打开这条记忆（官方 openFile）
   const item = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('路径含非 ASCII'));
-  check('条目行可点（role=button + 打开提示）', item?.props?.role === 'button' && allText(item).includes('打开'), String(item?.props?.role));
+  check('条目行可点（role=button，title 提示会打开哪个文件）', item?.props?.role === 'button' && /打开 .*node-rm-nonascii\.md/.test(String(item?.props?.title)), String(item?.props?.title));
   item.props.onClick({});
   check('openFile 被调用，参数是绝对路径', sidebar.opened[0]?.path === 'D:\\proj\\memory\\facts\\node-rm-nonascii.md', JSON.stringify(sidebar.opened[0]));
   check('openFile 带上 scope（会话作用域）', sidebar.opened[0]?.scope?.sessionId === 's1', JSON.stringify(sidebar.opened[0]?.scope));
   check('openFile 的标题用文件名', sidebar.opened[0]?.title === 'node-rm-nonascii.md', String(sidebar.opened[0]?.title));
 
-  // 点「打开目录」→ POST /dsh-memory-delta/reveal（宿主用系统文件管理器打开）
-  const revealBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('打开目录'));
-  check('分组头上有「打开目录」按钮', Boolean(revealBtn));
-  revealBtn.props.onClick({});
-  await flush();
-  check('打开目录走 POST 动作路由', revealCalls[0]?.url === '/dsh-memory-delta/reveal' && revealCalls[0]?.method === 'POST', JSON.stringify(revealCalls[0]));
-  const revealBody = JSON.parse(revealCalls[0]?.body ?? '{}');
-  check('带上 where 与 workspace（宿主据此定位白名单目录）', revealBody.where === 'facts' && revealBody.workspace === 'D:\\proj', JSON.stringify(revealBody));
-  check('成功后不显示错误行', !hasClassName(mounted.tree(), 'dsh-memory-delta-note'), allText(mounted.tree()).slice(0, 200));
+  // 按用户要求精简：不再有「打开」小标签、「打开目录」按钮，也不再请求 /reveal
+  check('条目行没有多余的「打开」小标签（整行可点就够）', !allText(mounted.tree()).includes('打开目录'), allText(mounted.tree()).slice(0, 200));
+  check('分组头上没有「打开目录」按钮', findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').every((n) => !allText(n).includes('打开目录')));
+  check('不再请求 /dsh-memory-delta/reveal', fetched.every((c) => c.url !== '/dsh-memory-delta/reveal'), fetched.map((c) => c.url).join(','));
 
   globalThis.fetch = originalFetch;
 }
@@ -526,29 +514,11 @@ section('组件：打开失败的原因要显示出来');
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
 
-  // a) better-sidebar 没有 openFile（老版本）
+  // better-sidebar 没有 openFile（老版本）→ 给出可读提示，而不是静默无反应
   const noApi = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: {} } });
   await flush();
   findByClass(noApi.tree(), 'dsh-memory-delta-item').props.onClick({});
   check('没有 openFile 接口时给出可读提示', allText(noApi.tree()).includes('没有 openFile 接口'), allText(noApi.tree()).slice(0, 200));
-
-  // b) 宿主明确拒绝打开目录（例如 allowOpenFolder:false）→ 显示宿主的原因
-  globalThis.fetch = (url) => {
-    if (url === '/dsh-memory-delta/reveal') {
-      return Promise.resolve({
-        ok: false,
-        status: 403,
-        json: () => Promise.resolve({ ok: false, error: '配置里关掉了「打开目录」（allowOpenFolder=false）' }),
-      });
-    }
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
-  };
-  const denied = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
-  await flush();
-  findAllByClass(denied.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('打开目录')).props.onClick({});
-  await flush();
-  const deniedText = allText(denied.tree());
-  check('被拒绝时回显宿主的原因（而不是静默）', deniedText.includes('打开目录失败') && deniedText.includes('allowOpenFolder'), deniedText.slice(0, 300));
 
   globalThis.fetch = originalFetch;
 }
