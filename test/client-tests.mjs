@@ -1029,6 +1029,37 @@ section('组件：常驻条目的「归档」按钮');
   globalThis.fetch = originalFetch;
 }
 
+/* --------------------------- 组件：按日期分组（第三个维度） */
+
+section('组件：类型 / 标签 / 日期 三个维度可切换');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  const seg = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
+  const segBtn = (label) => seg.kids.find((n) => allText(n).trim() === label);
+  check('头部有三个维度按钮', ['类型', '标签', '日期'].every((t) => allText(seg).includes(t)), allText(seg));
+  check('默认是「类型」选中', String(segBtn('类型').props.className).includes('is-on'), String(segBtn('类型').props.className));
+
+  segBtn('日期').props.onClick({});
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  // SAMPLE 的 today = 2026-09-17；条目日期是 09-17 / 09-16 / 09-01
+  check('切到日期视图：分组头变成日期', headers.includes('2026-09-17') && headers.includes('2026-09-16') && headers.includes('2026-09-01'), headers);
+  check('今天的组带人话标注', headers.includes('2026-09-17（今天）'), headers);
+  check('新的日期排前面（09-17 在 09-01 之前）', headers.indexOf('2026-09-17') < headers.indexOf('2026-09-01'), headers);
+  check('日期视图里不再按类型分组', !headers.includes('（facts）') && !headers.includes('（decisions）'), headers);
+  const text = allText(mounted.tree());
+  check('日期视图里条目自己标出是事实还是决策', text.includes('事实') && text.includes('决策'), text.slice(0, 500));
+
+  // 切回去不影响其它维度
+  segBtn('类型').props.onClick({});
+  check('能切回类型视图', headerTexts(mounted.tree()).join(' | ').includes('（facts）'), headerTexts(mounted.tree()).join(' | '));
+
+  globalThis.fetch = originalFetch;
+}
+
 /* --------------------- 组件：搜索失败要回显宿主的原因 */
 
 section('组件：搜索失败');

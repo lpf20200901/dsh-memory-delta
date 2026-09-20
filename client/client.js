@@ -1112,6 +1112,16 @@ window.__ModuleLoader__.load({
             { type: 'button', className: groupBy === 'tag' ? 'is-on' : undefined, onClick: () => setGroupBy('tag'), title: '按标签分组（取每条的第一个标签）' },
             '标签',
           ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: groupBy === 'date' ? 'is-on' : undefined,
+              onClick: () => setGroupBy('date'),
+              title: '按记录日期分组（同一天的归一组，新的在前）',
+            },
+            '日期',
+          ),
         ),
         h(
           'button',
@@ -1328,6 +1338,37 @@ window.__ModuleLoader__.load({
         return named;
       };
 
+      /**
+       * 按记录日期分组（第三个维度）：
+       * 同一天归一组、**新的在前**；日期还带上人话（今天 / 昨天 / 周几），
+       * 这样"我什么时候记的这条"一眼就有 —— 比一串 ISO 日期好读。
+       */
+      const TODAY = typeof state.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.today) ? state.today : null;
+      const dayLabel = (day) => {
+        if (day === '__nodate__') return '没有日期';
+        if (!TODAY) return day;
+        const diff = (Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${day}T00:00:00Z`)) / 86400000;
+        if (diff === 0) return `${day}（今天）`;
+        if (diff === 1) return `${day}（昨天）`;
+        if (diff === 2) return `${day}（前天）`;
+        const week = '日一二三四五六'[new Date(`${day}T00:00:00Z`).getUTCDay()];
+        return diff > 0 ? `${day}（周${week}）` : `${day}（未来）`;
+      };
+      const dateGroups = () => {
+        const map = new Map();
+        for (const e of entries) {
+          const day = typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date) ? e.date : '__nodate__';
+          if (!map.has(day)) map.set(day, []);
+          map.get(day).push(e);
+        }
+        const days = [...map.entries()].filter(([k]) => k !== '__nodate__');
+        // ISO 日期字符串按字典序倒排 == 时间倒序（新的一天在最上面）
+        days.sort((a, b) => b[0].localeCompare(a[0]));
+        const nodate = map.get('__nodate__');
+        if (nodate) days.push(['__nodate__', nodate]);
+        return days;
+      };
+
       const facts = entries.filter((e) => e.type === 'fact');
       const decisions = entries.filter((e) => e.type === 'decision');
       const other = entries.filter((e) => e.type !== 'fact' && e.type !== 'decision');
@@ -1336,7 +1377,8 @@ window.__ModuleLoader__.load({
          阶段视角：这一层 = "每轮会话都会自动发给模型"的结论。
          类型（事实/决策）是**这一层内部**的子分组 —— 它回答的是"这条该放哪边"，
          不是"这条在流程哪一步"。以前把类型放在最外层，于是流程位置只能靠小字注释，
-         结果是"一眼看不出是干啥的"（真实反馈）。 */
+         结果是"一眼看不出是干啥的"（真实反馈）。
+         三个维度可切换：类型（该放哪边）/ 标签（按主题）/ 日期（什么时候记的）。 */
       const standingBody =
         groupBy === 'tag'
           ? tagGroups().map(([tag, list]) =>
@@ -1353,7 +1395,22 @@ window.__ModuleLoader__.load({
                 byDateDesc(list).map((e) => renderItem(e, { showType: true })),
               ),
             )
-          : [
+          : groupBy === 'date'
+            ? dateGroups().map(([day, list]) =>
+                section(
+                  {
+                    key: `date:${day}`,
+                    title: dayLabel(day),
+                    slug: null,
+                    count: list.length,
+                    hint: day === '__nodate__' ? '条目没写 date' : '按记录日期',
+                    open: isOpen(`date:${day}`),
+                    onToggle: () => toggleSection(`date:${day}`),
+                  },
+                  byDateDesc(list).map((e) => renderItem(e, { showType: true })),
+                ),
+              )
+            : [
               groupSection(
                 'facts',
                 '事实',
