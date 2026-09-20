@@ -72,6 +72,24 @@ function hasClassName(node, className) {
   return hasClassName(node.kids ?? node.children, className);
 }
 
+/**
+ * 每个 `<summary>` 的直接文本，**相邻拼接**。
+ * allText 是按节点换行拼的，验证不了「事实（facts）」这种同一行内的相邻关系。
+ */
+function summaryTexts(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const n of node) summaryTexts(n, out);
+    return out;
+  }
+  if (node.type === 'summary') {
+    out.push(collectStrings(node.kids, []).join(''));
+    return out;
+  }
+  summaryTexts(node.kids ?? node.children, out);
+  return out;
+}
+
 const CLIENT_SOURCE = fs.readFileSync(CLIENT_FILE, 'utf8');
 
 /** 在假 window 里执行 client.js，拿回它注册的 factory 与调用记录。 */
@@ -310,6 +328,14 @@ section('组件：正常数据');
   check('待复核项带上 verify_when', text.includes('verify_when: 2026-09-14'), text.slice(0, 400));
   check('待复核项显示结论行', text.includes('路径含非 ASCII 时不要用 rmSync'), text.slice(0, 400));
   check('常驻条目按事实/决策分组', text.includes('事实') && text.includes('决策'), text.slice(0, 400));
+  const summaries = summaryTexts(mounted.tree()).join(' | ');
+  check(
+    '分组标题标出磁盘目录名（中文 ↔ 文件夹对照）',
+    summaries.includes('事实（facts）') && summaries.includes('决策（decisions）'),
+    summaries,
+  );
+  check('收件箱分目标出 inbox 目录', summaries.includes('收件箱候选（inbox）'), summaries);
+  check('收件箱说明里点名 inbox/ → facts/decisions 的去向', text.includes('inbox/ 目录') && text.includes('facts/ 或 decisions/'), text.slice(0, 500));
   check('带 key 的条目显示 [key]', text.includes('[node-rm-nonascii]'), text.slice(0, 400));
   check('收件箱候选有数量与提示', text.includes('收件箱候选') && text.includes('确认后才成为常驻记忆'), text.slice(0, 500));
   check('收件箱列出候选结论', text.includes('沙箱禁止命名管道'), text.slice(0, 500));

@@ -90,6 +90,12 @@ window.__ModuleLoader__.load({
   padding: 6px 8px;
 }
 .dsh-memory-delta-path { word-break: break-all; }
+/* 文件夹名（facts / decisions / inbox）—— 用等宽字体，和中文标题区分开，方便对照磁盘上的目录 */
+.dsh-memory-delta-slug {
+  font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: .92em;
+  font-weight: 400;
+}
 .dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 8px; }
 .dsh-memory-delta-section > summary {
   cursor: pointer;
@@ -191,7 +197,13 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function section(key, title, count, children) {
+    /**
+     * 分节。
+     *
+     * @param slug 磁盘上的**文件夹名**（`facts` / `decisions` / `inbox`），显示在中文标题后面，
+     *   让用户能把界面上的分组和记忆库里的目录对上号。没有对应目录的分组传 null。
+     */
+    function section(key, title, count, children, slug) {
       return h(
         'details',
         { className: 'dsh-memory-delta-section', key, open: true },
@@ -199,6 +211,7 @@ window.__ModuleLoader__.load({
           'summary',
           null,
           title,
+          slug ? h('span', { className: 'dsh-memory-delta-dim dsh-memory-delta-slug' }, `（${slug}）`) : null,
           h('span', { className: 'dsh-memory-delta-dim' }, `（${count}）`),
         ),
         children,
@@ -288,7 +301,13 @@ window.__ModuleLoader__.load({
             `注入 ${bytes} / ${budget} 字节${over ? '（超出预算）' : ''}`,
           ),
           counts.inbox
-            ? h('span', { key: 'i', className: 'dsh-memory-delta-muted' }, `候选 ${counts.inbox} 条`)
+            ? h(
+                'span',
+                { key: 'i', className: 'dsh-memory-delta-muted' },
+                '候选',
+                h('span', { className: 'dsh-memory-delta-slug' }, '（inbox）'),
+                `${counts.inbox} 条`,
+              )
             : null,
         ].filter(Boolean),
       );
@@ -332,7 +351,7 @@ window.__ModuleLoader__.load({
       const facts = entries.filter((e) => e.type === 'fact');
       const decisions = entries.filter((e) => e.type === 'decision');
       const other = entries.filter((e) => e.type !== 'fact' && e.type !== 'decision');
-      const group = (key, title, list) =>
+      const group = (key, title, list, slug) =>
         list.length
           ? section(
               key,
@@ -344,6 +363,7 @@ window.__ModuleLoader__.load({
                   h('span', null, e.line, e.key ? h('span', { className: 'dsh-memory-delta-dim' }, ` [${e.key}]`) : null),
                 ),
               ),
+              slug,
             )
           : null;
 
@@ -351,9 +371,10 @@ window.__ModuleLoader__.load({
         ? h(
             'div',
             null,
-            group('facts', '事实', facts),
-            group('decisions', '决策', decisions),
-            group('other', '其它', other),
+            group('facts', '事实', facts, 'facts'),
+            group('decisions', '决策', decisions, 'decisions'),
+            // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
+            group('other', '其它', other, null),
           )
         : h('div', { className: 'dsh-memory-delta-section' }, h('div', { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' }, '还没有常驻记忆'));
 
@@ -365,7 +386,7 @@ window.__ModuleLoader__.load({
         h(
           'div',
           null,
-          h('div', { className: 'dsh-memory-delta-dim' }, '确认后才成为常驻记忆（promote 之后才会被注入）。'),
+          h('div', { className: 'dsh-memory-delta-dim' }, '候选放在 inbox/ 目录；确认后才成为常驻记忆（promote 后写进 facts/ 或 decisions/ 才会被注入）。'),
           inbox.length === 0
             ? h(
                 'div',
@@ -374,6 +395,7 @@ window.__ModuleLoader__.load({
               )
             : inbox.map((e) => item(e.id, e.line, h('div', { className: 'dsh-memory-delta-dim' }, `${e.type || '—'}${e.date ? ` · ${e.date}` : ''}`))),
         ),
+        'inbox',
       );
 
       return h('div', { className: 'dsh-memory-delta-tab' }, head, statusRow, dueBlock, standing, inboxBlock);

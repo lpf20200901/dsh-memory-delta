@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **419 个断言全绿**（CLI 109 + planner 43 + search 51 + due 93 + hook 63 + plugin 60），
+  - 测试 **544 个断言全绿**（CLI 109 + planner 43 + search 51 + due 93 + hook 63 + plugin 130 + client 55），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 

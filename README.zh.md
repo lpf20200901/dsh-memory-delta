@@ -170,7 +170,7 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 419 个断言，零依赖
+npm test        # 544 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
@@ -180,7 +180,8 @@ npm test        # 419 个断言，零依赖
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 60 | 插件集成（桩 DSH 模块，真 apply + 两个工具） |
+| `test/plugin-tests.mjs` | 130 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 侧边栏路由） |
+| `test/client-tests.mjs` | 55 | 侧边栏面板 bundle（假 React + 假 `fetch`，含「中文 ↔ 存储目录名」标签） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。
