@@ -278,6 +278,20 @@ window.__ModuleLoader__.load({
 .dsh-memory-delta-search > input::placeholder { color: var(--dsw-alias-label-tertiary, #8c8c8c); }
 .dsh-memory-delta-search > input:focus { outline: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.5)); outline-offset: 0; }
 .dsh-memory-delta-snippet { color: var(--dsw-alias-label-secondary, #6b6b6b); }
+/* 流程条：把"这几组在流程里的前后关系"摆在一行里，不用读小字注释 */
+.dsh-memory-delta-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 4px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.1));
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+  font-size: 11px;
+}
+.dsh-memory-delta-flow-now { color: var(--dsw-alias-label-primary, #1f1f1f); font-weight: 600; }
+.dsh-memory-delta-flow-dim { color: var(--dsw-alias-label-tertiary, #8c8c8c); }
 .dsh-memory-delta-where {
   flex: none;
   font-size: 10px;
@@ -875,36 +889,17 @@ window.__ModuleLoader__.load({
       const bytes = typeof state.bytes === 'number' ? state.bytes : 0;
       const over = budget > 0 && bytes > budget;
 
+      // 状态行只留"库在哪 + 注入花多少字节"：各阶段的条数**只在流程条里报一次**，
+      // 同一屏里两处报同样的数字只会让人多读一遍（截图里发现的冗余）。
       const statusRow = row(
         'status',
         [
           h('span', { key: 'root', className: 'dsh-memory-delta-muted dsh-memory-delta-path' }, `库：${state.root || '（未配置）'}`),
-          h('span', { key: 'n', className: 'dsh-memory-delta-muted' }, `常驻 ${counts.active || 0} 条`),
           h(
             'span',
             { key: 'b', className: over ? 'dsh-memory-delta-warn' : 'dsh-memory-delta-muted' },
             `注入 ${bytes} / ${budget} 字节${over ? '（超出预算）' : ''}`,
           ),
-          counts.inbox
-            ? h(
-                'span',
-                { key: 'i', className: 'dsh-memory-delta-muted' },
-                '候选',
-                h('span', { className: 'dsh-memory-delta-slug' }, '（inbox）'),
-                `${counts.inbox} 条`,
-              )
-            : null,
-          // 归档层平时不出现在面板里（条目不算"常驻"），但**它存在**这件事得让用户看见 ——
-          // 否则"我记过、后来被取代了"的东西像是凭空消失了
-          counts.archive
-            ? h(
-                'span',
-                { key: 'a', className: 'dsh-memory-delta-muted' },
-                '归档',
-                h('span', { className: 'dsh-memory-delta-slug' }, '（archive）'),
-                `${counts.archive} 条`,
-              )
-            : null,
         ].filter(Boolean),
       );
 
@@ -994,59 +989,124 @@ window.__ModuleLoader__.load({
       const decisions = entries.filter((e) => e.type === 'decision');
       const other = entries.filter((e) => e.type !== 'fact' && e.type !== 'decision');
 
+      /* -------------------------------------------------- 已在用（常驻层）
+         阶段视角：这一层 = "每轮会话都会自动发给模型"的结论。
+         类型（事实/决策）是**这一层内部**的子分组 —— 它回答的是"这条该放哪边"，
+         不是"这条在流程哪一步"。以前把类型放在最外层，于是流程位置只能靠小字注释，
+         结果是"一眼看不出是干啥的"（真实反馈）。 */
+      const standingBody =
+        groupBy === 'tag'
+          ? tagGroups().map(([tag, list]) =>
+              section(
+                {
+                  key: `tag:${tag}`,
+                  title: tag === '__untagged__' ? '未加标签' : tag,
+                  slug: null,
+                  count: list.length,
+                  hint: '按标签',
+                  open: isOpen(`tag:${tag}`),
+                  onToggle: () => toggleSection(`tag:${tag}`),
+                },
+                byDateDesc(list).map((e) => renderItem(e, { showType: true })),
+              ),
+            )
+          : [
+              groupSection('facts', '事实', 'facts', facts, '关于世界（能被现实证伪）'),
+              groupSection('decisions', '决策', 'decisions', decisions, '我们的约定（只有我们改主意才失效）'),
+              // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
+              groupSection('other', '其它', null, other, 'type 未识别'),
+            ];
+
       const standing = entries.length
-        ? h(
-            'div',
-            null,
-            groupBy === 'tag'
-              ? tagGroups().map(([tag, list]) =>
-                  section(
-                    {
-                      key: `tag:${tag}`,
-                      title: tag === '__untagged__' ? '未加标签' : tag,
-                      slug: null,
-                      count: list.length,
-                      hint: '按标签',
-                      open: isOpen(`tag:${tag}`),
-                      onToggle: () => toggleSection(`tag:${tag}`),
-                    },
-                    byDateDesc(list).map((e) => renderItem(e, { showType: true })),
-                  ),
-                )
-              : [
-                  groupSection('facts', '事实', 'facts', facts, '已确认的世界结论 · 参与注入'),
-                  groupSection('decisions', '决策', 'decisions', decisions, '已确认的约定 · 参与注入'),
-                  // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
-                  groupSection('other', '其它', null, other, 'type 未识别'),
-                ],
+        ? section(
+            {
+              key: 'stage:standing',
+              title: '已在用',
+              slug: null,
+              count: entries.length,
+              hint: '每轮会话自动发给模型 · 这就是"它记住了"的部分',
+              open: isOpen('stage:standing'),
+              onToggle: () => toggleSection('stage:standing'),
+            },
+            standingBody,
           )
-        : h('div', { className: 'dsh-memory-delta-section' }, h('div', { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' }, '还没有常驻记忆'));
+        : section(
+            {
+              key: 'stage:standing',
+              title: '已在用',
+              slug: null,
+              count: 0,
+              hint: '每轮会话自动发给模型',
+              open: isOpen('stage:standing'),
+              onToggle: () => toggleSection('stage:standing'),
+            },
+            h(
+              'div',
+              { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' },
+              '还没有已确认的记忆 —— 模型写进「待你确认」的候选，你点一下提升就会到这里',
+            ),
+          );
 
       const inbox = Array.isArray(state.inbox) ? state.inbox : [];
       const inboxBlock = section(
         {
-          key: 'inbox',
-          title: '收件箱候选',
+          key: 'stage:inbox',
+          title: '待你确认',
           slug: 'inbox',
           count: typeof counts.inbox === 'number' ? counts.inbox : inbox.length,
-          hint: '待确认 · 不注入',
-          open: isOpen('inbox'),
-          onToggle: () => toggleSection('inbox'),
+          hint: '模型想记住的 · 你点头才生效（在那之前不会发给模型）',
+          open: isOpen('stage:inbox'),
+          onToggle: () => toggleSection('stage:inbox'),
         },
         [
           h(
             'div',
             { className: 'dsh-memory-delta-dim', key: 'hint' },
-            '候选放在 inbox/ 目录；确认后才成为常驻记忆（promote 后写进 facts/ 或 decisions/ 才会被注入）。',
-          ),
+            '这些都是模型自己写的候选（它只能写这里）。点「提升到 facts/ decisions/」确认后才会进「已在用」，才会每轮带给模型。',          ),
           inbox.length === 0
             ? h(
                 'div',
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
-                '还没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
+                '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
             : inbox.map((e) => renderItem(e, { showType: true, actions: [promoteButton(e), tidyButton(e)] })),
         ],
+      );
+
+      /* 归档层：条目本身不出现在面板里（它们不算"常驻"），但**这一层存在**必须让人看见 ——
+         否则"我记过、后来被取代了"的东西看起来像是凭空消失了。 */
+      const archiveCount = typeof counts.archive === 'number' ? counts.archive : 0;
+      const archiveBlock = section(
+        {
+          key: 'stage:archive',
+          title: '已归档',
+          slug: 'archive',
+          count: archiveCount,
+          hint: '被取代或过期 · 不再发给模型，但搜得到',
+          open: isOpen('stage:archive'),
+          onToggle: () => toggleSection('stage:archive'),
+        },
+        [
+          h(
+            'div',
+            { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'note' },
+            archiveCount === 0
+              ? '还没有归档 —— 结论被新版本取代（supersede）或标过期后，会搬到这里，不再发给模型'
+              : `有 ${archiveCount} 条旧结论在这里（不再发给模型）。想看或想找，用上面的搜索框搜 —— 归档层是能被搜到的`,
+          ),
+        ],
+      );
+
+      /** 流程条：一眼看出"我现在看的这几组在流程里的前后关系"。 */
+      const flow = h(
+        'div',
+        { className: 'dsh-memory-delta-flow' },
+        '流程：模型写入 → ',
+        h('span', { className: 'dsh-memory-delta-flow-now' }, `待你确认 ${typeof counts.inbox === 'number' ? counts.inbox : 0}`),
+        ' → ',
+        h('span', { className: 'dsh-memory-delta-flow-now' }, `已在用 ${entries.length}`),
+        ' → ',
+        h('span', { className: 'dsh-memory-delta-flow-dim' }, `已归档 ${archiveCount}`),
       );
 
       /* ------------------------------------------------------------ 搜索块 */
@@ -1090,10 +1150,12 @@ window.__ModuleLoader__.load({
         head,
         searchRow,
         statusRow,
+        flow,
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
         // 有搜索词时**只显示结果**（否则一屏里两套列表，谁也看不清）
-        searching_ ? searchBlock : [dueBlock, standing, inboxBlock],
+        // 分组顺序 = 流程顺序：待你确认 → 已在用 → 已归档（待复核是跨阶段的提醒，放最前面）
+        searching_ ? searchBlock : [dueBlock, inboxBlock, standing, archiveBlock],
       );
     }
 

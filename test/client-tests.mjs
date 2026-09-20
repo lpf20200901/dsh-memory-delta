@@ -402,7 +402,8 @@ section('组件：正常数据');
   await flush();
   const text = allText(mounted.tree());
   check('显示记忆库 root', text.includes('D:\\proj\\memory'), text.slice(0, 200));
-  check('显示常驻条数', text.includes('常驻 3 条'), text.slice(0, 200));
+  // 条数只在流程条里报一次（状态行不再重复"常驻 N 条"）
+  check('流程条显示已在用条数', text.includes('已在用 3'), text.slice(0, 240));
   check('显示注入字节与预算', text.includes('注入 953 / 3072 字节'), text.slice(0, 200));
   check('没有超出预算时不给超预算提示', !text.includes('超出预算'), text.slice(0, 200));
   check('列出待复核项', text.includes('待复核') && text.includes('已超期 3 天'), text.slice(0, 400));
@@ -415,18 +416,42 @@ section('组件：正常数据');
     headers.includes('事实（facts）') && headers.includes('决策（decisions）'),
     headers,
   );
-  check('收件箱分目标出 inbox 目录', headers.includes('收件箱候选（inbox）'), headers);
-  // 目录名只说明"是什么"，还要说明"在流程哪一步、管不管注入"
-  //（真实反馈：光看 `facts` 这个名字判断不出它在流程里的位置）
+  check('收件箱分目标出 inbox 目录', headers.includes('待你确认（inbox）'), headers);
+  // 分组按**流程阶段**排：待你确认 → 已在用 → 已归档，一眼看出东西在哪一步
+  //（真实反馈：光看 facts 这个名字判断不出它在流程里的位置 —— 所以把阶段提到最外层）
   check(
-    '分组头写清流程位置与是否注入',
-    headers.includes('已确认的世界结论 · 参与注入') && headers.includes('已确认的约定 · 参与注入'),
+    '分组按流程阶段排（待你确认 → 已在用 → 已归档）',
+    ['待你确认', '已在用', '已归档'].every((t) => headers.includes(t)) &&
+      headers.indexOf('待你确认') < headers.indexOf('已在用') &&
+      headers.indexOf('已在用') < headers.indexOf('已归档'),
     headers,
   );
-  check('收件箱分组头标明"待确认 · 不注入"', headers.includes('待确认 · 不注入'), headers);
-  check('收件箱说明里点名 inbox/ → facts/decisions 的去向', text.includes('inbox/ 目录') && text.includes('facts/ 或 decisions/'), text.slice(0, 500));
+  check(
+    '每个阶段都有一句人话说明它在流程里干什么',
+    headers.includes('你点头才生效') && headers.includes('每轮会话自动发给模型') && headers.includes('不再发给模型'),
+    headers,
+  );
+  check(
+    '类型（事实/决策）降为「已在用」内部的子分组，并说明该放哪边',
+    headers.includes('事实（facts）关于世界') && headers.includes('决策（decisions）我们的约定'),
+    headers,
+  );
+  {
+    const flowText = allText(findByClass(mounted.tree(), 'dsh-memory-delta-flow'));
+    check(
+      '顶部流程条列出各阶段当前条数',
+      flowText.includes('流程') && flowText.includes('待你确认') && flowText.includes('已在用') && flowText.includes('已归档'),
+      flowText,
+    );
+    check(
+      '流程条数字与状态一致（候选 1 / 已在用 3 / 归档 0）',
+      /待你确认 1/.test(flowText) && /已在用 3/.test(flowText) && /已归档 0/.test(flowText),
+      flowText,
+    );
+  }
+  check('收件箱说明里点名候选的去向', text.includes('提升到 facts/ decisions/') && text.includes('已在用'), text.slice(0, 600));
   check('带 key 的条目显示 key（等宽、不带方括号）', text.includes('node-rm-nonascii'), text.slice(0, 400));
-  check('收件箱候选有数量与提示', text.includes('收件箱候选') && text.includes('确认后才成为常驻记忆'), text.slice(0, 500));
+  check('待你确认分组带数量', /待你确认（inbox）[^|]*1/.test(headers), headers);
   check('收件箱列出候选结论', text.includes('沙箱禁止命名管道'), text.slice(0, 500));
   check('有刷新按钮', text.includes('刷新'), text.slice(0, 200));
   check('读取完成后没有错误块', !hasClassName(mounted.tree(), 'dsh-memory-delta-error'));
@@ -782,14 +807,17 @@ section('组件：状态行标出归档条数');
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
   const text = allText(mounted.tree());
-  check('有归档时状态行标出「归档（archive）N 条」', text.includes('归档') && text.includes('（archive）') && text.includes('4 条'), text.slice(0, 240));
+  check('流程条标出「已归档 N」', text.includes('已归档 4'), text.slice(0, 240));
+  check('归档阶段组说明里有条数（不再发给模型，但搜得到）', /有 4 条旧结论/.test(text), text.slice(0, 600));
   globalThis.fetch = originalFetch;
 
-  // 没有归档时不显示（避免噪音）
+  // 没有归档时也要看到这一层存在（否则被取代的东西像凭空消失），但说清它是空的
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
   const clean = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
-  check('没有归档时不显示这一项', !allText(clean.tree()).includes('（archive）'), allText(clean.tree()).slice(0, 240));
+  const cleanText = allText(clean.tree());
+  check('没有归档时仍然显示「已归档」这一层', cleanText.includes('已归档') && cleanText.includes('（archive）'), cleanText.slice(0, 300));
+  check('没有归档时说清什么时候才会有', cleanText.includes('还没有归档') && cleanText.includes('不再发给模型'), cleanText.slice(0, 400));
   globalThis.fetch = originalFetch;
 }
 
@@ -806,10 +834,14 @@ section('组件：空态文案（没有任何数据时不能让人以为是坏�
   const text = allText(mounted.tree());
   check(
     '空收件箱时说明"模型写了才会出现，空着正常"',
-    text.includes('还没有待确认的候选') && text.includes('memory_write') && text.includes('空着是正常的'),
+    text.includes('没有待确认的候选') && text.includes('memory_write') && text.includes('空着是正常的'),
     text.slice(0, 400),
   );
-  check('空收件箱时依然保留"确认后才成为常驻记忆"的说明', text.includes('确认后才成为常驻记忆'), text.slice(0, 400));
+  check(
+    '空收件箱时依然说清"确认后才生效"',
+    text.includes('你点头才生效') && text.includes('提升到 facts/ decisions/'),
+    text.slice(0, 600),
+  );
   globalThis.fetch = originalFetch;
 }
 
@@ -875,7 +907,7 @@ section('组件：scope 里没有 cwd（从响应反推 workspace）');
     JSON.stringify(calls[0] ?? null),
   );
   check('从响应的 workspace 反推出后续请求的参数', calls.length >= 2 && calls[1].workspace === 'D:\\proj', JSON.stringify(calls));
-  check('反推之后仍然渲染成功', allText(mounted.tree()).includes('常驻 3 条'), allText(mounted.tree()).slice(0, 200));
+  check('反推之后仍然渲染成功', allText(mounted.tree()).includes('已在用 3'), allText(mounted.tree()).slice(0, 200));
   globalThis.fetch = originalFetch;
 }
 
