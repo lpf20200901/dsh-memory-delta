@@ -50,13 +50,17 @@ guess: it is a *kind* of content, not a *stage* of the flow):
 | Directory | Stage in the flow | What it holds | Who may write | Injected? |
 | --- | --- | --- | --- | --- |
 | `inbox/` | **candidate** (unconfirmed) | conclusions the model thinks are worth keeping | **only the model** (`memory_write`) | ❌ never |
-| `facts/` | **standing** | conclusions about **the world** — falsifiable by reality (environment limits, tool behaviour, pitfalls) | **only the human** (promote) | ✅ every turn |
-| `decisions/` | **standing** | **our own** conventions and trade-offs — they only expire when *we* change our mind | **only the human** (promote) | ✅ every turn |
-| `archive/` | **archived** | superseded or expired entries | moved automatically on supersede | ❌ never (still searchable) |
+| `facts/` | **standing** | **pitfalls hit + how to avoid them**: environment limits, tool behaviour, real failures and their fixes | **only the human** (promote) | ✅ every turn |
+| `decisions/` | **standing** | **conventions you decided**: business / process / taste calls — so you never have to answer twice | **only the human** (promote) | ✅ every turn |
+| `archive/` | **archived** | retired entries: superseded, or no longer applicable | moved on supersede/archive | ❌ never (still searchable, restorable) |
 
 The main flow: **the model may only write `inbox/` → the human promotes into `facts/` or `decisions/` →
-superseded entries move to `archive/`**. Unsure which side an entry belongs to? Ask: **"if the world changes
-tomorrow, does this stop being true?"** Yes → `facts/`; only *we* can invalidate it → `decisions/`.
+retired entries move to `archive/`**. Unsure which side an entry belongs to? Ask: **"if the world changes
+tomorrow, does this stop being true?"** Yes → `facts/`; only *you* can invalidate it → `decisions/`.
+
+**Two writing habits that make these layers actually useful**: a `facts/` entry should say **when it applies**
+(a pitfall is worth recording so it is not hit twice, not because it once happened); a `decisions/` entry should
+say **why it was decided** — with the reason, the agent can judge by itself instead of asking you again.
 
 > `mem init` writes the full explanation of these four directories (plus `journal.md` / `index.md` /
 > `memory.config.json`) into the store's **own** `README.md` — open the memory directory and it is right there.

@@ -432,9 +432,14 @@ section('组件：正常数据');
     headers,
   );
   check(
-    '类型（事实/决策）降为「已在用」内部的子分组，并说明该放哪边',
-    headers.includes('事实（facts）关于世界') && headers.includes('决策（decisions）我们的约定'),
+    '类型（事实/决策）降为「已在用」内部的子分组，并用**人话**说明各自记什么',
+    headers.includes('事实（facts）踩过的坑') && headers.includes('决策（decisions）你定下的约定'),
     headers,
+  );
+  check(
+    '每个类型组里还有一句"写起来的诀窍"（什么情况下适用 / 为什么这么定）',
+    text.includes('什么情况下适用') && text.includes('为什么这么定'),
+    text.slice(0, 800),
   );
   {
     const flowText = allText(findByClass(mounted.tree(), 'dsh-memory-delta-flow'));

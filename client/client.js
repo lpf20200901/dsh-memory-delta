@@ -1234,7 +1234,7 @@ window.__ModuleLoader__.load({
           ),
         );
 
-      const groupSection = (key, title, slug, list, hint) =>
+      const groupSection = (key, title, slug, list, hint, note) =>
         list.length
           ? section(
               {
@@ -1248,7 +1248,10 @@ window.__ModuleLoader__.load({
                 open: isOpen(`type:${key}`),
                 onToggle: () => toggleSection(`type:${key}`),
               },
-              byDateDesc(list).map((e) => renderItem(e)),
+              // note = 这一组"到底记什么"的人话说明（用户反馈：`事实`/`决策` 这两个词太抽象）
+              (note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : []).concat(
+                byDateDesc(list).map((e) => renderItem(e)),
+              ),
             )
           : null;
 
@@ -1297,10 +1300,31 @@ window.__ModuleLoader__.load({
               ),
             )
           : [
-              groupSection('facts', '事实', 'facts', facts, '关于世界（能被现实证伪）'),
-              groupSection('decisions', '决策', 'decisions', decisions, '我们的约定（只有我们改主意才失效）'),
+              groupSection(
+                'facts',
+                '事实',
+                'facts',
+                facts,
+                '踩过的坑 & 绕开的方法',
+                '换个环境或换个版本，它可能就不成立了 —— 所以写清"什么情况下适用"最有价值。',
+              ),
+              groupSection(
+                'decisions',
+                '决策',
+                'decisions',
+                decisions,
+                '你定下的约定',
+                '业务/流程/口味上的决定：只有你改主意才会变 —— 记下"为什么这么定"，我就不会再问第二遍。',
+              ),
               // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
-              groupSection('other', '其它', null, other, 'type 未识别'),
+              groupSection(
+                'other',
+                '其它',
+                null,
+                other,
+                'type 未识别',
+                '这些条目的 type 字段不是 fact / decision，面板不知道该怎么归类。',
+              ),
             ];
 
       /* -------------------------------------------------- 全局规范（工作区外）
