@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     require('react-dom');
 
     const STATE_URL = '/dsh-memory-delta/state';
+    // 检索：和 `mem recall` / 插件工具 memory_search **同一份实现**（宿主侧复用 searchLibrary）
+    const SEARCH_URL = '/dsh-memory-delta/search';
     // 写记忆库的动作（收件箱提升 / 安全改名）—— 宿主侧复用 CLI 的 promoteEntry / renameEntry。
     const ACTION_URL = '/dsh-memory-delta/action';
     const PLUGIN_ID = 'dsh-memory-delta';
@@ -261,6 +263,30 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
 .dsh-memory-delta-ok { border-color: var(--dsw-alias-state-success-secondary, rgba(46,125,50,.35)); }
+/* 搜索框：一行占满，和分组头同一层的视觉重量 */
+.dsh-memory-delta-search { display: flex; align-items: center; gap: 6px; }
+.dsh-memory-delta-search > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  background: var(--dsw-alias-bg-layer-1, transparent);
+  color: inherit;
+  font: inherit;
+}
+.dsh-memory-delta-search > input::placeholder { color: var(--dsw-alias-label-tertiary, #8c8c8c); }
+.dsh-memory-delta-search > input:focus { outline: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.5)); outline-offset: 0; }
+.dsh-memory-delta-snippet { color: var(--dsw-alias-label-secondary, #6b6b6b); }
+.dsh-memory-delta-where {
+  flex: none;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
+  color: var(--dsw-alias-label-secondary, #6b6b6b);
+}
 /* 「整理文件名」的内联输入行（改 id 是危险动作，所以不做猜名字的自动操作，让用户自己填） */
 .dsh-memory-delta-rename { display: flex; gap: 4px; margin-top: 3px; }
 .dsh-memory-delta-rename > input {
@@ -345,6 +371,43 @@ window.__ModuleLoader__.load({
 
     const row = (key, children) => h('div', { className: 'dsh-memory-delta-row', key }, children);
 
+    /**
+     * 检索记忆库。
+     *
+     * 分词/打分/片段**全在宿主**（`searchLibrary` → `src/search.mjs`）—— 面板搜出来的顺序与
+     * 片段必须和 `mem recall`、模型看到的 `memory_search` 一模一样，否则就会出现
+     * "我明明记过这条，界面却搜不到"这种最难查的分歧。
+     */
+    function requestSearch(query, workspace) {
+      return fetch(SEARCH_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(workspace ? { query, workspace } : { query }),
+      }).then(async (res) => {
+        let data = null;
+        try {
+          data = await res.json();
+        } catch {
+          data = null;
+        }
+        if (!res.ok || !data || data.ok === false) {
+          throw new Error((data && data.error) || `HTTP ${res.status}`);
+        }
+        return data;
+      });
+    }
+
+    /** 命中所在的层 —— 界面上的中文名（与 `（facts）` 那种目录名对照）。 */
+    const WHERE_LABEL = {
+      facts: '事实',
+      decisions: '决策',
+      inbox: '收件箱',
+      archive: '归档',
+      journal: '流水',
+      sessions: '会话',
+      index: '索引',
+    };
+
     /** 只取文件名（`D:\...\facts\sandbox-no-egress.md` → `sandbox-no-egress.md`）。 */
     function baseNameOf(file) {
       const s = String(file || '');
@@ -416,6 +479,9 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dsh-memory-delta-item-head' },
+          opts.showWhere && e.where
+            ? h('span', { className: 'dsh-memory-delta-where' }, WHERE_LABEL[e.where] || e.where)
+            : null,
           opts.showType && typeLabel
             ? h(
                 'span',
@@ -434,6 +500,10 @@ window.__ModuleLoader__.load({
           ),
         ),
         h('div', { className: 'dsh-memory-delta-line' }, e.line),
+        // 搜索结果里带命中片段（含上下文，比首行更有信息量）；相关度只放进 title，不占视觉
+        opts.showSnippet && e.snippet && e.snippet !== e.line
+          ? h('div', { className: 'dsh-memory-delta-snippet', title: typeof e.score === 'number' ? `score ${e.score}` : undefined }, e.snippet)
+          : null,
         file ? h('div', { className: 'dsh-memory-delta-file', title: file }, baseNameOf(file)) : null,
         opts.extraRow || null,
       );
@@ -492,6 +562,12 @@ window.__ModuleLoader__.load({
       const [groupBy, setGroupBy] = useState('type');
       const [actionError, setActionError] = useState(null);
       const [notice, setNotice] = useState(null);
+      // 搜索：query 是输入框内容，results 是宿主回的命中（null = 还没搜/已清空）
+      const [query, setQuery] = useState('');
+      const [results, setResults] = useState(null);
+      const [searchedQuery, setSearchedQuery] = useState(null);
+      const [searching, setSearching] = useState(false);
+      const [searchError, setSearchError] = useState(null);
       // 「整理文件名」的内联输入：{ id, value }。改名会同时改 frontmatter 的 id 与别处的引用，
       // 所以**不猜名字**（猜错就是一次全库引用改写），让用户自己填。
       const [renaming, setRenaming] = useState(null);
@@ -525,6 +601,46 @@ window.__ModuleLoader__.load({
 
       const actionWorkspace = () =>
         state && typeof state.workspace === 'string' && state.workspace ? state.workspace : workspace;
+
+      /**
+       * 跑一次检索。同一个词不重复请求（回车会立刻调它，而防抖那一路稍后也会到）。
+       * 清空输入框时不发请求，只把结果丢掉 —— 回到分组视图。
+       */
+      const runSearch = (raw) => {
+        const q = String(raw ?? '').trim();
+        if (!q) {
+          setResults(null);
+          setSearchedQuery(null);
+          setSearchError(null);
+          return;
+        }
+        if (q === searchedQuery) return;
+        setSearchedQuery(q);
+        setSearching(true);
+        requestSearch(q, actionWorkspace())
+          .then((data) => {
+            setResults({ total: data.total || 0, matches: Array.isArray(data.matches) ? data.matches : [], query: q });
+            setSearchError(null);
+          })
+          .catch((err) => {
+            setResults(null);
+            setSearchError(err && err.message ? err.message : String(err));
+          })
+          .then(() => setSearching(false));
+      };
+
+      // 输入停顿 200ms 自动搜（回车立即搜）：不轮询、不每次按键都砸一遍磁盘
+      useEffect(() => {
+        const q = query.trim();
+        if (!q) {
+          setResults(null);
+          setSearchedQuery(null);
+          setSearchError(null);
+          return undefined;
+        }
+        const timer = setTimeout(() => runSearch(q), 200);
+        return () => clearTimeout(timer);
+      }, [query]);
 
       /** 行内按钮必须挡住冒泡 —— 否则点「提升」会连带触发整行的"打开文件"。 */
       const stop = (ev) => {
@@ -700,6 +816,44 @@ window.__ModuleLoader__.load({
           { type: 'button', className: 'dsh-memory-delta-btn', onClick: onRefresh, disabled: busy },
           busy ? '读取中…' : '刷新',
         ),
+      );
+
+      /** 搜索框：中文连写也能搜（bigram 在宿主侧切），回车立即搜、停顿 200ms 自动搜。 */
+      const searchRow = h(
+        'div',
+        { className: 'dsh-memory-delta-search' },
+        h('input', {
+          type: 'search',
+          className: 'dsh-memory-delta-search-input',
+          value: query,
+          placeholder: '搜索记忆与流水（中文连写也行，如 沙箱禁管道）',
+          'aria-label': '搜索记忆',
+          onChange: (ev) => setQuery(ev && ev.target ? ev.target.value : ''),
+          onKeyDown: (ev) => {
+            if (ev && ev.key === 'Enter') {
+              if (typeof ev.preventDefault === 'function') ev.preventDefault();
+              runSearch(query);
+            }
+          },
+        }),
+        query
+          ? h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-memory-delta-mini',
+                title: '清空搜索，回到分组视图',
+                onClick: () => {
+                  setQuery('');
+                  setResults(null);
+                  setSearchedQuery(null);
+                  setSearchError(null);
+                },
+              },
+              '清空',
+            )
+          : null,
+        searching ? h('span', { className: 'dsh-memory-delta-dim' }, '搜索中…') : null,
       );
 
       if (error) {
@@ -880,16 +1034,51 @@ window.__ModuleLoader__.load({
         ],
       );
 
+      /* ------------------------------------------------------------ 搜索块 */
+      const searching_ = query.trim().length > 0;
+      const hits = results && Array.isArray(results.matches) ? results.matches : [];
+      const searchBlock = searching_
+        ? section(
+            {
+              key: 'search',
+              title: '搜索结果',
+              slug: null,
+              count: results ? results.total : 0,
+              hint: results ? `“${results.query}”` : `“${query.trim()}”`,
+              open: isOpen('search'),
+              onToggle: () => toggleSection('search'),
+            },
+            [
+              h(
+                'div',
+                { className: 'dsh-memory-delta-dim', key: 'hint' },
+                '在条目（facts/ decisions/ inbox/ archive）与流水里按相关度搜 —— 和 `mem recall`、模型用的 memory_search 是同一套打分。清空搜索框回到分组视图。',
+              ),
+              searchError
+                ? h('div', { className: 'dsh-memory-delta-error', key: 'err' }, `搜索失败：${searchError}`)
+                : results && results.total === 0
+                  ? h(
+                      'div',
+                      { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
+                      '没有匹配 —— 换个说法，或拆成几个关键词（中文连写会自动切 bigram，不用手动加空格）',
+                    )
+                  : hits.map((hit) =>
+                      item(hit, { onOpen: openMemoryFile, showType: true, showWhere: true, showSnippet: true, actions: [] }),
+                    ),
+            ],
+          )
+        : null;
+
       return h(
         'div',
         { className: 'dsh-memory-delta-tab' },
         head,
+        searchRow,
         statusRow,
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
-        dueBlock,
-        standing,
-        inboxBlock,
+        // 有搜索词时**只显示结果**（否则一屏里两套列表，谁也看不清）
+        searching_ ? searchBlock : [dueBlock, standing, inboxBlock],
       );
     }
 

@@ -26,7 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, renameEntry, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, renameEntry, searchLibrary, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -37,6 +37,12 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
 
 /** `action` 路由认的操作 —— 白名单，别的一律 400。 */
 export const ACTION_OPS = ['promote', 'rename'];
+
+/** 搜索路由：面板搜索框 → 与 `mem recall` / `memory_search` 同一份检索实现。 */
+export const MEMORY_SEARCH_PATH = '/dsh-memory-delta/search';
+
+/** 搜索可以限定在哪一层 —— 白名单，不在里面的 where 一律 400（而不是"静默零结果"）。 */
+export const SEARCH_WHERE = ['all', 'facts', 'decisions', 'inbox', 'archive', 'journal', 'sessions', 'index'];
 
 /** 面板一次最多列的常驻条目数 —— 面板是"给用户信心"的，不是监控台。 */
 export const PANEL_ENTRY_LIMIT = 200;
@@ -377,6 +383,73 @@ async function readAllowedBody(req, res) {
     writeJson(res, 400, { ok: false, error: error.message });
     return null;
   }
+}
+
+/**
+ * 「搜索」路由：POST `{query, workspace?, where?, limit?}` → 排好序的命中。
+ *
+ * **复用 `searchLibrary`**（`bin/mem.mjs` → `src/search.mjs`）：和 CLI 的 `mem recall`、
+ * 插件工具 `memory_search` 是同一份分词/打分/片段实现 —— 面板搜出来的东西必须和
+ * 模型搜出来的完全一致，否则"我明明记得记过这条"就会变成最难查的那种问题。
+ *
+ * 只读，不写任何东西。
+ *
+ * @param {{configRoot?: string, allow?: boolean, limit?: number}} [opts]
+ */
+export function createSearchRoute(opts = {}) {
+  return {
+    kind: 'exact',
+    path: MEMORY_SEARCH_PATH,
+    async handler(req, res) {
+      try {
+        if (opts.allow === false) {
+          writeJson(res, 403, { ok: false, error: '配置里关掉了面板（panel=false）' });
+          return;
+        }
+        const body = await readAllowedBody(req, res);
+        if (body === null) return;
+
+        const query = typeof body?.query === 'string' ? body.query.trim() : '';
+        if (!query) {
+          writeJson(res, 400, { ok: false, error: '缺少 query（搜索词不能为空）' });
+          return;
+        }
+        const { root } = resolvePanelRoot({ configRoot: opts.configRoot ?? body?.configRoot, workspace: body?.workspace });
+        if (!root) {
+          writeJson(res, 400, { ok: false, error: '不知道记忆库在哪：请求里既没有 workspace，插件也没配 root' });
+          return;
+        }
+        const L = ensureLayout(root, { create: false });
+        const limit = Number.isFinite(Number(body?.limit)) && Number(body.limit) > 0 ? Math.min(Number(body.limit), 100) : (opts.limit ?? 20);
+        const where = body?.where === undefined || body?.where === null || body?.where === '' ? 'all' : body.where;
+        if (!SEARCH_WHERE.includes(where)) {
+          writeJson(res, 400, { ok: false, error: `不认识的 where：${where}（只支持 ${SEARCH_WHERE.join(' / ')}）` });
+          return;
+        }
+        // 面板展示用不着 400 字的片段，240 够看且省流量
+        const found = searchLibrary(L, { query, where, limit, maxLen: 240 });
+        writeJson(res, 200, { ok: true, ...found });
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: `搜索失败：${error?.message ?? String(error)}` });
+      }
+    },
+  };
+}
+
+/**
+ * 注册「搜索」路由。
+ *
+ * @param {object} webServer `ctx.get('webServer')` 的结果
+ * @param {{configRoot?: string, allow?: boolean, limit?: number}} [opts]
+ * @param {(body: () => any, label?: string) => unknown} [effect] `ctx.effect`
+ * @returns {object|null} 路由对象；webServer 不可用时返回 null
+ */
+export function registerSearchRoute(webServer, opts = {}, effect) {
+  if (!webServer || typeof webServer.register !== 'function') return null;
+  const route = createSearchRoute(opts);
+  if (typeof effect === 'function') effect(() => webServer.register(route), 'dsh-memory-delta: /dsh-memory-delta/search route');
+  else webServer.register(route);
+  return route;
 }
 
 /**

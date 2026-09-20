@@ -15,11 +15,10 @@ import path from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import { collectDocs, createEntry, ensureLayout, injectPayload, loadConfig } from '../bin/mem.mjs';
+import { createEntry, ensureLayout, injectPayload, loadConfig, searchLibrary } from '../bin/mem.mjs';
 import { createMemoryHook } from './hook.mjs';
-import { memoryStateOf, registerActionRoute, registerMemoryRoute } from './panel.mjs';
+import { memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute } from './panel.mjs';
 import { MEMORY_SOURCE_KIND } from './planner.mjs';
-import { rankDocs } from './search.mjs';
 
 export const name = 'memory';
 export const inject = ['tools'];
@@ -155,32 +154,12 @@ export function apply(ctx, config = {}) {
         const store = storeOf(exec?.agent?.session?.header?.cwd);
         if (!store) return Promise.resolve({ total: 0, matches: [] });
         const limit = Number.isFinite(args.limit) ? Number(args.limit) : 20;
-        const want = args.where ?? 'all';
 
-        // 检索逻辑与 `mem recall` 完全共用（src/search.mjs）：分词、打分、片段只有一份实现
-        const docs = collectDocs(store.L, { where: want });
-        const hits = rankDocs(docs, args.query, { limit });
-
-        // ⚠️ 工具返回值必须是**无损 JSON**：DSH 会把值为 `undefined` 的属性判定为非法
-        // （`dsh-tools` 的 "value is not lossless JSON"），**整个工具调用直接失败**。
-        // 命中流水行时没有 type/status/key，命中没写 key 的条目时没有 key —— 必须把这些
-        // 字段**整条省掉**，而不是留成 undefined（也不能给 null：schema 声明的是 string）。
-        const defined = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
-        const matches = hits.map((h) =>
-          defined({
-            id: h.id,
-            where: h.where,
-            type: h.type,
-            status: h.status,
-            key: h.key ?? undefined,
-            line: truncated(h.line, 240),
-            snippet: truncated(h.snippet, 240),
-            score: Number(h.score.toFixed(2)),
-            matched: h.matched,
-          }),
-        );
-
-        return Promise.resolve({ total: matches.length, matches });
+        // 检索与 `mem recall`、侧边栏搜索框**完全共用一份实现**（`searchLibrary` →
+        // `src/search.mjs` 的分词/打分/片段）。返回的是无损 JSON（`searchLibrary` 已经
+        // 把值为 undefined 的字段整条省掉了，见那里的注释）。
+        const found = searchLibrary(store.L, { query: args.query, where: args.where ?? 'all', limit, maxLen: 240 });
+        return Promise.resolve({ total: found.total, matches: found.matches });
       },
       presentCall: (args) => ({ card: 'generic', title: `Search memory: ${truncated(args.query, 60)}`, kind: 'other', rawInput: args }),
     }),
@@ -265,8 +244,14 @@ export function apply(ctx, config = {}) {
         }),
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );
-    // 只读状态路由之外，再挂"动作"路由（写记忆库：promote / rename），
-    // 逻辑复用 CLI 的 promoteEntry / renameEntry。
+    // 只读状态路由之外，再挂两条：
+    //   · 「搜索」= 复用 searchLibrary（与 mem recall / memory_search 同一份实现）
+    //   · 「动作」= 写记忆库（promote / rename），复用 CLI 的 promoteEntry / renameEntry
+    registerSearchRoute(
+      target,
+      { configRoot: config.root || undefined },
+      effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
+    );
     registerActionRoute(
       target,
       { configRoot: config.root || undefined, allow: config.allowWrite !== false },

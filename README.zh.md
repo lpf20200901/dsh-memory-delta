@@ -111,7 +111,7 @@ AI 编码助手有两个反复出现的毛病：
 | `memory_write` | 把候选条目写进 inbox —— **模型不允许直接改事实层** |
 | 蒸馏提醒 | 会话跑过若干轮而记忆已是最新时，提醒模型把本次结论落到 inbox；每会话只提醒一次，且提醒消息**不带状态**，不污染差分基线 |
 | 到期复核提醒 | `verify_when` 不再是死字段：条目到了当初约定的复核期，会话里会**提醒一次**"这条结论可能过时了，请复核"，并给出该用哪条命令取代/标过期。写成**人话**的值（`等换机器时`）永远不会触发它（否则每个会话都弹一次、怎么改都消不掉）；只在"本轮本来不注入任何记忆"时才提醒，同样**不带状态** |
-| 侧边栏「记忆」页签 | 装了 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 后，侧边栏多一个**记忆**页：可折叠分组（自绘箭头，一眼看出能展开）、常驻条目、到期待复核项、收件箱候选、当前注入体积。**点某条记忆 = 打开它那个 `.md`**（走 better-sidebar 的官方 `openFile`，在侧边栏编辑器里预览/编辑）。分组可按**类型**（事实/决策）或**标签**看（取每条第一个标签）。客户端半边是**手写的零构建浏览器 bundle**（`window.__ModuleLoader__.load({id, factory})` 包装，不引入任何打包器）；数据来自本插件自己的只读路由 `POST /dsh-memory-delta/state` —— 仅回环、JSON 进 JSON 出、只读记忆库，不碰别的文件。唯一会**写**的路由是 `POST /dsh-memory-delta/action`（收件箱提升 / 安全改名，见下），可用 `allowWrite: false` 关掉 |
+| 侧边栏「记忆」页签 | 装了 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 后，侧边栏多一个**记忆**页：可折叠分组（自绘箭头，一眼看出能展开）、常驻条目、到期待复核项、收件箱候选、当前注入体积，以及**搜索框**（搜条目 + 流水，中文连写也行 —— 与 `mem recall`、模型用的 `memory_search` 是**同一套打分**）。**点某条记忆 = 打开它那个 `.md`**（走 better-sidebar 的官方 `openFile`，在侧边栏编辑器里预览/编辑）。分组可按**类型**（事实/决策）或**标签**看（取每条第一个标签）。客户端半边是**手写的零构建浏览器 bundle**（`window.__ModuleLoader__.load({id, factory})` 包装，不引入任何打包器）；数据来自本插件自己的只读路由 `POST /dsh-memory-delta/state` 与 `POST /dsh-memory-delta/search` —— 仅回环、JSON 进 JSON 出、不碰别的文件。唯一会**写**的路由是 `POST /dsh-memory-delta/action`（收件箱提升 / 安全改名，见下），可用 `allowWrite: false` 关掉 |
 | 为什么不把"编辑/删除记忆"做进面板 | 侧边栏**本来就有**编辑器（点条目即打开）和文件树（重命名/删除带确认）。在面板里再造一套完整增删改 = 重复实现 + 长期维护负担，所以面板只做**入口**加**两个真正需要判断的动作**：打开文件、把收件箱候选**一键提升**（`promote`，人确认这一步终于有了界面）、以及**整理文件名**（`mem rename`：id + 文件名 + 引用一起改）。**"跳到目录"这类纯跳转按钮不做** —— 折叠箭头看内容 + 点条目打开详情已经够，多一个按钮只多一份噪音和一条会启动外部进程的路由。⚠️ **不要**用文件树直接给记忆条目改名 —— `id` 写在 frontmatter 里且必须与文件名一致，`mem validate` 会报 `id 与文件名不一致`；这正是不做自由改名、只做"安全改名"的原因 |
 
 为什么插件**不去 spawn CLI**：DSH 沙箱禁止命名管道，捕获子进程输出会 EPERM；而且没必要 ——
@@ -179,7 +179,7 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 642 个断言，零依赖
+npm test        # 681 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
@@ -189,8 +189,8 @@ npm test        # 642 个断言，零依赖
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 160 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
-| `test/client-tests.mjs` | 95 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
+| `test/plugin-tests.mjs` | 181 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
+| `test/client-tests.mjs` | 113 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。

@@ -816,6 +816,8 @@ function collectDocs(L, { where = 'all' } = {}) {
       date: e.data.date || '',
       conclusion: firstLine(e.body),
       text: e.body,
+      // 文件路径：面板里点一条命中就要能把它打开（流水/会话索引那几行也有归属文件）
+      file: e.file,
     });
   }
 
@@ -829,11 +831,57 @@ function collectDocs(L, { where = 'all' } = {}) {
       .forEach((raw, i) => {
         const line = raw.trim();
         if (!line || line.startsWith('#') || line.startsWith('---') || /^[a-z_]+:\s/i.test(line)) return;
-        docs.push({ id: `${layer}:${i + 1}`, where: layer, conclusion: line, text: line });
+        docs.push({ id: `${layer}:${i + 1}`, where: layer, conclusion: line, text: line, file });
       });
   }
 
   return docs;
+}
+
+/**
+ * 检索记忆库 —— **CLI（`mem recall`）、插件工具 `memory_search`、侧边栏搜索框共用这一份**。
+ *
+ * 分词 / 打分 / 片段选择全在 `src/search.mjs`（中文 bigram 连写、字段加权、命中不足一半淘汰、
+ * 结果稳定可复现），这里只负责两件事：把库摊成文档（`collectDocs`）、把命中裁成**无损 JSON**。
+ *
+ * @param {object} L `ensureLayout` 的结果
+ * @param {{query: string, where?: string, limit?: number, maxLen?: number}} opts
+ *   `where`：all | facts | decisions | inbox | archive | journal | sessions | index
+ * @returns {{query: string, where: string, total: number, matches: Array<object>}}
+ */
+export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 240 } = {}) {
+  const q = String(query ?? '').trim();
+  const want = typeof where === 'string' && where ? where : 'all';
+  if (!q) return { query: '', where: want, total: 0, matches: [] };
+
+  const hits = rankDocs(collectDocs(L, { where: want }), q, { limit: Number(limit) || 20 });
+  const clip = (s) => {
+    const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+    if (t.length <= maxLen) return t;
+    return `${t.slice(0, Math.max(1, maxLen - 1))}…`;
+  };
+
+  const matches = hits.map((h) =>
+    // 无损 JSON：值为 undefined 的属性会让 DSH 的工具调用**整条失败**，所以整条省掉
+    Object.fromEntries(
+      Object.entries({
+        id: h.id,
+        where: h.where,
+        type: h.type,
+        status: h.status,
+        key: h.key ?? undefined,
+        tags: Array.isArray(h.tags) && h.tags.length ? h.tags : undefined,
+        date: h.date ? String(h.date) : undefined,
+        file: typeof h.file === 'string' && h.file ? h.file : undefined,
+        line: clip(h.line),
+        snippet: clip(h.snippet),
+        matched: Array.isArray(h.matched) ? h.matched : undefined,
+        score: Number(Number(h.score ?? 0).toFixed(2)),
+      }).filter(([, v]) => v !== undefined),
+    ),
+  );
+
+  return { query: q, where: want, total: matches.length, matches };
 }
 
 /** 把片段里的关键词标色 —— 扫结果时这一步最省事。 */
@@ -855,11 +903,17 @@ function cmdRecall(opts) {
   const query = String(opts._[0] || '').trim();
   if (!query) fail('用法：mem recall <关键词> [--where all|facts|decisions|inbox|archive|journal|sessions|index] [--limit N] [--json]');
 
-  const docs = collectDocs(L, { where: typeof opts.where === 'string' ? opts.where : 'all' });
-  const hits = rankDocs(docs, query, { limit: opts.limit ? Number(opts.limit) : 20 });
+  // 与插件工具 `memory_search`、侧边栏搜索框共用同一份检索（`searchLibrary`）
+  const found = searchLibrary(L, {
+    query,
+    where: typeof opts.where === 'string' ? opts.where : 'all',
+    limit: opts.limit ? Number(opts.limit) : 20,
+    maxLen: 400,
+  });
+  const hits = found.matches;
 
   if (opts.json) {
-    console.log(JSON.stringify({ query, total: hits.length, matches: hits }, null, 2));
+    console.log(JSON.stringify(found, null, 2));
     return;
   }
   if (!hits.length) {
@@ -869,7 +923,7 @@ function cmdRecall(opts) {
   }
   for (const h of hits) {
     console.log(`${c(36, String(h.where).padEnd(9))} ${c(1, h.id.padEnd(34))} ${dim(`score ${h.score.toFixed(1)}`)}`);
-    console.log(`    ${highlight(h.snippet, h.matched)}`);
+    console.log(`    ${highlight(h.snippet, h.matched || [])}`);
   }
   console.log(dim(`\n命中 ${hits.length} 条（按相关度排序；--json 可机器读）`));
 }

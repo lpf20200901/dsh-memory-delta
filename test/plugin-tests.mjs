@@ -11,8 +11,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
-import { createEntry, ensureLayout, injectPayload, readAll } from '../bin/mem.mjs';
-import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, createActionRoute, createMemoryRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, resolvePanelRoot } from '../src/panel.mjs';
+import { createEntry, ensureLayout, injectPayload, readAll, searchLibrary } from '../bin/mem.mjs';
+import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -477,12 +477,14 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('工具照常注册（不等 webServer）', panelCtx.registered.length === 2, String(panelCtx.registered.length));
 
   panelCtx.pendingInjects[0](); // webServer 出现了
-  check('webServer 出现后注册了 2 条路由（状态 + 动作）', panelCtx.routes.length === 2, String(panelCtx.routes.length));
+  check('webServer 出现后注册了 3 条路由（状态 + 搜索 + 动作）', panelCtx.routes.length === 3, String(panelCtx.routes.length));
   const route = panelCtx.routes.find((r) => r.path === MEMORY_ROUTE_PATH) ?? panelCtx.routes[0];
   check('路由 kind 是 exact', route.kind === 'exact', String(route.kind));
   check('路由路径是 /dsh-memory-delta/state', route.path === MEMORY_ROUTE_PATH && route.path === '/dsh-memory-delta/state', String(route.path));
+  const searchRoute = panelCtx.routes.find((r) => r.path === MEMORY_SEARCH_PATH);
+  check('第二条路由是「搜索」', searchRoute?.path === '/dsh-memory-delta/search', panelCtx.routes.map((r) => r.path).join(','));
   const actionRoute = panelCtx.routes.find((r) => r.path === MEMORY_ACTION_PATH);
-  check('第二条路由是「动作」（写记忆库）', actionRoute?.path === '/dsh-memory-delta/action', panelCtx.routes.map((r) => r.path).join(','));
+  check('第三条路由是「动作」（写记忆库）', actionRoute?.path === '/dsh-memory-delta/action', panelCtx.routes.map((r) => r.path).join(','));
   check(
     '没有「打开目录」路由了（按用户要求删掉按钮，也不留没人调用的外部进程入口）',
     !panelCtx.routes.some((r) => /reveal/.test(r.path)),
@@ -498,14 +500,15 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('客户端 bundle 的 id 是包名 dsh-memory-delta', clientId === 'dsh-memory-delta', String(clientId));
   // 客户端必须用 POST —— 宿主路由只认 POST，用 GET 会得到 405（而且回退服务器也回 405，极易误判）
   check('客户端用 POST 请求这条路由', /fetch\(STATE_URL,\s*\{\s*\n\s*method:\s*'POST'/.test(clientSrc), 'client/client.js 里的 fetch 选项');
-  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 2, JSON.stringify(panelCtx.effects));
+  check('路由通过 ctx.effect 托管（可随插件卸载）', panelCtx.effects.length === 3, JSON.stringify(panelCtx.effects));
   check('effect 带可读的标签（含新包名）', panelCtx.effects[0] === 'dsh-memory-delta: /dsh-memory-delta/state route', String(panelCtx.effects[0]));
-  check('「动作」路由也受 ctx.effect 托管', panelCtx.effects[1] === 'dsh-memory-delta: /dsh-memory-delta/action route', String(panelCtx.effects[1]));
+  check('「搜索」路由也受 ctx.effect 托管', panelCtx.effects[1] === 'dsh-memory-delta: /dsh-memory-delta/search route', String(panelCtx.effects[1]));
+  check('「动作」路由也受 ctx.effect 托管', panelCtx.effects[2] === 'dsh-memory-delta: /dsh-memory-delta/action route', String(panelCtx.effects[2]));
 
   // 服务早就就绪的组合（late=false）→ 回调立刻跑
   const earlyCtx = fakeCtxWithWebServer({ late: false });
   apply(earlyCtx, { root: ROOT, maxBytes: 3072 });
-  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 2, String(earlyCtx.routes.length));
+  check('webServer 早已就绪时也注册', earlyCtx.routes.length === 3, String(earlyCtx.routes.length));
 
   // 没有 ctx.inject 的极简 ctx（老版本 / 测试替身）→ 退回 ctx.get，有就注册、没有不抛
   const plainCtx = fakeCtx();
@@ -661,6 +664,75 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   const noEffectRoutes = [];
   const returned = registerMemoryRoute({ register: (r) => noEffectRoutes.push(r) }, memoryStateOf);
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ROUTE_PATH && noEffectRoutes.length === 1, String(returned?.path));
+}
+
+/* ------------------------------------- 「搜索」路由（与 CLI / 工具同一份实现） */
+
+section('「搜索」路由');
+{
+  const searchRoot = path.join(SANDBOX, 'search', 'memory');
+  const SL = ensureLayout(searchRoot);
+  createEntry(SL, { type: 'fact', conclusion: '沙箱禁止命名管道：捕获子进程输出会 EPERM', key: 'sandbox-no-pipe', tags: ['sandbox'], source: 's' });
+  createEntry(SL, { type: 'fact', conclusion: '路径含非 ASCII 时 fs.rmSync 会静默失败', key: 'node-rm-nonascii', tags: ['node'], source: 's' });
+  fs.writeFileSync(
+    path.join(searchRoot, 'journal.md'),
+    '# 流水\n\n2026-09-20 今天在讨论把面板接上检索，复用 rankDocs。\n',
+    'utf8',
+  );
+
+  const route = createSearchRoute({ configRoot: searchRoot });
+
+  // 中文连写（不手动空格）必须命中 —— 这是老实现必然落空的地方
+  const zh = await callRoute(route, { body: JSON.stringify({ query: '沙箱禁管道' }) });
+  check('中文连写查询命中', zh.status === 200 && zh.json.total >= 1, JSON.stringify(zh.json).slice(0, 200));
+  check('命中的是那条事实', zh.json.matches.some((m) => m.id === 'sandbox-no-pipe'), JSON.stringify(zh.json.matches.map((m) => m.id)));
+  check('每条命中带 file（面板点一下就要能打开）', zh.json.matches.every((m) => typeof m.file === 'string' && path.isAbsolute(m.file)), JSON.stringify(zh.json.matches.map((m) => m.file)));
+  check(
+    'file 指向真实存在的文件',
+    zh.json.matches.every((m) => fs.existsSync(m.file)),
+    zh.json.matches.map((m) => m.file).join('|'),
+  );
+  check('带 score / snippet / matched（界面要显示相关度与片段）', zh.json.matches.every((m) => typeof m.score === 'number' && typeof m.snippet === 'string' && Array.isArray(m.matched)), JSON.stringify(zh.json.matches[0]));
+  check('结果是无损 JSON', losslessError(zh.json) === null, losslessError(zh.json) ?? '');
+
+  // 英文标识符 + 流水层
+  const en = await callRoute(route, { body: JSON.stringify({ query: 'rmsync' }) });
+  check('英文标识符命中', en.json.matches.some((m) => m.id === 'node-rm-nonascii'), JSON.stringify(en.json.matches.map((m) => m.id)));
+  const journalHit = await callRoute(route, { body: JSON.stringify({ query: 'rankDocs' }) });
+  check('流水层也能搜到（面板搜索不只是条目）', journalHit.json.matches.some((m) => m.where === 'journal'), JSON.stringify(journalHit.json.matches.map((m) => m.where)));
+  const noHit = await callRoute(route, { body: JSON.stringify({ query: '数据库迁移' }) });
+  check('无关关键词零命中（不会瞎给结果）', noHit.status === 200 && noHit.json.total === 0, JSON.stringify(noHit.json).slice(0, 160));
+
+  // 「只有一份实现」这件事要能被测试钉住：
+  //   ① 路由的结果 === searchLibrary(...) 的结果（同一个库、同一条 query）
+  //   ② 插件源码里 memory_search 用的是 searchLibrary，且**不再**自己拼 collectDocs + rankDocs
+  const shared = searchLibrary(SL, { query: '沙箱禁管道', maxLen: 240 });
+  check(
+    '面板搜索就是 searchLibrary 的输出（没有第二份实现）',
+    JSON.stringify(shared.matches.map((m) => m.id)) === JSON.stringify(zh.json.matches.map((m) => m.id)),
+    `${JSON.stringify(shared.matches.map((m) => m.id))} vs ${JSON.stringify(zh.json.matches.map((m) => m.id))}`,
+  );
+  const pluginSrc = fs.readFileSync(path.join(HERE, '..', 'src', 'plugin.mjs'), 'utf8');
+  check('memory_search 工具复用 searchLibrary', /searchLibrary\(store\.L/.test(pluginSrc), 'plugin.mjs 里的检索调用');
+  check('插件里没有第二份"collectDocs + rankDocs"拼装', !/rankDocs\s*\(/.test(pluginSrc), 'plugin.mjs 不该直接调 rankDocs');
+
+  // where 白名单 + 空查询 + 三道前门
+  const scoped = await callRoute(route, { body: JSON.stringify({ query: 'rankDocs', where: 'facts' }) });
+  check('where 限定层生效（facts 里搜不到流水那句）', scoped.json.total === 0, JSON.stringify(scoped.json).slice(0, 160));
+  const badWhere = await callRoute(route, { body: JSON.stringify({ query: 'x', where: 'nope' }) });
+  check('不在白名单的 where → 400（不是静默零结果）', badWhere.status === 400 && /不认识的 where/.test(String(badWhere.json.error)), String(badWhere.json.error).slice(0, 120));
+  const empty = await callRoute(route, { body: JSON.stringify({ query: '   ' }) });
+  check('空查询 → 400', empty.status === 400 && /缺少 query/.test(String(empty.json.error)), String(empty.json.error));
+  const crossSite = await callRoute(route, { body: JSON.stringify({ query: 'x' }), headers: { host: '127.0.0.1:23278', origin: 'https://evil.example' } });
+  check('跨站 Origin → 403', crossSite.status === 403, String(crossSite.status));
+  const getMethod = await callRoute(route, { method: 'GET', url: MEMORY_SEARCH_PATH });
+  check('GET → 405', getMethod.status === 405, String(getMethod.status));
+
+  // 注册函数
+  check('webServer 缺失时 registerSearchRoute 返回 null', registerSearchRoute(undefined, {}) === null);
+  const registered = [];
+  const returned = registerSearchRoute({ register: (r) => registered.push(r) }, { configRoot: searchRoot });
+  check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_SEARCH_PATH && registered.length === 1, String(returned?.path));
 }
 
 /* ------------------------------------- 「动作」路由（真的写记忆库） */

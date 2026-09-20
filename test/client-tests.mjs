@@ -223,6 +223,9 @@ function mountPanel(props) {
 /** 等微任务队列清空（把 fetch 的 promise 链跑完）。 */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** 等一段时间 —— 搜索框是**防抖 200ms** 后才发请求的，测它必须真的等过去。 */
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /* -------------------------------------------------- 加载 client.js（真文件） */
 
 section('client.js 的形态：classic script、没有 ESM 语法');
@@ -601,6 +604,122 @@ section('组件：收件箱提升与整理文件名');
   check('空名字不请求宿主（本地就拦）', actionCalls.length === callsBeforeEmpty, String(actionCalls.length - callsBeforeEmpty));
   check('空名字给出可操作提示', allText(mounted.tree()).includes('新文件名不能为空'), allText(mounted.tree()).slice(0, 240));
 
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------------- 组件：搜索（复用宿主同一套检索实现） */
+
+section('组件：搜索');
+{
+  const originalFetch = globalThis.fetch;
+  const sidebar = fakeSidebar();
+  const searchCalls = [];
+  globalThis.fetch = (url, options) => {
+    if (url === '/dsh-memory-delta/search') {
+      const body = JSON.parse(options?.body ?? '{}');
+      searchCalls.push(body);
+      if (body.query === '没这个词') {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, query: body.query, where: 'all', total: 0, matches: [] }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            query: body.query,
+            where: 'all',
+            total: 2,
+            matches: [
+              {
+                id: 'sandbox-no-pipe',
+                where: 'facts',
+                type: 'fact',
+                key: 'sandbox-no-pipe',
+                tags: ['sandbox'],
+                date: '2026-09-17',
+                file: 'D:\\proj\\memory\\facts\\sandbox-no-pipe.md',
+                line: '沙箱禁止命名管道：捕获子进程输出会 EPERM',
+                snippet: '…沙箱禁止命名管道：捕获子进程输出会 EPERM，要重定向到文件…',
+                matched: ['沙箱', '管道'],
+                score: 12.5,
+              },
+              { id: 'journal:42', where: 'journal', line: '今天在讨论把面板接上检索', snippet: '今天在讨论把面板接上检索，复用 rankDocs', score: 3.2, file: 'D:\\proj\\memory\\journal.md' },
+            ],
+          }),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: sidebar.service } });
+  await flush();
+
+  const input = findByClass(mounted.tree(), 'dsh-memory-delta-search-input');
+  check('面板上有搜索框', input?.type === 'input', String(input?.type));
+  check('搜索框有说明性 placeholder', /搜索/.test(String(input?.props?.placeholder)), String(input?.props?.placeholder));
+
+  input.props.onChange({ target: { value: '沙箱禁管道' } });
+  await wait(320);
+  check('停顿后自动发搜索请求', searchCalls.length === 1 && searchCalls[0].query === '沙箱禁管道', JSON.stringify(searchCalls));
+  check('搜索请求带上 workspace（宿主据此定位记忆库）', searchCalls[0]?.workspace === 'D:\\proj', JSON.stringify(searchCalls[0]));
+
+  const text = allText(mounted.tree());
+  check('搜索时只显示结果（分组视图让位，避免两套列表混在一起）', text.includes('搜索结果') && !headerTexts(mounted.tree()).some((hd) => hd.includes('（facts）')), text.slice(0, 200));
+  check('分组头上显示命中条数', headerTexts(mounted.tree()).some((hd) => hd.includes('搜索结果') && hd.includes('2')), headerTexts(mounted.tree()).join(' | '));
+  check('结果里标出命中所在的层（事实 / 流水）', text.includes('事实') && text.includes('流水'), text.slice(0, 300));
+  check('结果里显示命中片段（不只是首行）', text.includes('要重定向到文件'), text.slice(0, 400));
+  check('结果里显示文件名', text.includes('sandbox-no-pipe.md'), text.slice(0, 400));
+  check('结果里显示 key 与日期', text.includes('sandbox-no-pipe') && text.includes('2026-09-17'), text.slice(0, 400));
+
+  const hit = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('沙箱禁止命名管道'));
+  hit.props.onClick({});
+  check('点命中 → 打开对应条目文件', sidebar.opened[0]?.path === 'D:\\proj\\memory\\facts\\sandbox-no-pipe.md', JSON.stringify(sidebar.opened[0]));
+  const journalHit = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('把面板接上检索'));
+  journalHit.props.onClick({});
+  check('流水命中也能点开（归属 journal.md）', sidebar.opened[1]?.path === 'D:\\proj\\memory\\journal.md', JSON.stringify(sidebar.opened[1]));
+
+  // 零命中
+  input.props.onChange({ target: { value: '没这个词' } });
+  await wait(320);
+  check('零命中时给出可操作的空态', allText(mounted.tree()).includes('没有匹配') && allText(mounted.tree()).includes('换个说法'), allText(mounted.tree()).slice(0, 260));
+
+  // 回车立即搜（不等防抖）
+  // ⚠️ 重新取一次节点：假 React 是**同步重渲染**，onChange 之后旧节点上的闭包里还是旧 query
+  //    （真实浏览器里 React 会把新 props 挂到同一个 DOM 节点上，所以这不是产品 bug）。
+  const before = searchCalls.length;
+  findByClass(mounted.tree(), 'dsh-memory-delta-search-input').props.onChange({ target: { value: '回车立即搜' } });
+  findByClass(mounted.tree(), 'dsh-memory-delta-search-input').props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  check('回车立即搜（不等防抖）', searchCalls.length === before + 1 && searchCalls.at(-1).query === '回车立即搜', JSON.stringify(searchCalls.slice(-2)));
+
+  // 清空 → 回到分组视图
+  const clearBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('清空'));
+  check('有清空按钮', Boolean(clearBtn));
+  clearBtn.props.onClick({});
+  await flush();
+  const back = allText(mounted.tree());
+  check('清空后回到分组视图', !back.includes('搜索结果') && headerTexts(mounted.tree()).some((hd) => hd.includes('（facts）')), back.slice(0, 200));
+  check('清空后不再发搜索请求', searchCalls.length === before + 1, String(searchCalls.length));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：搜索失败要回显宿主的原因 */
+
+section('组件：搜索失败');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) =>
+    url === '/dsh-memory-delta/search'
+      ? Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ ok: false, error: '不认识的 where：nope（只支持 all / facts …）' }) })
+      : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  findByClass(mounted.tree(), 'dsh-memory-delta-search-input').props.onChange({ target: { value: 'x' } });
+  await wait(320);
+  const text = allText(mounted.tree());
+  check('搜索失败时回显宿主原因', text.includes('搜索失败') && text.includes('不认识的 where'), text.slice(0, 260));
   globalThis.fetch = originalFetch;
 }
 
