@@ -92,7 +92,15 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 | \`inbox/\` | **候选**（还没确认） | 模型觉得值得长期留住的结论 | **只有模型**（\`memory_write\`） | ❌ 从不 |
 | \`facts/\` | **常驻** | 关于**世界**的结论 —— 能被现实证伪（环境限制、工具行为、踩过的坑） | **只有人**（promote） | ✅ 每轮 |
 | \`decisions/\` | **常驻** | **我们**定的约定与取舍 —— 只有我们改主意才会失效 | **只有人**（promote） | ✅ 每轮 |
-| \`archive/\` | **归档** | 被取代（supersede）或标过期的旧结论 | 取代时自动搬 | ❌ 永不（但仍搜得到） |
+| \`archive/\` | **归档** | 退场的旧结论：被取代（supersede）**或**不再适用（archive，status=expired） | 取代/归档时搬过来 | ❌ 永不（但仍搜得到、能取回） |
+
+**三种"退场"别混**（都是从常驻层离开，但不是一回事）：
+
+| 操作 | 什么意思 | 去哪 | 还能回来吗 |
+| --- | --- | --- | --- |
+| \`demote <id>\` | **先不当真**（还不确定 / 先别发给模型） | → \`inbox/\` | 能：再 \`promote\` 一次就回去 |
+| \`archive <id>\` | **不再适用，又没有替代** | → \`archive/\`（status=expired） | 能：\`restore <id>\` 捞回候选层 |
+| \`supersede <旧> <新>\` | 这条**错了/过时了**，有新的顶上 | → \`archive/\`（status=superseded） | 能：\`restore\`，或直接改新条目的 supersedes |
 
 拿不准一条该放哪边，问一句：**"明天世界变了，这条会不会失效？"**
 - 会 → \`facts/\`（比如"沙箱禁止命名管道"—— 换个环境就可能不成立）
@@ -112,6 +120,10 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 \`\`\`bash
 mem list / show <id> / due / recall "<词>"   # 看、查、搜索
 mem promote <id> [--supersedes <旧id>]       # 人确认：inbox → facts|decisions
+mem demote <id>                              # 先不当真：facts|decisions → inbox（能再 promote 回来）
+mem archive <id>                             # 不再适用又没有替代：→ archive/（status=expired）
+mem restore <id>                             # 取回：archive/ → inbox（再确认一次才重新生效）
+mem rm <id>                                  # 删除**候选**（只允许 inbox/；常驻的走上面的退场方式）
 mem set <id> --key k --verify-when "3个月后" # 补语义键 / 约定复核时间（到期会在会话里提醒）
 mem rename <旧id> <新id>                     # 安全改名（id + 文件名 + 引用一起改）
 mem validate                                 # 自检：格式 / id / 双向链接 / 同 key 冲突 / 注入预算
@@ -642,6 +654,60 @@ export function removeEntry(L, id) {
   return { id: e.id, file };
 }
 
+/**
+ * **手动归档**：这条不再适用了，但**没有新版本顶上来**（区别于"取代"）。
+ *
+ * 为什么必须有它：`mem set --status expired` 只改 frontmatter、**不搬文件**，于是条目
+ * 不参与注入（对）却还留在 `facts/` —— 结果**既不在「已在用」（只列 active）也不算进「已归档」
+ * （数的是 archive/ 里的文件）→ 从界面上彻底消失**。归档就是要把它搬到该去的地方。
+ *
+ * 语义分工（三个"退场"别混）：
+ *   · `demote`    先不当真 → 回候选（还能再 promote 回来）
+ *   · `archive`   不再适用、没有替代 → `archive/`（`status: expired`）
+ *   · `supersede` 被新真相取代 → `archive/`（`status: superseded` + 双向链接）
+ *
+ * @param {{status?: 'expired'|'superseded', supersededBy?: string|null}} [opts]
+ * @returns {{id: string, from: string, status: string, file: string}}
+ */
+export function archiveEntry(L, id, opts = {}) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where === 'archive') throw new Error(`条目已经在 archive/ 里了（${e.id}）`);
+  if (e.where === 'inbox') {
+    throw new Error('候选不用归档 —— 它本来就还没生效（想丢掉用 mem rm，想留下用 mem promote）');
+  }
+  const status = opts.status ?? 'expired';
+  if (status !== 'expired' && status !== 'superseded') {
+    throw new Error(`归档状态只能是 expired 或 superseded（收到 ${status}）`);
+  }
+  e.data.status = status;
+  if (opts.supersededBy) e.data.superseded_by = String(opts.supersededBy);
+  const dest = path.join(L.archive, `${e.id}.md`);
+  moveEntry(e.file, dest, serializeEntry(e));
+  writeIndex(L);
+  return { id: e.id, from: e.where, status, file: dest };
+}
+
+/**
+ * **取回**：把归档里的条目捞回候选层（`archive/` → `inbox/`），status 复位为 active。
+ *
+ * 归档不是终点 —— 用户可能归档错了、或者情况又变了。取回**不改文件名、不改 id**，
+ * 只是换层并清掉 `superseded_by`（它已经不是"被取代"的状态了）。
+ * 放回**候选层**而不是直接回常驻：取回之后还要人再确认一次，才不会绕过"人确认"这道闸。
+ *
+ * @returns {{id: string, from: 'archive', to: 'inbox'}}
+ */
+export function restoreEntry(L, id) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where !== 'archive') throw new Error(`只有归档里的条目需要取回（这条在 ${e.where}/）`);
+  const dest = path.join(L.inbox, `${e.id}.md`);
+  if (fs.existsSync(dest)) throw new Error(`inbox/ 里已经有同名文件：${dest}`);
+  e.data.status = 'active';
+  e.data.superseded_by = null;
+  moveEntry(e.file, dest, serializeEntry(e));
+  writeIndex(L);
+  return { id: e.id, from: 'archive', to: 'inbox' };
+}
+
 function cmdPromote(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
@@ -671,6 +737,38 @@ function cmdRename(opts) {
   }
   ok(`${c(1, result.from)} → ${c(1, result.to)}（${path.basename(result.file)}）`);
   if (result.refs.length) ok(`顺带更新了引用：${result.refs.join(', ')}`);
+}
+
+/** `mem archive <id>` —— 手动归档：不再适用、没有替代（见 `archiveEntry`）。 */
+function cmdArchive(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const id = opts._[0];
+  if (!id) fail('用法：mem archive <id> [--superseded-by <新id>]\n  这条不再适用、又没有新版本顶上来时用；被新真相取代请用 mem supersede <旧> <新>');
+  let result;
+  try {
+    result = archiveEntry(L, id, { supersededBy: opts['superseded-by'] });
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`已归档 ${c(1, result.id)}：${result.from}/ → archive/（status=${result.status}）`);
+  console.log(dim('  它不再参与注入，但仍能被 mem recall / 面板搜索搜到；想捞回来：mem restore ' + result.id));
+}
+
+/** `mem restore <id>` —— 从归档取回候选层（见 `restoreEntry`）。 */
+function cmdRestore(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const id = opts._[0];
+  if (!id) fail('用法：mem restore <id>（把 archive/ 里的条目捞回 inbox/）');
+  let result;
+  try {
+    result = restoreEntry(L, id);
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`已取回 ${c(1, result.id)}：archive/ → inbox/（status 复位为 active，等你再确认）`);
+  console.log(dim('  想让它重新生效：mem promote ' + result.id));
 }
 
 /** `mem demote <id>` —— 撤回：常驻 → 候选（见 `demoteEntry`）。 */
@@ -1305,6 +1403,8 @@ if (isMain) {
     case 'show': cmdShow(opts); break;
     case 'promote': cmdPromote(opts); break;
     case 'demote': cmdDemote(opts); break;
+    case 'archive': cmdArchive(opts); break;
+    case 'restore': cmdRestore(opts); break;
     case 'rm': cmdRemove(opts); break;
     case 'rename': cmdRename(opts); break;
     case 'supersede': cmdSupersede(opts); break;
@@ -1364,7 +1464,9 @@ function usage() {
   show <id> [--json]
   promote <id> [--supersedes <旧id>]     inbox → facts/decisions（人确认）
   demote <id>                            撤回：facts/decisions → inbox（先不当真，等以后再说）
-  rm <id>                                删除候选（**只允许 inbox/**；常驻的走 demote 或取代）
+  archive <id> [--superseded-by <新id>]  归档：不再适用又没有替代 → archive/（status=expired）
+  restore <id>                           取回：archive/ → inbox（捞回来，再确认一次）
+  rm <id>                                删除候选（**只允许 inbox/**；常驻的走 demote/archive 或取代）
   rename <旧id> <新id>                   安全改名（id + 文件名 + 引用一起改）
                           同 key 已有 active 时必须显式 --supersedes
   supersede <旧id> <新id>                标记取代 + 归档 + 双向链接

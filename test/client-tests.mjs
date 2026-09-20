@@ -945,6 +945,85 @@ section('组件：工作区规范');
   globalThis.fetch = originalFetch;
 }
 
+/* --------------------- 组件：归档条目要列出来并能「取回」 */
+
+section('组件：已归档列出条目 + 取回');
+{
+  const originalFetch = globalThis.fetch;
+  const sidebar = fakeSidebar();
+  const calls = [];
+  const withArchive = {
+    ...SAMPLE,
+    counts: { ...SAMPLE.counts, archive: 1 },
+    archive: [
+      { id: 'retired-fact', type: 'fact', key: 'retired-fact', status: 'expired', date: '2026-09-01', line: '这条不再适用了', file: 'D:\\proj\\memory\\archive\\retired-fact.md' },
+    ],
+  };
+  globalThis.fetch = (url, options) => {
+    if (url === '/dsh-memory-delta/action') {
+      const body = JSON.parse(options?.body ?? '{}');
+      calls.push(body);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: body.op, id: body.id, from: 'archive', target: 'inbox' }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withArchive) });
+  };
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: sidebar.service } });
+  await flush();
+
+  const text = allText(mounted.tree());
+  check('已归档组里列出了归档条目本身（不只是条数）', text.includes('这条不再适用了') && text.includes('retired-fact.md'), text.slice(-500));
+
+  const restoreBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '取回');
+  check('归档条目上有「取回」按钮', Boolean(restoreBtn));
+  restoreBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('取回也要先确认（点一次不发请求）', calls.length === 0, JSON.stringify(calls));
+  const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  check('确认条说清"回到待你确认、再提升才生效"', allText(bar).includes('要取回这条？') && allText(bar).includes('提升'), allText(bar));
+  findAllByClass(bar, 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认取回'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('确认后发 op=restore', calls[0]?.op === 'restore' && calls[0]?.id === 'retired-fact', JSON.stringify(calls[0]));
+  check('取回成功后给出提示', allText(mounted.tree()).includes('已取回 retired-fact'), allText(mounted.tree()).slice(0, 300));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：常驻条目也能手动归档 */
+
+section('组件：常驻条目的「归档」按钮');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, options) => {
+    if (url === '/dsh-memory-delta/action') {
+      const body = JSON.parse(options?.body ?? '{}');
+      calls.push(body);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: body.op, id: body.id, status: 'expired', from: 'facts' }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  const item = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('路径含非 ASCII'));
+  const archiveBtn = findAllByClass(item, 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '归档');
+  check('常驻条目上有「归档」按钮', Boolean(archiveBtn));
+  archiveBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('归档也要先确认', calls.length === 0 && Boolean(findByClass(mounted.tree(), 'dsh-memory-delta-confirm')), JSON.stringify(calls));
+  const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  check('确认文案区分"归档"与"取代"', allText(bar).includes('要归档这条？') && allText(bar).includes('supersede'), allText(bar));
+  findAllByClass(bar, 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认归档'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('确认后发 op=archive', calls[0]?.op === 'archive' && calls[0]?.id === 'fact-a', JSON.stringify(calls[0]));
+  check('归档成功后提示"搜得到、也能取回"', allText(mounted.tree()).includes('已归档 fact-a') && allText(mounted.tree()).includes('取回'), allText(mounted.tree()).slice(0, 300));
+
+  globalThis.fetch = originalFetch;
+}
+
 /* --------------------- 组件：搜索失败要回显宿主的原因 */
 
 section('组件：搜索失败');
@@ -1015,7 +1094,7 @@ section('组件：状态行标出归档条数');
   await flush();
   const text = allText(mounted.tree());
   check('流程条标出「已归档 N」', text.includes('已归档 4'), text.slice(0, 240));
-  check('归档阶段组说明里有条数（不再发给模型，但搜得到）', /有 4 条旧结论/.test(text), text.slice(0, 600));
+  check('归档组说明说清"不再发给模型、可搜索、能取回"', /不再发给模型/.test(text) && /取回/.test(text), text.slice(0, 600));
   globalThis.fetch = originalFetch;
 
   // 没有归档时也要看到这一层存在（否则被取代的东西像凭空消失），但说清它是空的

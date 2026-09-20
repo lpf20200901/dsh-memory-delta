@@ -575,6 +575,13 @@ section('库自带说明书：目录名说不清"在流程哪一步"，说明书
   check('标出哪些参与注入、哪些不参与', /参与注入/.test(text) && /从不/.test(text), text.slice(0, 200));
   check('提到 journal / index / config 三个根文件', /journal\.md/.test(text) && /index\.md/.test(text) && /memory\.config\.json/.test(text));
   check('附上常用命令', /mem promote/.test(text) && /mem validate/.test(text));
+  // 说明书要跟上命令：三种"退场"必须都在（否则用户只会 promote，不知道还能撤回/归档/取回）
+  check(
+    '说明书列出三种退场（demote / archive / restore）与 rm',
+    ['mem demote', 'mem archive', 'mem restore', 'mem rm'].every((k) => text.includes(k)),
+    text.slice(text.indexOf('mem demote'), text.indexOf('mem demote') + 200),
+  );
+  check('说明书写清"三种退场别混"的对照表', /三种"退场"别混/.test(text), text.slice(0, 200));
 
   // 用户改过就永远不覆盖（它首先是给用户看的）
   fs.writeFileSync(readme, '# 我自己改的\n', 'utf8');
@@ -639,6 +646,44 @@ section('M7：demote（常驻 → 候选）与 rm（只删候选）');
   const rmMissing = run(['rm', '--root', root, 'nope']);
   check('rm 找不到条目 → 报错', rmMissing.code !== 0 && /找不到条目/.test(rmMissing.out + rmMissing.err), flat(rmMissing.out + rmMissing.err));
   check('rm/demote 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+}
+
+/* ----------------------- M10：手动归档（archive）与取回（restore） */
+
+section('M10：archive（不再适用 → 归档）与 restore（取回）');
+{
+  const root = freshRoot('archive');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  run(['new', '--root', root, '--type', 'fact', '--key', 'retire-me', '--conclusion', '这条不再适用了，但没有新版本顶上', '--source', 's']);
+  run(['promote', '--root', root, 'retire-me']);
+  check('先确认它在常驻层且参与注入', fs.existsSync(path.join(root, 'facts', 'retire-me.md')) && JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
+
+  const ar = run(['archive', '--root', root, 'retire-me']);
+  check('archive 成功', ar.code === 0, flat(ar.out + ar.err));
+  check('文件搬进 archive/', fs.existsSync(path.join(root, 'archive', 'retire-me.md')) && !fs.existsSync(path.join(root, 'facts', 'retire-me.md')), md(path.join(root, 'archive')).join(','));
+  const arRaw = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
+  check('status 标成 expired（不是 superseded —— 因为没有替代）', /^status:\s*expired$/m.test(arRaw), arRaw.split(/\r?\n/).slice(0, 8).join(' | '));
+  check('归档后不再参与注入', !JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
+  check('validate 通过（不会报"该归档却没归档"）', run(['validate', '--root', root]).code === 0);
+  // 归档层仍然**能被搜到**（这是"归档不是删除"的关键）
+  const found = run(['recall', '--root', root, '不再适用', '--json']);
+  check('归档的条目仍能被 recall 搜到', JSON.parse(found.out).matches.some((m) => m.id === 'retire-me' && m.where === 'archive'), flat(found.out));
+
+  // 归档的边界
+  run(['new', '--root', root, '--type', 'fact', '--key', 'cand2', '--conclusion', '候选不该被归档', '--source', 's']);
+  const archiveCandidate = run(['archive', '--root', root, 'cand2']);
+  check('候选不能归档（它本来就还没生效）', archiveCandidate.code !== 0 && /候选不用归档/.test(archiveCandidate.out + archiveCandidate.err), flat(archiveCandidate.out + archiveCandidate.err));
+
+  // 取回：archive → inbox，status 复位
+  const re = run(['restore', '--root', root, 'retire-me']);
+  check('restore 成功', re.code === 0, flat(re.out + re.err));
+  check('文件回到 inbox/', fs.existsSync(path.join(root, 'inbox', 'retire-me.md')) && !fs.existsSync(path.join(root, 'archive', 'retire-me.md')), md(path.join(root, 'inbox')).join(','));
+  const reRaw = fs.readFileSync(path.join(root, 'inbox', 'retire-me.md'), 'utf8');
+  check('取回后 status 复位为 active', /^status:\s*active$/m.test(reRaw), reRaw.split(/\r?\n/).slice(0, 8).join(' | '));
+  check('取回后**仍然不参与注入**（要先再 promote 一次）', !JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
+  check('再 promote 就能重新生效', run(['promote', '--root', root, 'retire-me']).code === 0 && JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
+  check('取回的边界：对非归档条目 restore → 报错', run(['restore', '--root', root, 'retire-me']).code !== 0);
+  check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 }
 
 /* ------------------------------------------------------------- 汇总 */

@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **765 个断言全绿**（CLI 163 + planner 43 + search 51 + due 93 + hook 63 + plugin 198 + client 154），
+  - 测试 **802 个断言全绿**（CLI 180 + planner 43 + search 51 + due 93 + hook 63 + plugin 209 + client 165），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 
@@ -501,6 +501,41 @@ DSH 注入的还有 `<工作区>/AGENTS.md` 与 `AGENTS.local.md`（项目层）
 · 动作路由：demote/remove 真的搬/删文件；remove 对常驻条目 400
 · 客户端：点危险按钮**不立刻发请求**（先出确认条）、点取消什么都不发生、确认后才发对应 op、
   失败时回显宿主原因；工作区规范的「编辑」走 openFile
+
+### 归档：谁在归档、以及补上"手动归档"（M10）
+
+用户问："归档是怎么处理的？之前是不是模型发现有废弃的事实或决策就自动归档啊，能支持手动归档吗？"
+
+先把归属查清（**模型不会自动归档**）：
+
+| 触发 | 谁 | 干了什么 |
+| --- | --- | --- |
+| `mem supersede <旧> <新>` / `promote --supersedes` | **人** | 旧条目 `status: superseded` + `superseded_by`，并搬进 `archive/` |
+| `mem validate --fix` | 人（收尾） | 把"标了 superseded 但文件还在 `facts/`"的搬进 `archive/` |
+| `mem archive <id>`（**新增**） | **人** | 不再适用**又没有替代** → `archive/`，`status: expired` |
+| `mem restore <id>`（**新增**） | 人 | 从 `archive/` 捞回 `inbox/`，`status` 复位 active，再确认一次 |
+
+模型只有 `memory_write`（写 `inbox/`）与 `memory_search` —— 它**不能** promote / supersede / archive。
+它最多在 `verify_when` 到期时被提醒"这条可能过时了，去问用户"。
+
+**发现的坑（补 `archive` 的直接理由）**：`mem set --status expired` 只改 frontmatter、**不搬文件**，
+于是条目不参与注入（对）却留在 `facts/` —— 结果**既不在「已在用」（只列 active）也不计入「已归档」
+（数的是 `archive/` 里的文件）→ 从界面上彻底消失**。"手动归档"就是把它搬到该去的地方。
+
+**三种"退场"必须分清**（都离开常驻层，但语义/去向/可逆性都不同）：
+
+| 操作 | 什么意思 | 去向 | 可逆 |
+| --- | --- | --- | --- |
+| `demote` | 先不当真（还不确定 / 先别发给模型） | `inbox/` | 再 `promote` 一次就回去 |
+| `archive` | 不再适用，又没有替代 | `archive/`（expired） | `restore` 捞回候选层 |
+| `supersede` | 错了/过时了，有新真相顶上 | `archive/`（superseded + 双向链接） | `restore`，或改 `supersedes` |
+
+面板对应：常驻条目「撤回」+「归档」，归档条目「取回」（都要过行内确认条）。
+**归档层现在会把条目列出来**（以前只显示条数）—— 否则「取回」没有入口，
+用户会以为"记过、后来被取代了"的东西丢了。归档不是删除：它仍能被 `mem recall` 与面板搜索搜到
+（这一条有测试钉住）。
+
+`restore` 刻意放回**候选层**而不是直接回常驻：取回之后还要人再确认一次，不绕过"人确认"那道闸。
 
 **⑦ 已知小瑕疵：改名会让注入"抖一下"。** `entryHash` 算了 `id`，而 planner 跨轮也是按 `id` 匹配
 条目的 —— 所以**纯改名**会被差分看成"旧 id 消失 + 新 id 出现"，于是那一轮多推一遍该条内容

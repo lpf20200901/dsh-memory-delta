@@ -698,6 +698,19 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, [query]);
 
+      /** 确认条上的动词（"要<动词>这条？"）。 */
+      const CONFIRM_VERB = { demote: '撤回', archive: '归档', restore: '取回', remove: '删除' };
+
+      /** 用户点了「确认 X」之后，按 op 分派到对应动作（危险动作只有这一个出口）。 */
+      const runConfirmed = (op, id) => {
+        if (op === 'remove') return removeCandidate(id);
+        if (op === 'demote') return demote(id);
+        if (op === 'archive') return archive(id);
+        if (op === 'restore') return restore(id);
+        setConfirming(null);
+        return undefined;
+      };
+
       /** 行内按钮必须挡住冒泡 —— 否则点「提升」会连带触发整行的"打开文件"。 */
       const stop = (ev) => {
         if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
@@ -761,7 +774,7 @@ window.__ModuleLoader__.load({
           .then(() => setPendingId(null));
       };
 
-      /** **删除候选**：不可恢复，所以必须过确认条。 */
+      /** 删除候选：不可恢复，所以必须过确认条。 */
       const removeCandidate = (id) => {
         setConfirming(null);
         setPendingId(id);
@@ -774,6 +787,40 @@ window.__ModuleLoader__.load({
           .catch((err) => {
             setNotice(null);
             setActionError(`删除失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** **归档**：不再适用又没有替代 → archive/（区别于"取代"）。 */
+      const archive = (id) => {
+        setConfirming(null);
+        setPendingId(id);
+        return callAction({ op: 'archive', id })
+          .then((r) => {
+            setActionError(null);
+            setNotice(`已归档 ${r.id}（${r.status}）：不再发给模型，但搜得到、也能取回`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`归档失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** **取回**：archive/ → 待你确认（再确认一次才会重新生效）。 */
+      const restore = (id) => {
+        setConfirming(null);
+        setPendingId(id);
+        return callAction({ op: 'restore', id })
+          .then((r) => {
+            setActionError(null);
+            setNotice(`已取回 ${r.id}：回到「待你确认」，再点「提升」才会重新生效`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`取回失败：${err && err.message ? err.message : String(err)}`);
           })
           .then(() => setPendingId(null));
       };
@@ -883,6 +930,56 @@ window.__ModuleLoader__.load({
           confirming && confirming.id === e.id && confirming.op === 'demote' ? '取消' : '撤回',
         );
 
+      /**
+       * 常驻条目上的「归档」按钮 —— 这条不再适用、**又没有新版本顶上来**时用。
+       * 与「撤回」的区别：撤回是"先不当真"（还能再提升回来），归档是"退场"（进 archive/，仍可搜、可取回）。
+       */
+      const archiveButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: '归档：不再适用又没有替代 → 进 archive/（不再发给模型，仍能搜到，也能取回）',
+            onClick: (ev) => {
+              stop(ev);
+              setConfirming(
+                confirming && confirming.id === e.id
+                  ? null
+                  : {
+                      id: e.id,
+                      op: 'archive',
+                      label: '确认归档',
+                      hint: '归档后它不再发给模型，但仍能搜到、也能「取回」；有替代它的新结论请用 CLI 的 mem supersede 建立双向链接。',
+                    },
+              );
+            },
+          },
+          confirming && confirming.id === e.id && confirming.op === 'archive' ? '取消' : '归档',
+        );
+
+      /** 归档条目上的「取回」按钮 —— 归档不是终点。 */
+      const restoreButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: '取回：archive/ → 待你确认（status 复位为 active，等你再确认一次）',
+            onClick: (ev) => {
+              stop(ev);
+              setConfirming(
+                confirming && confirming.id === e.id
+                  ? null
+                  : { id: e.id, op: 'restore', label: '确认取回', hint: '取回后它回到「待你确认」，再点「提升」才会重新生效。' },
+              );
+            },
+          },
+          confirming && confirming.id === e.id && confirming.op === 'restore' ? '取消' : '取回',
+        );
+
       /** 候选条目上的「删除」按钮 —— 不可恢复，同样走确认条。 */
       const removeButton = (e) =>
         h(
@@ -915,17 +1012,20 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'dsh-memory-delta-confirm', key: `${e.id}:confirm`, onClick: stop },
-              h('span', { className: 'dsh-memory-delta-confirm-text' }, `要${confirming.op === 'remove' ? '删除' : '撤回'}这条？${confirming.hint}`),
+              h(
+                'span',
+                { className: 'dsh-memory-delta-confirm-text' },
+                `要${CONFIRM_VERB[confirming.op] || '执行'}这条？${confirming.hint}`,
+              ),
               h(
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-memory-delta-mini is-danger',
+                  className: confirming.op === 'remove' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
                   disabled: pendingId === e.id,
                   onClick: (ev) => {
                     stop(ev);
-                    if (confirming.op === 'remove') removeCandidate(e.id);
-                    else demote(e.id);
+                    runConfirmed(confirming.op, e.id);
                   },
                 },
                 pendingId === e.id ? '处理中…' : confirming.label,
@@ -1126,7 +1226,7 @@ window.__ModuleLoader__.load({
             {
               onOpen: openMemoryFile,
               showType: false,
-              actions: [demoteButton(e), tidyButton(e)],
+              actions: [demoteButton(e), archiveButton(e), tidyButton(e)],
               // 确认条优先：它出现时说明用户刚点了危险按钮，此时不该再显示改名输入
               extraRow: confirmRow(e) || renameRow(e),
             },
@@ -1358,28 +1458,45 @@ window.__ModuleLoader__.load({
         ],
       );
 
-      /* 归档层：条目本身不出现在面板里（它们不算"常驻"），但**这一层存在**必须让人看见 ——
-         否则"我记过、后来被取代了"的东西看起来像是凭空消失了。 */
+      /* 归档层：以前只显示一个条数，现在**把条目列出来** —— 否则「取回」没有入口，
+         用户会以为"记过、后来被取代了"的东西丢了（其实它还在，也能搜到）。 */
       const archiveCount = typeof counts.archive === 'number' ? counts.archive : 0;
+      const archived = Array.isArray(state.archive) ? state.archive : [];
       const archiveBlock = section(
         {
           key: 'stage:archive',
           title: '已归档',
           slug: 'archive',
           count: archiveCount,
-          hint: '被取代或过期 · 不再发给模型，但搜得到',
+          hint: '不再适用 / 被取代 · 不再发给模型，但搜得到、也能取回',
           open: isOpen('stage:archive'),
           onToggle: () => toggleSection('stage:archive'),
         },
         [
           h(
             'div',
-            { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'note' },
+            { className: 'dsh-memory-delta-dim', key: 'note' },
             archiveCount === 0
-              ? '还没有归档 —— 结论被新版本取代（supersede）或标过期后，会搬到这里，不再发给模型'
-              : `有 ${archiveCount} 条旧结论在这里（不再发给模型）。想看或想找，用上面的搜索框搜 —— 归档层是能被搜到的`,
+              ? '还没有归档 —— 结论被取代（supersede）或不再适用（归档）时会搬到这里，不再发给模型'
+              : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。',
           ),
-        ],
+          ...(archived.length
+            ? archived.map((e) =>
+                renderItem(e, {
+                  showType: true,
+                  actions: [restoreButton(e)],
+                  extraRow: confirmRow(e) || null,
+                }),
+              )
+            : []),
+          archiveCount > archived.length
+            ? h(
+                'div',
+                { className: 'dsh-memory-delta-dim', key: 'more' },
+                `面板只列前 ${archived.length} 条，其余用搜索框搜（归档层能被搜到）`,
+              )
+            : null,
+        ].filter(Boolean),
       );
 
       /** 流程条：一眼看出"我现在看的这几组在流程里的前后关系"。 */

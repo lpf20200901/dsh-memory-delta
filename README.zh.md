@@ -160,7 +160,9 @@ mem promote win-update-cache
 mem promote win-update-cache-v2 --supersedes win-update-cache
 
 mem demote <id>             # 撤回：facts/decisions → inbox（"先不当真"，不改 status，还能再 promote 回去）
-mem rm <id>                 # 删除**候选**（只允许 inbox/）；常驻条目的出路是 demote 或取代，不直接删
+mem archive <id>            # 归档：不再适用**又没有替代** → archive/（status=expired；仍可搜、可 restore）
+mem restore <id>            # 取回：archive/ → inbox（status 复位 active，再 promote 一次才重新生效）
+mem rm <id>                 # 删除**候选**（只允许 inbox/）；常驻条目的出路是 demote / archive / 取代，不直接删
 
 mem set <id> --key k --tags a,b --conclusion "…"   # 改已有条目（补 key / 改措辞 / 标 expired）
 mem rename <旧id> <新id>    # 安全改名：frontmatter 的 id、文件名、别处的 supersedes 引用一起改
@@ -197,18 +199,18 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 765 个断言，零依赖
+npm test        # 802 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 163 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名） |
+| `test/run-tests.mjs` | 180 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名） |
 | `test/planner-tests.mjs` | 43 | 差分算法（纯逻辑） |
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 198 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
-| `test/client-tests.mjs` | 154 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
+| `test/plugin-tests.mjs` | 209 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 两条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
+| `test/client-tests.mjs` | 165 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、提升/整理文件名、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。

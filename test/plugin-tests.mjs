@@ -887,6 +887,16 @@ section('「动作」路由（promote / rename）');
   );
   check('拒绝之后常驻文件还在', fs.existsSync(path.join(L.facts, `${keepStanding.id}.md`)), keepStanding.id);
 
+  // ⑥ 归档（不再适用）与取回
+  const archived = await callRoute(route, { body: JSON.stringify({ op: 'archive', id: keepStanding.id }) });
+  check('archive → 200 且 status=expired', archived.status === 200 && archived.json.status === 'expired', JSON.stringify(archived.json));
+  check('文件搬进 archive/', fs.existsSync(path.join(L.archive, `${keepStanding.id}.md`)) && !fs.existsSync(path.join(L.facts, `${keepStanding.id}.md`)), 'moved');
+  const restored = await callRoute(route, { body: JSON.stringify({ op: 'restore', id: keepStanding.id }) });
+  check('restore → 200 且回到 inbox', restored.status === 200 && restored.json.from === 'archive' && restored.json.target === 'inbox', JSON.stringify(restored.json));
+  check('取回后文件在 inbox/', fs.existsSync(path.join(L.inbox, `${keepStanding.id}.md`)), 'restored');
+  const restoreAgain = await callRoute(route, { body: JSON.stringify({ op: 'restore', id: keepStanding.id }) });
+  check('对非归档条目 restore → 400', restoreAgain.status === 400 && /只有归档里的条目/.test(String(restoreAgain.json.error)), String(restoreAgain.json.error));
+
   // ⑥ 来源与配置开关
   const crossSite = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: 'x' }), headers: { host: '127.0.0.1:23278', origin: 'https://evil.example' } });
   check('跨站 Origin → 403', crossSite.status === 403, String(crossSite.status));

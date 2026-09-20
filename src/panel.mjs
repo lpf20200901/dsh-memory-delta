@@ -27,7 +27,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, removeEntry, renameEntry, searchLibrary, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, restoreEntry, searchLibrary, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -41,7 +41,7 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
  *
  * `promote` 与 `demote` 是**双向**的：候选 ⇄ 常驻。`remove` 只删候选（见 `removeEntry` 的理由）。
  */
-export const ACTION_OPS = ['promote', 'demote', 'remove', 'rename'];
+export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename'];
 
 /** 搜索路由：面板搜索框 → 与 `mem recall` / `memory_search` 同一份检索实现。 */
 export const MEMORY_SEARCH_PATH = '/dsh-memory-delta/search';
@@ -208,6 +208,27 @@ export function workspaceInstructionsOf(workspace) {
     .filter((x) => x.exists);
 }
 
+/** 归档层在面板里最多列几条 —— 归档是"历史"，不给它无限长度。 */
+export const PANEL_ARCHIVE_LIMIT = 50;
+
+/**
+ * 归档层的条目（`archive/`）。
+ *
+ * 为什么要把它们列出来（以前只显示一个条数）：**「取回」需要入口** —— 归档不是终点，
+ * 归档错了或情况又变了时，用户得能把它捞回来。而且"我记过、后来归档了"的东西
+ * 只靠搜索框找，体验上像是丢了。
+ */
+function archiveEntriesOf(L) {
+  const out = [];
+  for (const e of readAll(L)) {
+    if (e.error || e.where !== 'archive') continue;
+    out.push(e);
+  }
+  // 新的排前面（同一天按 id 稳定排序）
+  out.sort((a, b) => String(b.data?.date ?? '').localeCompare(String(a.data?.date ?? '')) || String(a.id).localeCompare(String(b.id)));
+  return out;
+}
+
 /* ------------------------------------------------------------ 状态拼装 */
 
 /** 空状态：结构完整、数组为空 —— 客户端不需要为"还没有记忆库"写第二条渲染分支。 */
@@ -225,6 +246,7 @@ function emptyState(root, scope, budget, workspace = null) {
     inbox: [],
     global: null,
     workspaceRules: [],
+    archive: [],
     counts: { active: 0, facts: 0, decisions: 0, inbox: 0, archive: 0, due: 0 },
   };
 }
@@ -309,6 +331,20 @@ export function buildMemoryState(L, opts = {}) {
     }),
     // 工作区规范（在工作区内，所以可以点「编辑」直接进侧边栏编辑器）
     workspaceRules: workspaceInstructionsOf(opts.workspace),
+    // 归档层：只带首行 + 文件路径（面板要能列出它们、点「取回」）
+    archive: archiveEntriesOf(L)
+      .slice(0, Number.isFinite(opts.archiveLimit) ? opts.archiveLimit : PANEL_ARCHIVE_LIMIT)
+      .map((e) =>
+        defined({
+          id: e.id,
+          type: e.data?.type,
+          key: e.data?.key || undefined,
+          status: e.data?.status,
+          date: e.data?.date,
+          line: firstLine(e.body),
+          file: e.file,
+        }),
+      ),
     counts,
   };
 }
@@ -665,6 +701,18 @@ export function createActionRoute(opts = {}) {
         if (op === 'demote') {
           // 双向的另一半：常驻 → 候选（"先不当真"）。不改 status，只换层。
           const r = demoteEntry(L, id);
+          writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, target: r.to });
+          return;
+        }
+        if (op === 'archive') {
+          // 手动归档：不再适用、又没有新版本顶上（区别于取代）
+          const r = archiveEntry(L, id, { supersededBy: body?.supersededBy });
+          writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, status: r.status });
+          return;
+        }
+        if (op === 'restore') {
+          // 归档不是终点：捞回候选层，再让人确认一次
+          const r = restoreEntry(L, id);
           writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, target: r.to });
           return;
         }
