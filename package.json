@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory-delta",
   "version": "1.0.0",
-  "description": "Layered, auto-injected cross-session memory for AI coding agents: a DSH plugin plus a standalone zero-dependency CLI. Borrows the spec/change/archive discipline from OpenSpec, but pushes instead of pulls.",
+  "description": "Layered, auto-injected cross-session memory for AI coding agents: a DSH plugin plus a standalone zero-dependency CLI. Borrows the spec/change/archive discipline from OpenSpec (MIT), but pushes instead of pulls.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lpf20200901/dsh-memory-delta.git"
@@ -54,7 +54,7 @@
     "agent",
     "dsh",
     "deepseek-harness",
-    "openspec",
+    "spec-driven",
     "context",
     "cordis-plugin"
   ],
