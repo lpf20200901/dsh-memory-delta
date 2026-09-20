@@ -220,7 +220,20 @@ Regression tests baked in from real bugs:
 - **M5 ✅** the memory got *usable at scale*: index-style injection (id-free text, ~159 bytes per
   entry), relevance-ranked search with Chinese bigrams, and `verify_when` turned into a real
   due-for-review reminder
-- **Next** official distribution (plugin market) and a memory tab in the DSH sidebar
+- **Next** keep the store small as it grows; publish to npm
+
+## Prior art & acknowledgements
+
+The **spec / change / archive** discipline — a human-readable *current truth*, plus a staged change set
+that gets archived once it lands — is borrowed from [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+(MIT).
+
+dsh-memory-delta is an **independent implementation**: it contains and calls no OpenSpec code, its store
+format and CLI are its own, and the direction is inverted — memory is **pushed** into the session instead
+of the agent being told to **pull** it.
+
+"OpenSpec" is its authors' name/trademark; the mentions here are attribution only, and imply no
+affiliation with or endorsement by that project.
 
 ## License
 
