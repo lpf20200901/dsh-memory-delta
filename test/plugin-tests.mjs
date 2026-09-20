@@ -377,6 +377,46 @@ const toolAgent = fakeAgent(cwdOfProject, 'session-tool');
   check('memory_write 的输出也是无损 JSON', losslessError(await writeTool.execute({ type: 'fact', conclusion: '无损 JSON 探针' }, { agent: toolAgent })) === null);
 }
 
+/* --------------------------- 超预算：在**写入那一刻**就提醒（不占注入预算） */
+
+section('超预算：memory_write 当场给一句可读告警');
+{
+  const tight = fakeCtx();
+  const tightRoot = path.join(SANDBOX, 'tight-budget', 'memory');
+  apply(tight, { root: tightRoot, maxBytes: 300 });
+  const L2 = ensureLayout(tightRoot);
+  const w = tight.registered.find((t) => t.name === 'memory_write');
+  // 塞几条把预算撑破（结论首行都不短）
+  for (let i = 0; i < 4; i += 1) {
+    const c = createEntry(L2, { type: 'fact', conclusion: `第 ${i} 条占预算的结论：${'很长很长'.repeat(6)}`, key: `budget-${i}`, tags: [] });
+    promoteEntry(L2, c.id);
+  }
+  const payloadNow = injectPayload(L2, 300);
+  check('前置条件：预算已被撑破', payloadNow.overBudget === true, `${payloadNow.bytes} / 300`);
+
+  const filled = await w.execute({ type: 'fact', conclusion: '再加一条' }, { agent: fakeAgent(path.join(SANDBOX, 'tight-budget'), 'session-budget') });
+  check('超预算时 memory_write 带 budgetNote', typeof filled.budgetNote === 'string' && filled.budgetNote.includes('over by'), JSON.stringify(filled).slice(0, 170));
+  check(
+    'budgetNote 说清"超了多少 + 怎么处理"',
+    /over by \d+/.test(String(filled.budgetNote)) && /archive|maxBytes/.test(String(filled.budgetNote)),
+    String(filled.budgetNote).slice(0, 220),
+  );
+  check('带 budgetNote 的返回仍是无损 JSON', losslessError(filled) === null, losslessError(filled) ?? '');
+  const renderedOver = w.output.render({}, filled)
+    .map((b) => b.text)
+    .join('');
+  check('工具输出里也提醒了超预算', /WARNING: the standing memory is over/.test(renderedOver), renderedOver.slice(0, 200));
+
+  // 预算宽裕的库：不带这个字段（省字节、不制造噪音）—— 换一个 ctx（config.root/maxBytes 不同）
+  const roomyRoot = path.join(SANDBOX, 'roomy-budget', 'memory');
+  ensureLayout(roomyRoot);
+  const roomy = fakeCtx();
+  apply(roomy, { root: roomyRoot, maxBytes: 4096 });
+  const roomyWrite = roomy.registered.find((t) => t.name === 'memory_write');
+  const loose = await roomyWrite.execute({ type: 'fact', conclusion: '不超预算' }, { agent: fakeAgent(path.join(SANDBOX, 'roomy-budget'), 'session-loose') });
+  check('预算宽裕时不带 budgetNote（整条省掉）', !('budgetNote' in loose), JSON.stringify(loose).slice(0, 140));
+}
+
 /* ------------------------------------------------- 到期复核：真接线跑一遍 */
 
 section('到期复核：通过插件真实接线发出 form=due 的提醒');
@@ -567,6 +607,20 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('inbox 列出候选（memory_write 写过一条）', okRes.json.inbox.length >= 1 && okRes.json.inbox.every((e) => !!e.id && !!e.line), JSON.stringify(okRes.json.inbox).slice(0, 160));
   check('响应是无损 JSON（没有 undefined 值）', losslessError(okRes.json) === null, losslessError(okRes.json) ?? '');
   check('响应带 workspace（客户端据此反推）', okRes.json.workspace === cwdOfProject, String(okRes.json.workspace));
+
+  // 预算以"实际生效"的为准：插件 maxBytes 优先于库配置的 injectBudget
+  //（踩过：面板原来只看库配置 → 显示的上限和真正生效的不一致，超预算告警会撒谎）
+  {
+    const budgetRoot = path.join(SANDBOX, 'budget-priority', 'memory');
+    ensureLayout(budgetRoot);
+    fs.writeFileSync(path.join(budgetRoot, 'memory.config.json'), JSON.stringify({ version: 1, injectBudget: 1234 }), 'utf8');
+    check('没传 budget 时用库配置的 injectBudget', memoryStateOf({ configRoot: budgetRoot }).budget === 1234, String(memoryStateOf({ configRoot: budgetRoot }).budget));
+    check(
+      '传了 budget（插件 maxBytes）时以它为准',
+      memoryStateOf({ configRoot: budgetRoot, budget: 4096 }).budget === 4096,
+      String(memoryStateOf({ configRoot: budgetRoot, budget: 4096 }).budget),
+    );
+  }
 
   // 面板要能"点一下打开这条记忆"：每条必须带**绝对文件路径**（客户端拿不到磁盘，只能由宿主给）。
   check(

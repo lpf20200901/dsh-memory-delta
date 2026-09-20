@@ -1027,7 +1027,13 @@ function cmdInject(opts) {
     console.log('');
     const head = `${payload.bytes} / ${payload.budget} 字节`;
     if (payload.overBudget) {
-      bad(`${head} —— 超出预算，需要精简或提升预算`);
+      // 说清"什么超了 / 为什么有上限 / 怎么办" —— 只丢一句"超出预算"使用者会一脸懵
+      bad(`${head} —— 超出预算 ${payload.bytes - payload.budget} 字节（${payload.entries.length} 条常驻）`);
+      console.log(dim('  为什么有上限：这段内容**每一轮会话都会发给模型**，是持续成本（大约 1000 字节 ≈ 300~400 tokens/轮）。'));
+      console.log(dim('  超了会怎样：不会丢条目（注入不截断），但每轮都多花这些 token，validate 也会报问题。'));
+      console.log(dim('  怎么办：① 不再需要的条目 mem archive <id> / mem demote <id>'));
+      console.log(dim('          ② 把条目的**结论首行**写短（注入只取首行 + key，正文写多长都不花预算）'));
+      console.log(dim('          ③ 确实每条都要：把插件配置 maxBytes 调大（如 4096），或 mem init 后改 memory.config.json 的 injectBudget'));
       process.exitCode = 1; // 供 CI / 插件调用判断：超预算就是失败，不能只看输出文字
     } else {
       ok(`${head} —— 在预算内（${payload.entries.length} 条，已带 hash 供差分注入）`);
@@ -1342,7 +1348,15 @@ function cmdValidate(opts) {
   const text = renderInject(L);
   const bytes = Buffer.byteLength(text, 'utf8');
   const budget = cfg?.injectBudget ?? 3072;
-  if (bytes > budget) problems.push(`注入体积超预算：${bytes} / ${budget} 字节（超 ${bytes - budget}）`);
+  if (bytes > budget) {
+    // 这条**是问题**（退出码 1）：每轮都超预算 = 每轮都在多花钱，值得卡住 CI。
+    // 说明里带上"为什么"和"怎么办"，否则使用者只知道超了、不知道该怎么办。
+    problems.push(
+      `注入体积超预算：${bytes} / ${budget} 字节（超 ${bytes - budget}）\n` +
+        `      这段每轮会话都要发给模型，所以有上限。处理：归档/撤回不再需要的条目、把结论首行写短` +
+        `（注入只取首行，正文不花预算），或调大 maxBytes / injectBudget。`,
+    );
+  }
 
   // 到期复核项：**告警**不是问题 —— "有条目该复核了"是记忆库正常运转的表现，
   // 不是格式错误，所以它绝不影响退出码（CI 里 validate 仍应通过）。

@@ -281,6 +281,24 @@ window.__ModuleLoader__.load({
 }
 .dsh-memory-delta-ok { border-color: var(--dsw-alias-state-success-secondary, rgba(46,125,50,.35)); }
 /* 搜索框：一行占满，和分组头同一层的视觉重量 */
+/* 超预算告警：不是一行红字，而是一块"说人话"的告警（超了什么 / 为什么 / 怎么办）
+   ⚠️ 底色**不铺**：主题里 state-warn-secondary 是实心琥珀，铺上去后正文（浅色）几乎看不清
+   （实测截图发现的）。改成"透明底 + 描边 + 左侧粗 accent + 彩色标题"，深浅主题都读得清。 */
+.dsh-memory-delta-over {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-state-warn-primary, rgba(178,106,0,.55));
+  border-left-width: 3px;
+  background: transparent;
+  color: inherit;
+  line-height: 1.6;
+}
+.dsh-memory-delta-over-title { font-weight: 600; color: var(--dsw-alias-state-warn-label, #b26a00); }
+.dsh-memory-delta-over-fix { color: var(--dsw-alias-label-secondary, #6b6b6b); }
+.dsh-memory-delta-over-list { margin: 0; padding-left: 16px; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dsh-memory-delta-search { display: flex; align-items: center; gap: 6px; }
 .dsh-memory-delta-search > input {
   flex: 1 1 auto;
@@ -1173,6 +1191,42 @@ window.__ModuleLoader__.load({
         ].filter(Boolean),
       );
 
+      /**
+       * 超预算告警 —— 说清**超了什么 / 为什么有上限 / 怎么办**。
+       *
+       * 用户反馈："到时提醒明显些，说明白是什么超出了，为什么限制预算等等，别让使用者一脸懵。"
+       * 所以这里不是一行红字，而是一块说人话的告警：
+       *   · 超了什么：几条常驻、合计多少、超了多少
+       *   · 为什么：这段**每轮会话都要发给模型**，是持续成本（顺带换算成 token 量级）
+       *   · 怎么办：三个可执行动作（归档/撤回、结论首行写短、调大 maxBytes）
+       *   · 还要说清"不会丢东西" —— 否则用户会以为条目被截掉了
+       */
+      const overBudgetNotice = over
+        ? h(
+            'div',
+            { className: 'dsh-memory-delta-over' },
+            h(
+              'div',
+              { className: 'dsh-memory-delta-over-title' },
+              `⚠ 注入已超预算：${counts.active || 0} 条常驻合计 ${bytes} 字节，上限 ${budget} 字节（超 ${bytes - budget}）`,
+            ),
+            h(
+              'div',
+              null,
+              '这段内容每一轮会话都会发给模型，所以设了上限 —— 大约 1000 字节 ≈ 300~400 tokens/轮，超了就是每轮都多花。',
+            ),
+            h('div', null, '不会丢东西：注入不会截断，条目一条都不会少（超了只是每轮更贵）。'),
+            h('div', { className: 'dsh-memory-delta-over-fix' }, '怎么办：'),
+            h(
+              'ul',
+              { className: 'dsh-memory-delta-over-list' },
+              h('li', null, '把不再需要的「归档」或「撤回」—— 就在下面各组条目上'),
+              h('li', null, '把条目的结论首行写短：注入只取首行 + key，正文写多长都不花预算'),
+              h('li', null, '确实每条都要：把插件配置 maxBytes 调大（如 4096）'),
+            ),
+          )
+        : null;
+
       const dueList = Array.isArray(state.due) ? state.due : [];
       const dueBlock = section(
         {
@@ -1576,6 +1630,7 @@ window.__ModuleLoader__.load({
         head,
         searchRow,
         statusRow,
+        overBudgetNotice,
         flow,
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,

@@ -62,6 +62,12 @@ const truncated = (s, n = 200) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
+/**
+ * 丢掉值为 `undefined` 的属性 —— DSH 的工具返回值必须是**无损 JSON**
+ * （值为 undefined 的属性会让整个工具调用失败，见记忆库的 tool-output-lossless-json）。
+ */
+const defined = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+
 export function apply(ctx, config = {}) {
   const storeOf = (cwd, opts) => openStore(config, cwd, opts);
 
@@ -189,12 +195,17 @@ export function apply(ctx, config = {}) {
           properties: {
             id: { type: 'string', required: true },
             status: { type: 'string', required: true },
+            // 超预算时才出现（普通情况下整条省掉）—— 在"写入那一刻"提醒，
+            // 比等面板变红更及时；而且它只在写的时候回一次，**不占每轮的注入预算**。
+            budgetNote: { type: 'string' },
           },
         },
         render: (_args, value) => [
           {
             type: 'text',
-            text: `Recorded candidate ${value.id} in the memory inbox (not yet injected; needs promotion to become a standing fact).`,
+            text:
+              `Recorded candidate ${value.id} in the memory inbox (not yet injected; needs promotion to become a standing fact).` +
+              (value.budgetNote ? `\n\nWARNING: the standing memory is over its injection budget — ${value.budgetNote}` : ''),
           },
         ],
       },
@@ -212,7 +223,17 @@ export function apply(ctx, config = {}) {
           scope: store.scope,
           source: exec?.agent?.session?.header?.id ?? null,
         });
-        return Promise.resolve({ id: created.id, status: 'inbox' });
+        // 写完之后检查预算：已经超了就顺手告诉模型（也让用户从对话里看到）
+        let budgetNote;
+        try {
+          const payload = injectPayload(store.L, store.budget);
+          if (payload.overBudget) {
+            budgetNote = `injection is ${payload.bytes} / ${payload.budget} bytes (${payload.entries.length} standing entries, over by ${payload.bytes - payload.budget}). Ask the user to archive/retire entries or keep conclusion first lines short (only the first line + key is injected), or raise maxBytes.`;
+          }
+        } catch {
+          // 预算算不出来不该让写入失败
+        }
+        return Promise.resolve(defined({ id: created.id, status: 'inbox', budgetNote }));
       },
       presentCall: (args) => ({ card: 'generic', title: `Remember: ${truncated(args.conclusion, 60)}`, kind: 'other', rawInput: args }),
     }),
@@ -241,6 +262,8 @@ export function apply(ctx, config = {}) {
           configRoot: config.root || undefined,
           workspace: input?.workspace,
           dueWithin: config.dueWithin ?? 0,
+          // 预算必须传**实际生效**的那个（插件 maxBytes 优先）—— 否则面板算超没超预算会和真实注入不一致
+          budget: config.maxBytes || undefined,
         }),
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );

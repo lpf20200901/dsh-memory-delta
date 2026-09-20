@@ -1080,6 +1080,15 @@ section('组件：超预算');
   await flush();
   const text = allText(mounted.tree());
   check('超出预算时明确标出', text.includes('注入 4096 / 3072 字节') && text.includes('超出预算'), text.slice(0, 240));
+  // 告警要说人话：超了什么 / 为什么有上限 / 怎么办（用户要求"别让使用者一脸懵"）
+  check('告警说清"超了什么"（几条、合计多少、超多少）', /3 条常驻合计 4096 字节.*超 1024/.test(text), text.slice(0, 400));
+  check('告警说清"为什么有上限"（每轮都发给模型、换算成 token）', text.includes('每一轮会话都会发给模型') && text.includes('tokens/轮'), text.slice(0, 600));
+  check('告警说清"不会丢东西"', text.includes('不会丢东西') && text.includes('不会截断'), text.slice(0, 600));
+  check(
+    '告警给出可执行的三条办法（归档/撤回、首行写短、调大 maxBytes）',
+    text.includes('归档') && text.includes('结论首行') && text.includes('maxBytes'),
+    text.slice(0, 800),
+  );
   check(
     '没有到期项时说清楚"什么时候才会出现"',
     text.includes('没有到复核期的记忆') && text.includes('verify_when 到期后才会出现'),

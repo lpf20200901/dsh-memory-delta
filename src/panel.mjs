@@ -383,13 +383,22 @@ function countMd(dir) {
 /**
  * 只读地拼状态。
  *
- * @param {{configRoot?: string, workspace?: string, dueWithin?: number, entryLimit?: number, inboxLimit?: number, now?: string}} input
+ * @param {{configRoot?: string, workspace?: string, dueWithin?: number, entryLimit?: number, inboxLimit?: number, budget?: number, now?: string}} input
  * @returns {object} `{ok:true, ...状态}`；任何输入异常都降级成空状态，**不抛错**
  */
 export function memoryStateOf(input = {}) {
   const { root, workspace } = resolvePanelRoot(input);
   const cfg = root ? safeConfig(root) : { budget: null, scope: null };
-  const budget = cfg.budget ?? 3072;
+  /**
+   * 预算以谁为准：**插件配置的 `maxBytes` 优先**（`input.budget`），其次才是库配置的
+   * `memory.config.json#injectBudget`。
+   *
+   * ⚠️ 这里踩过：面板原来只看库配置，于是"插件 maxBytes=4096、库配置还是 3072"时，
+   * 面板显示的上限跟**真正生效**的上限不一致 —— 超没超预算会算错、告警会撒谎。
+   * 插件侧 `openStore()` 的顺序就是 `config.maxBytes || fileConfig.injectBudget || 3072`，
+   * 面板必须与它一致。
+   */
+  const budget = Number.isFinite(input.budget) && input.budget > 0 ? input.budget : (cfg.budget ?? 3072);
   const scope = cfg.scope ?? (workspace ? `workspace:${workspace}` : '');
   /**
    * 找「工作区规范」用哪个目录。
