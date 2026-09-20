@@ -587,6 +587,60 @@ section('库自带说明书：目录名说不清"在流程哪一步"，说明书
   check('库里有 README.md 不影响 validate', v.code === 0, flat(v.out));
 }
 
+/* ----------------------- M7：双向迁移（demote 撤回）与删除候选（rm） */
+
+section('M7：demote（常驻 → 候选）与 rm（只删候选）');
+{
+  const root = freshRoot('demote');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  run(['new', '--root', root, '--type', 'fact', '--key', 'movable', '--conclusion', '先确认，再撤回，再放回去', '--source', 's']);
+  run(['promote', '--root', root, 'movable']);
+  check('提升后落在 facts/', fs.existsSync(path.join(root, 'facts', 'movable.md')), md(path.join(root, 'facts')).join(','));
+  check('此时参与注入', JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'movable'));
+
+  // 撤回：常驻 → 候选（不改 status，只换层）
+  const back = run(['demote', '--root', root, 'movable']);
+  check('demote 成功', back.code === 0, flat(back.out + back.err));
+  check(
+    '文件回到 inbox/',
+    fs.existsSync(path.join(root, 'inbox', 'movable.md')) && !fs.existsSync(path.join(root, 'facts', 'movable.md')),
+    md(path.join(root, 'inbox')).join(','),
+  );
+  check('撤回后**不再参与注入**', !JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'movable'));
+  // 撤回**不改 status**（还是 active）—— 只换层，所以再 promote 能原样放回去
+  const backRaw = fs.readFileSync(path.join(root, 'inbox', 'movable.md'), 'utf8');
+  check('撤回不改 status（frontmatter 里仍是 active）', /^status:\s*active$/m.test(backRaw), backRaw.split(/\r?\n/).slice(0, 8).join(' | '));
+  check('validate 仍然通过', run(['validate', '--root', root]).code === 0);
+
+  // 再放回去：这才是"双向"
+  check('再 promote 能放回常驻层', run(['promote', '--root', root, 'movable']).code === 0 && fs.existsSync(path.join(root, 'facts', 'movable.md')));
+  check('放回后又参与注入', JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'movable'));
+
+  // 撤回的边界
+  run(['new', '--root', root, '--type', 'fact', '--key', 'cand', '--conclusion', '一个候选', '--source', 's']);
+  const demoteCandidate = run(['demote', '--root', root, 'cand']);
+  check(
+    '候选再撤回 → 报错（它已经在 inbox）',
+    demoteCandidate.code !== 0 && /已经在 inbox/.test(demoteCandidate.out + demoteCandidate.err),
+    flat(demoteCandidate.out + demoteCandidate.err),
+  );
+
+  // rm：只删候选
+  const rmCandidate = run(['rm', '--root', root, 'cand']);
+  check('rm 能删候选', rmCandidate.code === 0, flat(rmCandidate.out + rmCandidate.err));
+  check('候选文件真的没了', !fs.existsSync(path.join(root, 'inbox', 'cand.md')), md(path.join(root, 'inbox')).join(','));
+  const rmStanding = run(['rm', '--root', root, 'movable']);
+  check(
+    'rm 拒绝删常驻条目（避免"静默消失"）',
+    rmStanding.code !== 0 && /只能删除 inbox/.test(rmStanding.out + rmStanding.err),
+    flat(rmStanding.out + rmStanding.err),
+  );
+  check('拒绝之后文件还在', fs.existsSync(path.join(root, 'facts', 'movable.md')));
+  const rmMissing = run(['rm', '--root', root, 'nope']);
+  check('rm 找不到条目 → 报错', rmMissing.code !== 0 && /找不到条目/.test(rmMissing.out + rmMissing.err), flat(rmMissing.out + rmMissing.err));
+  check('rm/demote 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+}
+
 /* ------------------------------------------------------------- 汇总 */
 rmrf(SANDBOX);
 console.log(`\n${pass} 通过 / ${fail} 失败`);

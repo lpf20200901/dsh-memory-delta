@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
-import { createEntry, ensureLayout, injectPayload, readAll, searchLibrary } from '../bin/mem.mjs';
+import { createEntry, ensureLayout, injectPayload, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
 import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
 
@@ -666,6 +666,42 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ROUTE_PATH && noEffectRoutes.length === 1, String(returned?.path));
 }
 
+/* ------------------------------- 工作区规范（在工作区内，可点「编辑」） */
+
+section('「工作区规范」：AGENTS.md / AGENTS.local.md');
+{
+  const ws = path.join(SANDBOX, 'wsrules');
+  fs.mkdirSync(ws, { recursive: true });
+  fs.writeFileSync(path.join(ws, 'AGENTS.md'), '# 工作区记忆\n\n- 这个工作区的事\n', 'utf8');
+  fs.writeFileSync(path.join(ws, 'AGENTS.local.md'), '# 私有层\n', 'utf8');
+
+  const state = memoryStateOf({ configRoot: ROOT, workspace: ws });
+  check('列出工作区里的两个规范文件', state.workspaceRules.length === 2, JSON.stringify(state.workspaceRules.map((r) => r.name)));
+  check('带相对名 + 绝对 file（客户端要用它调 openFile）+ 字节数', state.workspaceRules.every((r) => r.name.endsWith('.md') && path.isAbsolute(r.file) && r.bytes > 0), JSON.stringify(state.workspaceRules));
+  check('工作区规范是无损 JSON', losslessError(state.workspaceRules) === null, losslessError(state.workspaceRules) ?? '');
+
+  // 只存在一个时只列一个
+  fs.unlinkSync(path.join(ws, 'AGENTS.local.md'));
+  check('只存在一个就只列一个', memoryStateOf({ configRoot: ROOT, workspace: ws }).workspaceRules.length === 1);
+  fs.unlinkSync(path.join(ws, 'AGENTS.md'));
+  check('一个都没有时是空数组（面板给空态）', memoryStateOf({ configRoot: ROOT, workspace: ws }).workspaceRules.length === 0);
+
+  /**
+   * 回归（真机踩到）：客户端 scope 里没有 cwd 时不发 workspace，这时必须退回**记忆库配置里的 scope** ——
+   * 否则面板会显示"还没有 AGENTS.md"，而那个文件明明存在（假的空态）。
+   */
+  const scopedRoot = path.join(SANDBOX, 'wsrules-scoped');
+  fs.mkdirSync(scopedRoot, { recursive: true });
+  fs.writeFileSync(path.join(scopedRoot, 'AGENTS.md'), '# 有\n', 'utf8');
+  fs.writeFileSync(path.join(scopedRoot, 'memory.config.json'), JSON.stringify({ scope: `workspace:${scopedRoot}` }), 'utf8');
+  const viaScope = memoryStateOf({ configRoot: scopedRoot });
+  check(
+    '★ 请求里没有 workspace 时，用记忆库配置的 scope 找到工作区规范',
+    viaScope.workspaceRules.length === 1 && viaScope.workspaceRules[0].name === 'AGENTS.md',
+    JSON.stringify(viaScope.workspaceRules),
+  );
+}
+
 /* ------------------------------- 「全局规范」（工作区外、DSH 注入的那份） */
 
 section('「全局规范」：显示 DSH 的用户级指令文件（不是本插件注入的）');
@@ -826,7 +862,32 @@ section('「动作」路由（promote / rename）');
   const noId = await callRoute(route, { body: JSON.stringify({ op: 'promote' }) });
   check('缺 id → 400', noId.status === 400 && /缺少 id/.test(String(noId.json.error)), String(noId.json.error));
 
-  // ⑤ 来源与配置开关
+  // ⑤ 双向：demote（常驻 → 候选）与 remove（只删候选）
+  const demoted = await callRoute(route, { body: JSON.stringify({ op: 'demote', id: 'panel-promote-renamed' }) });
+  check(
+    'demote → 200 且说明从哪层回到哪层',
+    demoted.status === 200 && demoted.json.from === 'facts' && demoted.json.target === 'inbox',
+    JSON.stringify(demoted.json),
+  );
+  check('文件真的回到 inbox/', fs.existsSync(path.join(L.inbox, 'panel-promote-renamed.md')) && !fs.existsSync(path.join(L.facts, 'panel-promote-renamed.md')), 'moved');
+  check('撤回后不再参与注入', !injectPayload(L, 3072).entries.some((e) => e.id === 'panel-promote-renamed'));
+  const demoteAgain = await callRoute(route, { body: JSON.stringify({ op: 'demote', id: 'panel-promote-renamed' }) });
+  check('对候选再 demote → 400 且说清原因', demoteAgain.status === 400 && /已经在 inbox/.test(String(demoteAgain.json.error)), String(demoteAgain.json.error));
+
+  const removed = await callRoute(route, { body: JSON.stringify({ op: 'remove', id: 'panel-promote-renamed' }) });
+  check('remove → 200', removed.status === 200 && removed.json.ok === true, JSON.stringify(removed.json));
+  check('候选文件被删掉', !fs.existsSync(path.join(L.inbox, 'panel-promote-renamed.md')), 'deleted');
+  const keepStanding = createEntry(L, { type: 'fact', conclusion: '常驻条目不能直接删', key: 'keep-standing', tags: [] });
+  promoteEntry(L, keepStanding.id);
+  const removeStanding = await callRoute(route, { body: JSON.stringify({ op: 'remove', id: keepStanding.id }) });
+  check(
+    'remove 拒绝删常驻条目（避免静默消失）',
+    removeStanding.status === 400 && /只能删除 inbox/.test(String(removeStanding.json.error)),
+    JSON.stringify(removeStanding.json),
+  );
+  check('拒绝之后常驻文件还在', fs.existsSync(path.join(L.facts, `${keepStanding.id}.md`)), keepStanding.id);
+
+  // ⑥ 来源与配置开关
   const crossSite = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: 'x' }), headers: { host: '127.0.0.1:23278', origin: 'https://evil.example' } });
   check('跨站 Origin → 403', crossSite.status === 403, String(crossSite.status));
   const getMethod = await callRoute(route, { method: 'GET', url: MEMORY_ACTION_PATH });

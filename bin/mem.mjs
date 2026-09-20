@@ -593,6 +593,55 @@ export function renameEntry(L, oldId, newId) {
   return { from, to, file: dest, refs };
 }
 
+/**
+ * **撤回**：把已确认的条目从常驻层退回 `inbox/`（候选层）。
+ *
+ * 和"取代"（`supersede` → 进 `archive/`）是**两件事**，别混：
+ *   · 取代 = 这条**错了/过时了**，有新真相顶上来 → 归档
+ *   · 撤回 = 这条**我还不能确定**（或先不想让它每轮发给模型）→ 回候选层，等以后再说
+ * 所以撤回**不改 `status`**（还是 active），只换一层放 —— 再 `promote` 一次就回去了。
+ *
+ * 只接受常驻层（`facts/` `decisions/`）的 active 条目。归档层的"复活"是另一件事
+ * （要同时理清 `status` 与 `superseded_by`），不在这个操作里顺手做。
+ *
+ * @returns {{id: string, from: string, to: 'inbox'}}
+ */
+export function demoteEntry(L, id) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where === 'inbox') throw new Error(`条目已经在 inbox/ 里了（${e.id}），不用撤回`);
+  if (e.where !== 'facts' && e.where !== 'decisions') {
+    throw new Error(`只能撤回常驻条目（facts/ decisions）；这条在 ${e.where}/。归档里的想复活，先手动理清 status 与 superseded_by`);
+  }
+  if (e.data.status !== 'active') {
+    throw new Error(`只有 active 条目需要撤回（这条是 ${e.data.status}）—— 已失效的走 archive/`);
+  }
+  const dest = path.join(L.inbox, `${e.id}.md`);
+  if (fs.existsSync(dest)) throw new Error(`inbox/ 里已经有同名文件：${dest}`);
+  moveEntry(e.file, dest, serializeEntry(e));
+  return { id: e.id, from: e.where, to: 'inbox' };
+}
+
+/**
+ * **删除候选** —— 只允许删 `inbox/` 里的条目。
+ *
+ * 为什么只允许删候选：常驻条目一旦被注入过、被别的条目引用过，直接删就是**静默消失**；
+ * 它的正确出路是**撤回**（回候选）或**取代/标过期**（进 archive）。候选还没被确认过，
+ * 删掉只是"这条不算数"，没有历史包袱。
+ *
+ * 用 `unlinkSync` 而不是 `rmSync`：非 ASCII 路径下 `rmSync` 会静默失败（记忆库的 node-rm-nonascii）。
+ *
+ * @returns {{id: string, file: string}}
+ */
+export function removeEntry(L, id) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where !== 'inbox') {
+    throw new Error(`只能删除 inbox/ 里的候选（这条在 ${e.where}/）。常驻条目的出路是"撤回"或"标记失效/取代"，不是直接删`);
+  }
+  const file = e.file;
+  fs.unlinkSync(file);
+  return { id: e.id, file };
+}
+
 function cmdPromote(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
@@ -622,6 +671,37 @@ function cmdRename(opts) {
   }
   ok(`${c(1, result.from)} → ${c(1, result.to)}（${path.basename(result.file)}）`);
   if (result.refs.length) ok(`顺带更新了引用：${result.refs.join(', ')}`);
+}
+
+/** `mem demote <id>` —— 撤回：常驻 → 候选（见 `demoteEntry`）。 */
+function cmdDemote(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const id = opts._[0];
+  if (!id) fail('用法：mem demote <id>');
+  let result;
+  try {
+    result = demoteEntry(L, id);
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`已撤回 ${c(1, result.id)}：${result.from}/ → inbox/（不再是 active 常驻，不会再注入）`);
+  console.log(dim('  想再放回去：mem promote ' + result.id));
+}
+
+/** `mem rm <id>` —— 删除**候选**（只允许 inbox；见 `removeEntry`）。 */
+function cmdRemove(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const id = opts._[0];
+  if (!id) fail('用法：mem rm <id>（只允许删 inbox/ 里的候选）');
+  let result;
+  try {
+    result = removeEntry(L, id);
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`已删除候选 ${c(1, result.id)}（${path.basename(result.file)}）`);
 }
 
 function cmdSupersede(opts) {
@@ -1224,6 +1304,8 @@ if (isMain) {
     case 'list': cmdList(opts); break;
     case 'show': cmdShow(opts); break;
     case 'promote': cmdPromote(opts); break;
+    case 'demote': cmdDemote(opts); break;
+    case 'rm': cmdRemove(opts); break;
     case 'rename': cmdRename(opts); break;
     case 'supersede': cmdSupersede(opts); break;
     case 'set': cmdSet(opts); break;
@@ -1280,7 +1362,9 @@ function usage() {
                           · --id ：推荐显式给短 id；不给则从结论派生（压到 20 字符）
   list [--status --type --scope --tag --where --all --json]
   show <id> [--json]
-  promote <id> [--supersedes <旧id>]     inbox → facts/decisions
+  promote <id> [--supersedes <旧id>]     inbox → facts/decisions（人确认）
+  demote <id>                            撤回：facts/decisions → inbox（先不当真，等以后再说）
+  rm <id>                                删除候选（**只允许 inbox/**；常驻的走 demote 或取代）
   rename <旧id> <新id>                   安全改名（id + 文件名 + 引用一起改）
                           同 key 已有 active 时必须显式 --supersedes
   supersede <旧id> <新id>                标记取代 + 归档 + 双向链接

@@ -799,6 +799,152 @@ section('组件：全局规范不存在');
   globalThis.fetch = originalFetch;
 }
 
+/* --------------------- 组件：撤回 / 删除候选（都要过行内确认条） */
+
+section('组件：撤回与删除候选（危险动作二次确认）');
+{
+  const originalFetch = globalThis.fetch;
+  const actionCalls = [];
+  globalThis.fetch = (url, options) => {
+    if (url === '/dsh-memory-delta/action') {
+      const body = JSON.parse(options?.body ?? '{}');
+      actionCalls.push(body);
+      if (body.op === 'demote') {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: 'demote', id: body.id, from: 'facts', target: 'inbox' }) });
+      }
+      if (body.op === 'remove') {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: 'remove', id: body.id }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: body.op, id: body.id, target: 'facts', refs: [] }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  const standingItem = () =>
+    findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('路径含非 ASCII'));
+  const demoteBtn = () => findAllByClass(standingItem(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '撤回');
+
+  check('常驻条目上有「撤回」按钮', Boolean(demoteBtn()));
+  demoteBtn().props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('点撤回后**没有**立刻发请求（先确认）', actionCalls.length === 0, JSON.stringify(actionCalls));
+  const confirmBar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  check('出现行内确认条', Boolean(confirmBar), allText(mounted.tree()).slice(0, 200));
+  check(
+    '确认条说清后果（回到待你确认、不再发给模型）',
+    allText(confirmBar).includes('要撤回这条？') && allText(confirmBar).includes('不再发给模型'),
+    allText(confirmBar),
+  );
+
+  // 取消 → 什么都不发生
+  findAllByClass(confirmBar, 'dsh-memory-delta-mini')
+    .find((b) => allText(b).trim() === '取消')
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('点取消后确认条消失且不发请求', !findByClass(mounted.tree(), 'dsh-memory-delta-confirm') && actionCalls.length === 0, String(actionCalls.length));
+
+  // 再点一次并确认 → 发 demote
+  demoteBtn().props.onClick({ stopPropagation() {}, preventDefault() {} });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-confirm'), 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认撤回'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('确认后发 op=demote + id', actionCalls[0]?.op === 'demote' && actionCalls[0]?.id === 'fact-a', JSON.stringify(actionCalls[0]));
+  check(
+    '撤回成功后提示"回到待你确认"',
+    allText(mounted.tree()).includes('已撤回 fact-a') && allText(mounted.tree()).includes('待你确认'),
+    allText(mounted.tree()).slice(0, 260),
+  );
+
+  // 候选条目：「删除」→ 同样要确认，且按钮是危险样式
+  const inboxItem = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('沙箱禁止命名管道'));
+  const removeBtn = findAllByClass(inboxItem, 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '删除');
+  check('候选条目上有「删除」按钮', Boolean(removeBtn));
+  check('删除按钮是危险样式', String(removeBtn.props.className).includes('is-danger'), String(removeBtn.props.className));
+  removeBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const bar3 = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  check('删除也要先确认', Boolean(bar3) && allText(bar3).includes('要删除这条？'), allText(bar3));
+  check('删除的确认文案说明不可恢复', allText(bar3).includes('不可恢复'), allText(bar3));
+  findAllByClass(bar3, 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认删除'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('确认后发 op=remove + id', actionCalls.at(-1)?.op === 'remove' && actionCalls.at(-1)?.id === 'cand-1', JSON.stringify(actionCalls.at(-1)));
+  check('删除成功后给出提示', allText(mounted.tree()).includes('已删除候选 cand-1'), allText(mounted.tree()).slice(0, 260));
+
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：撤回/删除失败要把原因显示出来 */
+
+section('组件：撤回失败时回显宿主原因');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    if (url === '/dsh-memory-delta/action') {
+      return Promise.resolve({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ ok: false, error: '只能删除 inbox/ 里的候选（这条在 facts/）' }),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  const item = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('路径含非 ASCII'));
+  findAllByClass(item, 'dsh-memory-delta-mini')
+    .find((n) => allText(n).trim() === '撤回')
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-confirm'), 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认撤回'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  const text = allText(mounted.tree());
+  check('撤回失败时回显宿主原因', text.includes('撤回失败') && text.includes('只能删除 inbox/'), text.slice(0, 300));
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：工作区规范（可点编辑） */
+
+section('组件：工作区规范');
+{
+  const originalFetch = globalThis.fetch;
+  const sidebar = fakeSidebar();
+  const withRules = {
+    ...SAMPLE,
+    workspaceRules: [
+      { name: 'AGENTS.md', exists: true, file: 'D:\\proj\\AGENTS.md', bytes: 1200, mtime: '2026-09-20T05:00:00.000Z' },
+      { name: 'AGENTS.local.md', exists: true, file: 'D:\\proj\\AGENTS.local.md', bytes: 800, mtime: '2026-09-20T05:00:00.000Z' },
+    ],
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withRules) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: sidebar.service } });
+  await flush();
+
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('「已在用」里有「工作区规范」一节', headers.includes('工作区规范'), headers);
+  check('说明它只在本工作区生效、每轮注入', headers.includes('只在本工作区生效') && headers.includes('每轮注入'), headers);
+  const text = allText(mounted.tree());
+  check('列出两个文件与大小', text.includes('AGENTS.md') && text.includes('AGENTS.local.md') && text.includes('1200 字节'), text.slice(0, 400));
+
+  const editBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '编辑');
+  check('有「编辑」按钮（工作区内的文件可直接进编辑器）', Boolean(editBtn));
+  editBtn.props.onClick({});
+  check('点编辑 → 走 openFile 打开该文件', sidebar.opened[0]?.path === 'D:\\proj\\AGENTS.md', JSON.stringify(sidebar.opened[0]));
+
+  globalThis.fetch = originalFetch;
+
+  // 没有规范文件时给出可操作的空态
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...SAMPLE, workspaceRules: [] }) });
+  const empty = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  const emptyText = allText(empty.tree());
+  check('没有工作区规范时说明"建了就生效"', emptyText.includes('还没有 AGENTS.md') && emptyText.includes('AGENTS.local.md'), emptyText.slice(0, 400));
+  globalThis.fetch = originalFetch;
+}
+
 /* --------------------- 组件：搜索失败要回显宿主的原因 */
 
 section('组件：搜索失败');

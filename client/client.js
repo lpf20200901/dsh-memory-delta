@@ -177,6 +177,23 @@ window.__ModuleLoader__.load({
   white-space: nowrap;
 }
 .dsh-memory-delta-mini:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14)); color: inherit; }
+/* 危险动作的按钮与行内确认条 —— 只做视觉区分，真正的闸门是"必须点两次" */
+.dsh-memory-delta-mini.is-danger {
+  border-color: var(--dsw-alias-state-error-secondary, rgba(198,40,40,.45));
+  color: var(--dsw-alias-state-error-primary, #c62828);
+}
+.dsh-memory-delta-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-state-error-secondary, rgba(198,40,40,.35));
+  background: var(--dsw-alias-state-error-secondary, rgba(198,40,40,.08));
+}
+.dsh-memory-delta-confirm-text { flex: 1 1 auto; min-width: 0; font-size: 11px; }
 .dsh-memory-delta-seg { display: flex; gap: 4px; margin-left: auto; align-items: center; }
 .dsh-memory-delta-seg + .dsh-memory-delta-btn { margin-left: 6px; }
 .dsh-memory-delta-seg > button {
@@ -604,6 +621,13 @@ window.__ModuleLoader__.load({
       // 所以**不猜名字**（猜错就是一次全库引用改写），让用户自己填。
       const [renaming, setRenaming] = useState(null);
       const [pendingId, setPendingId] = useState(null);
+      /**
+       * 危险动作的**行内确认条**：`{ id, op, label, hint }`。
+       *
+       * 为什么不用浏览器原生 `confirm()`：它阻塞页面、跟界面风格不搭，
+       * 而且**无头截图会卡在那里**（我们靠截图出产品图）。行内确认既好测也好看。
+       */
+      const [confirming, setConfirming] = useState(null);
       const toggleSection = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
       const isOpen = (key) => !collapsed[key];
 
@@ -717,6 +741,43 @@ window.__ModuleLoader__.load({
           .then(() => setPendingId(null));
       };
 
+      /**
+       * **撤回**：常驻 → 候选。和"取代"是两件事（取代进归档；撤回只是"先不当真"）。
+       * 它会改冻结层，所以走行内确认。
+       */
+      const demote = (id) => {
+        setConfirming(null);
+        setPendingId(id);
+        return callAction({ op: 'demote', id })
+          .then((r) => {
+            setActionError(null);
+            setNotice(`已撤回 ${r.id}：回到「待你确认」，下一轮起不再发给模型`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`撤回失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** **删除候选**：不可恢复，所以必须过确认条。 */
+      const removeCandidate = (id) => {
+        setConfirming(null);
+        setPendingId(id);
+        return callAction({ op: 'remove', id })
+          .then((r) => {
+            setActionError(null);
+            setNotice(`已删除候选 ${r.id}`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`删除失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
       const startRename = (e) => {
         const base = baseNameOf(e.file || '').replace(/\.md$/, '');
         setRenaming((prev) => (prev && prev.id === e.id ? null : { id: e.id, value: e.key && e.key !== base ? e.key : '' }));
@@ -790,6 +851,97 @@ window.__ModuleLoader__.load({
                 },
               },
               renaming && renaming.id === e.id ? '取消' : '整理文件名',
+            )
+          : null;
+
+      /**
+       * 常驻条目上的「撤回」按钮 —— 双向迁移的另一半（常驻 → 候选）。
+       * 会改冻结层，所以先弹**行内确认条**，不直接动手。
+       */
+      const demoteButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: '撤回：回到「待你确认」，下一轮起不再发给模型（不等于取代 —— 取代是进归档）',
+            onClick: (ev) => {
+              stop(ev);
+              setConfirming(
+                confirming && confirming.id === e.id
+                  ? null
+                  : {
+                      id: e.id,
+                      op: 'demote',
+                      label: '确认撤回',
+                      hint: '撤回后它回到「待你确认」，不再发给模型；想再放回去点一次「提升」就行。',
+                    },
+              );
+            },
+          },
+          confirming && confirming.id === e.id && confirming.op === 'demote' ? '取消' : '撤回',
+        );
+
+      /** 候选条目上的「删除」按钮 —— 不可恢复，同样走确认条。 */
+      const removeButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini is-danger',
+            disabled: pendingId === e.id,
+            title: '删除这个候选（文件会被删掉，不可恢复）',
+            onClick: (ev) => {
+              stop(ev);
+              setConfirming(
+                confirming && confirming.id === e.id
+                  ? null
+                  : {
+                      id: e.id,
+                      op: 'remove',
+                      label: '确认删除',
+                      hint: '这个候选的文件会被直接删掉，不可恢复（常驻条目不能这样删，请用「撤回」或取代）。',
+                    },
+              );
+            },
+          },
+          confirming && confirming.id === e.id && confirming.op === 'remove' ? '取消' : '删除',
+        );
+
+      /** 行内确认条：危险动作的第二道闸（替代浏览器原生 confirm —— 那个会卡住无头截图）。 */
+      const confirmRow = (e) =>
+        confirming && confirming.id === e.id
+          ? h(
+              'div',
+              { className: 'dsh-memory-delta-confirm', key: `${e.id}:confirm`, onClick: stop },
+              h('span', { className: 'dsh-memory-delta-confirm-text' }, `要${confirming.op === 'remove' ? '删除' : '撤回'}这条？${confirming.hint}`),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini is-danger',
+                  disabled: pendingId === e.id,
+                  onClick: (ev) => {
+                    stop(ev);
+                    if (confirming.op === 'remove') removeCandidate(e.id);
+                    else demote(e.id);
+                  },
+                },
+                pendingId === e.id ? '处理中…' : confirming.label,
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini',
+                  onClick: (ev) => {
+                    stop(ev);
+                    setConfirming(null);
+                  },
+                },
+                '取消',
+              ),
             )
           : null;
 
@@ -962,9 +1114,25 @@ window.__ModuleLoader__.load({
       const byDateDesc = (list) =>
         [...list].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(a.id).localeCompare(String(b.id)));
 
-      /** 统一渲染一条条目：可点开、带「整理文件名」入口、需要时展开改名输入行。 */
+      /**
+       * 统一渲染一条条目：可点开、带「整理文件名」入口、危险动作要展开确认条。
+       *
+       * `standing` 为真 = 这条在「已在用」里（给「撤回」按钮）；否则按候选处理（给「删除」）。
+       */
       const renderItem = (e, extra) =>
-        item(e, Object.assign({ onOpen: openMemoryFile, showType: false, actions: [tidyButton(e)], extraRow: renameRow(e) }, extra || {}));
+        item(
+          e,
+          Object.assign(
+            {
+              onOpen: openMemoryFile,
+              showType: false,
+              actions: [demoteButton(e), tidyButton(e)],
+              // 确认条优先：它出现时说明用户刚点了危险按钮，此时不该再显示改名输入
+              extraRow: confirmRow(e) || renameRow(e),
+            },
+            extra || {},
+          ),
+        );
 
       const groupSection = (key, title, slug, list, hint) =>
         list.length
@@ -1082,6 +1250,57 @@ window.__ModuleLoader__.load({
           )
         : null;
 
+      /**
+       * 工作区规范：`<工作区>/AGENTS.md` + `AGENTS.local.md`（DSH 也每轮注入）。
+       *
+       * 与全局那份的区别：**这两个文件在工作区内** → better-sidebar 的 workspace fence 允许打开，
+       * 所以能直接给「编辑」按钮进侧边栏编辑器（不用我们再造编辑 UI）。
+       */
+      const wsRules = Array.isArray(state.workspaceRules) ? state.workspaceRules : [];
+      const workspaceRulesBlock = section(
+        {
+          key: 'stage:wsrules',
+          title: '工作区规范',
+          slug: null,
+          count: wsRules.length,
+          hint: '只在本工作区生效 · 每轮注入（含 AGENTS.local.md 私有层）',
+          open: isOpen('stage:wsrules'),
+          onToggle: () => toggleSection('stage:wsrules'),
+        },
+        wsRules.length
+          ? wsRules.map((r) =>
+              h(
+                'div',
+                { className: 'dsh-memory-delta-item', key: r.name },
+                h(
+                  'div',
+                  { className: 'dsh-memory-delta-item-head' },
+                  h('span', { className: 'dsh-memory-delta-key' }, r.name),
+                  h(
+                    'span',
+                    { className: 'dsh-memory-delta-meta' },
+                    h('span', { className: 'dsh-memory-delta-dim' }, `${r.bytes} 字节`),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-memory-delta-mini',
+                        title: `在侧边栏编辑器里打开 ${r.name}（这个文件在工作区内，可以直接改）`,
+                        onClick: () => openMemoryFile(r.file),
+                      },
+                      '编辑',
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : h(
+              'div',
+              { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' },
+              '这个工作区还没有 AGENTS.md —— 建了它，本工作区的每个新会话都会自动带上（想只给自己看用 AGENTS.local.md，不进 git）',
+            ),
+      );
+
       const standing = entries.length
         ? section(
             {
@@ -1093,7 +1312,7 @@ window.__ModuleLoader__.load({
               open: isOpen('stage:standing'),
               onToggle: () => toggleSection('stage:standing'),
             },
-            [globalBlock].concat(standingBody),
+            [globalBlock, workspaceRulesBlock].concat(standingBody),
           )
         : section(
             {
@@ -1135,7 +1354,7 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : inbox.map((e) => renderItem(e, { showType: true, actions: [promoteButton(e), tidyButton(e)] })),
+            : inbox.map((e) => renderItem(e, { showType: true, actions: [promoteButton(e), tidyButton(e), removeButton(e)] })),
         ],
       );
 

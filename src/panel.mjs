@@ -27,17 +27,21 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, renameEntry, searchLibrary, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readEntryFile, removeEntry, renameEntry, searchLibrary, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
 export const MEMORY_ROUTE_PATH = '/dsh-memory-delta/state';
 
-/** 动作路由（写记忆库）：收件箱提升、安全改名。 */
+/** 动作路由（写记忆库）：收件箱提升/撤回/删除候选、安全改名。 */
 export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
 
-/** `action` 路由认的操作 —— 白名单，别的一律 400。 */
-export const ACTION_OPS = ['promote', 'rename'];
+/**
+ * `action` 路由认的操作 —— 白名单，别的一律 400。
+ *
+ * `promote` 与 `demote` 是**双向**的：候选 ⇄ 常驻。`remove` 只删候选（见 `removeEntry` 的理由）。
+ */
+export const ACTION_OPS = ['promote', 'demote', 'remove', 'rename'];
 
 /** 搜索路由：面板搜索框 → 与 `mem recall` / `memory_search` 同一份检索实现。 */
 export const MEMORY_SEARCH_PATH = '/dsh-memory-delta/search';
@@ -174,6 +178,36 @@ export function globalSourceOf(L) {
   }
 }
 
+/**
+ * 工作区级指令文件（`<工作区>/AGENTS.md` + `AGENTS.local.md`）—— DSH 也是每个会话都会注入。
+ *
+ * 和全局那份的区别：**这些在工作区内**，所以 better-sidebar 的 workspace fence 允许打开它们，
+ * 面板可以给一个「编辑」按钮直接进编辑器 —— 不需要我们再造一套编辑 UI。
+ * 路径只回**相对名**（`AGENTS.md`），绝对路径会带用户名/工作区路径，截图会泄露。
+ */
+export function workspaceInstructionsOf(workspace) {
+  const ws = typeof workspace === 'string' && workspace.trim() ? path.resolve(workspace.trim()) : null;
+  if (!ws) return [];
+  return ['AGENTS.md', 'AGENTS.local.md']
+    .map((name) => {
+      const file = path.join(ws, name);
+      try {
+        if (!fs.existsSync(file)) return { name, exists: false, bytes: 0, mtime: null };
+        const text = fs.readFileSync(file, 'utf8');
+        return {
+          name,
+          exists: true,
+          file,
+          bytes: Buffer.byteLength(text, 'utf8'),
+          mtime: fs.statSync(file).mtime.toISOString(),
+        };
+      } catch {
+        return { name, exists: false, bytes: 0, mtime: null };
+      }
+    })
+    .filter((x) => x.exists);
+}
+
 /* ------------------------------------------------------------ 状态拼装 */
 
 /** 空状态：结构完整、数组为空 —— 客户端不需要为"还没有记忆库"写第二条渲染分支。 */
@@ -190,6 +224,7 @@ function emptyState(root, scope, budget, workspace = null) {
     due: [],
     inbox: [],
     global: null,
+    workspaceRules: [],
     counts: { active: 0, facts: 0, decisions: 0, inbox: 0, archive: 0, due: 0 },
   };
 }
@@ -272,6 +307,8 @@ export function buildMemoryState(L, opts = {}) {
       ...globalInstructionOf({ dshHome: opts.dshHome, previewLines: opts.globalPreviewLines }),
       source: globalSourceOf(L) ?? undefined,
     }),
+    // 工作区规范（在工作区内，所以可以点「编辑」直接进侧边栏编辑器）
+    workspaceRules: workspaceInstructionsOf(opts.workspace),
     counts,
   };
 }
@@ -318,6 +355,16 @@ export function memoryStateOf(input = {}) {
   const cfg = root ? safeConfig(root) : { budget: null, scope: null };
   const budget = cfg.budget ?? 3072;
   const scope = cfg.scope ?? (workspace ? `workspace:${workspace}` : '');
+  /**
+   * 找「工作区规范」用哪个目录。
+   *
+   * ⚠️ 不能只用 `resolvePanelRoot` 回来的 `workspace`：客户端在 `scope` 里没有 `cwd` 时
+   * **不发 workspace**，那时这里会是 null，于是面板会显示"还没有 AGENTS.md"——**假的**
+   * （真机上就是这样：明明有 `D:\idea2023\ai\AGENTS.md`，面板却说没有）。
+   * 所以退回记忆库配置里的 `scope`（`workspace:<路径>`）—— 那本来就是权威的工作区。
+   */
+  const scopeWorkspace = typeof scope === 'string' && scope.startsWith('workspace:') ? scope.slice('workspace:'.length) : null;
+  const rulesWorkspace = workspace || scopeWorkspace;
 
   if (!root || !dirExists(root)) {
     // 记忆库还没建（全新工作区）是**正常状态**，不是错误：返回结构化的空状态。
@@ -328,6 +375,7 @@ export function memoryStateOf(input = {}) {
       ...emptyState(root ?? '', scope, budget, workspace),
       // 全局规范是**工作区外**的一份文件，跟记忆库存不存在无关 —— 空状态也要带上
       global: globalInstructionOf({ dshHome: input.dshHome, previewLines: input.globalPreviewLines }),
+      workspaceRules: workspaceInstructionsOf(rulesWorkspace),
     };
   }
 
@@ -341,6 +389,7 @@ export function memoryStateOf(input = {}) {
       inboxLimit: input.inboxLimit,
       dshHome: input.dshHome,
       globalPreviewLines: input.globalPreviewLines,
+      workspace: rulesWorkspace,
     });
     return { ok: true, ...state };
   } catch (error) {
@@ -611,6 +660,18 @@ export function createActionRoute(opts = {}) {
         if (op === 'promote') {
           const r = promoteEntry(L, id, { supersedes: body?.supersedes });
           writeJson(res, 200, { ok: true, op, id: r.id, target: r.target, superseded: r.superseded });
+          return;
+        }
+        if (op === 'demote') {
+          // 双向的另一半：常驻 → 候选（"先不当真"）。不改 status，只换层。
+          const r = demoteEntry(L, id);
+          writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, target: r.to });
+          return;
+        }
+        if (op === 'remove') {
+          // 只允许删候选 —— 常驻条目直接删就是"静默消失"（removeEntry 里说明了理由）
+          const r = removeEntry(L, id);
+          writeJson(res, 200, { ok: true, op, id: r.id });
           return;
         }
         const to = typeof body?.to === 'string' ? body.to : '';
