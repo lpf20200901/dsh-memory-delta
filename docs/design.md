@@ -233,7 +233,7 @@ verify_when: Windows 大版本更新后重新评估
   - ② **检索变准**：`src/search.mjs`（词/中文 bigram 分词 + 加权打分 + 命中片段），
     `mem recall` 与插件 `memory_search` 共用同一套实现。
   - ③ **`verify_when` 落地成会话内提醒**：把死字段变成"到点了主动提醒你复核"。
-  - 测试 **652 个断言全绿**（CLI 128 + planner 43 + search 51 + due 93 + hook 63 + plugin 177 + client 97），
+  - 测试 **662 个断言全绿**（CLI 137 + planner 43 + search 51 + due 93 + hook 63 + plugin 178 + client 97），
     真机预检 15/15。
   - **明确不做**（用户判定过度设计）：仪表盘/健康度看板、使用计数器、相关性推送的复杂机制。
 
@@ -343,4 +343,10 @@ verify_when: Windows 大版本更新后重新评估
 - `renameEntry` 必须同时改三处：frontmatter 的 `id`、文件名、以及别的条目里指向它的
   `supersedes` / `superseded_by`，最后重建 `index.md`。少改一处就是一条静默腐化的引用。
 - 路由只认白名单 op（`promote` / `rename`），**不做"通用改写"后门**；`allowWrite:false` 可整体关掉。
+
+**⑥ 乱名的根因在 `createEntry`，不在界面。** 界面把文件名显示出来之后，真正的原因就清楚了：
+给了 `key` 的条目文件名干净（`sandbox-no-egress.md`），没给的会拿到
+`<日期>-<截断到 20 字的结论>.md` —— 中文结论必然被截在词中间。所以改的是**生成规则**：
+**有 `key` 且该 key 还没被占用 → id（= 文件名）直接用 key**；key 撞车（合法的多 scope 场景）
+才退回派生 id。已经存在的乱名用 `mem rename` 收，界面上的「整理文件名」按钮是它的入口。
 

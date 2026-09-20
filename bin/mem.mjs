@@ -249,6 +249,15 @@ export function createEntry(L, { type, conclusion, reason, tags, scope, key, id:
     id = String(explicitId).trim();
     if (!/^[A-Za-z0-9\u4e00-\u9fa5._-]+$/.test(id)) throw new Error(`id 含非法字符：${id}`);
     if (findById(L, id).length) throw new Error(`id 已存在：${id}`);
+  } else if (k && findById(L, k).length === 0) {
+    // 给了语义键、又没给 id → **用 key 当 id（也就是文件名）**。
+    //
+    // 为什么：派生 id 是「日期 + 截断到 20 字的结论」，中文结论必然被截在词中间 ——
+    // 库里真实出现过 `2026-09-17-dsh-沙箱禁止命名管道-node-用-spawnsync-捕获子进程输出会-e.md`。
+    // 而 key 本来就是这条记忆的稳定语义名（`sandbox-no-pipe`），文件名用它是自解释的。
+    // key 被占用时退回派生 id（不报错）—— 同一个 key 出现在不同 scope 是合法的，
+    // 那时 id 必须另找名字。
+    id = k;
   } else {
     const base = `${today()}-${slugify(text)}`;
     id = base;

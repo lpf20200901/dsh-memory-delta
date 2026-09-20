@@ -206,8 +206,8 @@ export function apply(ctx, config = {}) {
         conclusion: { type: 'string', required: true, description: 'One-line conclusion, not a narrative.' },
         reason: { type: 'string', description: 'Why it holds / why it was chosen.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Topic tags for later retrieval.' },
-        key: { type: 'string', description: 'Semantic key: only one active fact may exist per key. Lowercase, [a-z0-9._-].' },
-        id: { type: 'string', description: 'Optional short explicit id; derived from the conclusion when omitted.' },
+        key: { type: 'string', description: 'Semantic key: only one active fact may exist per key. Lowercase, [a-z0-9._-]. Strongly recommended — when given (and id is not), the key becomes the file name, which keeps the store readable.' },
+        id: { type: 'string', description: 'Optional short explicit id; derived from key when a key is given, otherwise from the conclusion.' },
       },
       output: {
         schema: {

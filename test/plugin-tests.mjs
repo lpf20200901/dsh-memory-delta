@@ -310,6 +310,9 @@ const toolAgent = fakeAgent(cwdOfProject, 'session-tool');
     { agent: toolAgent },
   );
   check('memory_write 返回 id 与 inbox 状态', !!result.id && result.status === 'inbox', JSON.stringify(result));
+  // 给了 key 就用 key 当 id/文件名 —— 否则中文结论会被截成
+  // `2026-09-20-模型只能写收件箱-防止错误结论被反复注入.md` 这种长名（库里真实发生过）
+  check('带 key 写入时文件名就是 key（不再生成截断长名）', result.id === 'inbox-only' && fs.existsSync(path.join(L.inbox, 'inbox-only.md')), result.id);
 
   const inboxCount = fs.readdirSync(L.inbox).filter((f) => f.endsWith('.md')).length;
   check('memory_write 真的写进了 inbox', inboxCount === 1, String(inboxCount));

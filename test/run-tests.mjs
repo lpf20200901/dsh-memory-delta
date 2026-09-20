@@ -471,7 +471,38 @@ section('注入载荷：每条带 date 与 verifyWhen（只增不改）');
   check('file 指向真实存在的文件', payload.entries.every((e) => fs.existsSync(e.file)), flat(JSON.stringify(payload.entries.map((e) => e.file))));
 }
 
-/* --------------------------------------------- M6：mem rename（安全改名） */
+/* ------------------------------- M6：给了 key 就用 key 当文件名（治乱名的根） */
+
+section('M6：key 直接当文件名（新条目不再生成截断长名）');
+{
+  const root = freshRoot('keyname');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+
+  // 只给 key、不给 id → 文件名就是 key（旧行为是「日期 + 截断的结论」）
+  const r = run(['new', '--root', root, '--type', 'fact', '--key', 'sandbox-no-pipe', '--conclusion', '沙箱禁止命名管道：捕获子进程输出会 EPERM', '--source', 's']);
+  check('new 成功', r.code === 0, flat(r.out + r.err));
+  check('文件名 = key（不再是日期 + 截断结论）', md(path.join(root, 'inbox')).join(',') === 'sandbox-no-pipe.md', md(path.join(root, 'inbox')).join(','));
+  const shown = run(['show', '--root', root, 'sandbox-no-pipe']);
+  check('key 同时成了 id（能按它查到）', shown.code === 0 && /sandbox-no-pipe/.test(shown.out), flat(shown.out));
+
+  // 显示给了 id 时以 id 为准
+  run(['new', '--root', root, '--type', 'fact', '--id', 'explicit-id', '--key', 'another-key', '--conclusion', '显式 id 优先', '--source', 's']);
+  check('同时给 id 和 key 时用 id', fs.existsSync(path.join(root, 'inbox', 'explicit-id.md')), md(path.join(root, 'inbox')).join(','));
+
+  // key 被占用 → 退回派生 id，不报错（同一个 key 出现在别的 scope 是合法的）
+  const dup = run(['new', '--root', root, '--type', 'fact', '--key', 'sandbox-no-pipe', '--conclusion', '另一个 scope 的同名 key', '--scope', 'workspace:y', '--source', 's']);
+  check('key 撞车时退回派生 id（不报错）', dup.code === 0, flat(dup.out + dup.err));
+  const names = md(path.join(root, 'inbox'));
+  check('退回派生 id = 日期前缀', names.some((n) => /^\d{4}-\d{2}-\d{2}-/.test(n)), names.join(','));
+  check('没有覆盖已有的同名文件', names.includes('sandbox-no-pipe.md'), names.join(','));
+
+  // 提升之后文件名跟着走（提升不改名，仍以 id 为准）
+  run(['promote', '--root', root, 'sandbox-no-pipe']);
+  check('提升后落到 facts/<key>.md', fs.existsSync(path.join(root, 'facts', 'sandbox-no-pipe.md')), md(path.join(root, 'facts')).join(','));
+  const v = run(['validate', '--root', root]);
+  check('validate 通过', v.code === 0, flat(v.out));
+}
+
 
 section('M6：mem rename —— id / 文件名 / 引用一起改');
 {

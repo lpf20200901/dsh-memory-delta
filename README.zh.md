@@ -138,6 +138,8 @@ mem init --root ./memory --scope "workspace:/path/to/project"
 mem new --type fact --id win-update-cache --key disk-cleanup \
         --conclusion "清更新缓存实测收益为零" \
         --reason "目录删空但可用空间未变" --tags windows,disk --source session-abc
+# 只给 --key 不给 --id 时，**key 就是 id（也就是文件名）**：sandbox-no-pipe.md
+# 不给 key 才退回「日期 + 截断的结论」派生 id（中文结论会被截在词中间，尽量给 key）
 
 # 确认后提升到事实层；同 key 已有 active 时必须显式说明谁取代谁
 mem promote win-update-cache
@@ -178,17 +180,17 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 652 个断言，零依赖
+npm test        # 662 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 128 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步） |
+| `test/run-tests.mjs` | 137 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名） |
 | `test/planner-tests.mjs` | 43 | 差分算法（纯逻辑） |
 | `test/search-tests.mjs` | 51 | 分词 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 177 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
+| `test/plugin-tests.mjs` | 178 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename 真的写库 + 白名单/来源校验） |
 | `test/client-tests.mjs` | 97 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、点条目调 openFile、点目录调 reveal、提升/整理文件名、失败态） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
