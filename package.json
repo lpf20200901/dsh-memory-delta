@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-delta",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Layered, auto-injected cross-session memory for AI coding agents: a DSH plugin plus a standalone zero-dependency CLI. Borrows the spec/change/archive discipline from OpenSpec (MIT), but pushes instead of pulls.",
   "repository": {
     "type": "git",
