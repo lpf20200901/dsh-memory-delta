@@ -19,6 +19,7 @@ import { createEntry, ensureLayout, injectPayload, loadConfig, searchLibrary } f
 import { createMemoryHook } from './hook.mjs';
 import { memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute } from './panel.mjs';
 import { MEMORY_SOURCE_KIND } from './planner.mjs';
+import { SKILL_CONTENT, SKILL_DESCRIPTION, SKILL_NAME, SKILL_SOURCE, SKILL_WHEN_TO_USE } from './skill.mjs';
 
 export const name = 'memory';
 export const inject = ['tools'];
@@ -39,6 +40,11 @@ export const Config = z.object({
    * 默认开；关掉后按钮会显示"配置里关掉了"，而不是静默失效。
    */
   allowWrite: z.boolean().default(true),
+  /**
+   * 注册**插件自带的技能**（装了插件就能 `/dsh-memory-delta` 调出用法与边界说明）。
+   * 默认开；不想要技能目录里多一行（约 20~40 tokens/会话）就关掉。
+   */
+  skill: z.boolean().default(true),
 });
 
 /** 把 (config, cwd) 解析成一次可用的记忆库句柄。 */
@@ -290,6 +296,41 @@ export function apply(ctx, config = {}) {
       const webServer = ctx.get?.('webServer');
       if (webServer) registerPanelRoute(webServer, ctx);
       else ctx.logger?.debug?.('memory: 没有 ctx.inject，且当前拿不到 webServer，跳过面板路由');
+    }
+  }
+
+  /* ------------------------------------------- 自带技能：装了插件就有用法说明 */
+
+  // 为什么是"运行时注册"而不是随包发一个 SKILL.md：DSH 的技能发现根是
+  // `<工作区>/.dsh/skills`、`$DSH_HOME/skills` 这类**目录**，**package 里的文件扫不到** ——
+  // 发文件等于没发。`skills.register()` 把技能绑在 ctx 生命周期上（内部 effect），
+  // 插件卸载/重载即注销，也不会在用户目录里留文件。
+  //
+  // service 名是 **`skills`**（复数，见 @deepseek-ai/dsh-tool-skill 的 `inject`）——
+  // 写成 `skill` 的话回调永远不触发，而且**静默**（和 webServer 一样的坑）。
+  const registerSkill = (skills) => {
+    if (typeof skills?.register !== 'function') return;
+    try {
+      skills.register({
+        name: SKILL_NAME,
+        description: SKILL_DESCRIPTION,
+        whenToUse: SKILL_WHEN_TO_USE,
+        // ⚠️ source 必填：register() 只补 provider，"目录里看得见但加载时报错"就是漏了它
+        source: SKILL_SOURCE,
+        content: SKILL_CONTENT,
+      });
+    } catch (error) {
+      // 宿主进程：绝不能让注册失败把插件 apply 打断
+      ctx.logger?.warn?.('memory: 注册自带技能失败（不影响记忆功能）%o', error);
+    }
+  };
+
+  if (config.skill !== false) {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['skills'], (forkCtx) => registerSkill(forkCtx.skills));
+    } else {
+      // 极简 / 老版本 ctx（测试替身走这条）
+      registerSkill(ctx.get?.('skills'));
     }
   }
 

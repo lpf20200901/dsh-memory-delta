@@ -572,3 +572,24 @@ DSH 注入的还有 `<工作区>/AGENTS.md` 与 `AGENTS.local.md`（项目层）
 "`key` 优先、没 key 才用 id"的稳定标识 —— 收益只有"改名那一轮安静一点"，
 所以记在这里，暂不改。
 
+**⑧ 为什么把"用法说明"做成插件自带的技能（v1.2.0）。** 装了插件之后，"模型能做什么、不能做什么"
+（只能写 inbox；提升 / 归档是人做的事）过去只写在工具描述与 README 里：工具描述长度有限、README 没人读。
+于是插件在 `apply` 时用 `ctx.skills.register()` 注册一个名为 `dsh-memory-delta` 的技能。
+
+- **为什么不随包发一个 `SKILL.md`**：DSH 的技能发现根是 `<工作区>/.dsh/skills`、`$DSH_HOME/skills`
+  这类**目录** —— **package 里的文件扫不到**，发文件等于没发。运行时注册还顺带解决"卸载残留"：
+  注册绑在 ctx 生命周期上（内部走 cordis effect），插件卸载 / 重载即注销，不往用户目录写任何文件。
+- **服务名是 `skills`（复数）**：写成 `skill` 会**静默**永不触发（照抄 `@deepseek-ai/dsh-tool-skill`
+  的 `inject` 才发现）。所以仍走 `ctx.inject(['skills'], cb)` 等服务就绪 —— 与 `webServer` 同一个坑、同一个解法。
+- **`source` 必须自己给**：`register()` 只自动补 `provider: "runtime"`。漏 `source` 的后果很隐蔽 ——
+  **技能目录里看得见**（摘要只校验 `name` / `description`），**真去加载时**才报
+  `loaded skill "…" source must be a string`。实测路径正是"重启 → 目录里出现 → `/dsh-memory-delta` 一调就报错"。
+  教训：**"摘要路径"与"加载路径"校验的字段不一样** —— 所以测试要**镜像加载器的必填项**
+  （`validateDefinition`：`name` / `description` / `source` / `provider` / `content`），
+  而不是只断言"注册被调用过"。`provider` 由服务补，其余都得自己给。
+- **成本**：技能目录里多一行（≈20~40 tokens/会话），正文只在被调用时才进上下文；不想要就配 `skill: false`。
+- **技能 vs 记忆体的边界**（用户专门问过）：技能是 DSH 自带的机制（`dsh-skill` / `dsh-skill-filesystem` /
+  `dsh-client-ui-skill`），与本插件无程序耦合，唯一接触点是"技能正文里**提到**记忆库的用法"。
+  反过来，**技能正文不参与记忆库的检索**（`collectDocs` 只索引条目 + `journal.md` + `sessions.md`）——
+  想让内容能被 `memory_search` 搜到，它必须进记忆库（条目或 journal）。
+

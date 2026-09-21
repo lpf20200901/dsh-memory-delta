@@ -13,6 +13,8 @@
  * 退出码 0 = 预检通过；非 0 = 有问题，**此时不要把它加进 profile**。
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const results = [];
@@ -26,6 +28,41 @@ function check(name, ok, detail = '') {
 // （C:\Users\李鹏飞 → C:\Users\%E6%9D%8E%E9%B9%8F%E9%A3%9E），路径就废了。
 const here = fileURLToPath(new URL('.', import.meta.url));
 const storeRoot = process.env.MEM_PREFLIGHT_ROOT || `${here}.preflight-store/memory`;
+
+/**
+ * 清掉本次预检写下的沙箱。
+ *
+ * ⚠️ 不能用 fs.rmSync：路径里有非 ASCII（用户名 C:\Users\李鹏飞\…）时它会**静默失败**
+ * （甚至崩进程），这是本项目踩过的坑。逐项 unlinkSync / rmdirSync 才可靠。
+ * 默认保留现场只有一种例外：跑之前设 MEM_PREFLIGHT_KEEP=1（排查失败原因时用）。
+ */
+function removeStore(root, errors = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return errors; // 不存在就算了
+  }
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      removeStore(full, errors); // 先清子目录
+    } else {
+      try {
+        fs.unlinkSync(full);
+      } catch (error) {
+        errors.push(`${full}: ${error?.code ?? error?.message}`);
+      }
+    }
+  }
+  // ⚠️ 必须**后序**删除：先 rmdir 父目录会 ENOTEMPTY（第一版就是这么错的，实测踩到）
+  try {
+    fs.rmdirSync(root);
+  } catch (error) {
+    errors.push(`${root}: ${error?.code ?? error?.message}`);
+  }
+  return errors;
+}
 
 try {
   const mod = await import(new URL('../src/plugin.mjs', import.meta.url).href);
@@ -108,4 +145,13 @@ for (const [ok, name, detail] of results) {
   console.log(`${ok ? '  ok  ' : '  FAIL'} ${name}${detail && !ok ? ` — ${detail}` : ''}`);
 }
 console.log(`\n${results.length - failed} 通过 / ${failed} 失败`);
+
+// 自己收拾现场：以前跑完不清理，会把沙箱留在安装副本里（profile 的 node_modules 越攒越脏）
+if (process.env.MEM_PREFLIGHT_KEEP === '1') {
+  console.log(`（MEM_PREFLIGHT_KEEP=1：保留现场 ${storeRoot}）`);
+} else {
+  const cleanupErrors = removeStore(process.env.MEM_PREFLIGHT_ROOT || `${here}.preflight-store`);
+  console.log(cleanupErrors.length ? `⚠️ 清理沙箱时有 ${cleanupErrors.length} 项失败：${cleanupErrors.join('; ')}` : '已清理预检沙箱');
+}
+
 process.exit(failed ? 1 : 0);

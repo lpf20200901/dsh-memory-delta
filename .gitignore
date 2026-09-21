@@ -18,3 +18,6 @@ node_modules/
 # 打包产物与临时缓存（npm pack 时用 --cache 指进仓库，免得写到工作区外的 npm-cache）
 *.tgz
 .npm-cache/
+
+# 临时文件（提交信息 / 调试产物）
+*.tmp

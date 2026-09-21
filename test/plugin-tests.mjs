@@ -122,19 +122,34 @@ function fakeCtxWithWebServer({ late = true } = {}) {
       return () => {};
     },
   };
+  // 技能服务（service 名是复数 `skills`，见 @deepseek-ai/dsh-tool-skill 的 inject）
+  const registeredSkills = [];
+  ctx.registeredSkills = registeredSkills;
+  const skills = {
+    register(skill) {
+      registeredSkills.push(skill);
+      return () => {};
+    },
+  };
   ctx.effect = (fn, label) => {
     effects.push(label);
     return fn();
   };
-  ctx.get = (name) => (name === 'webServer' ? server : undefined);
+  ctx.get = (name) => (name === 'webServer' ? server : name === 'skills' ? skills : undefined);
   ctx.inject = (deps, callback) => {
     const names = Array.isArray(deps) ? deps : Object.keys(deps);
     const run = () => {
       const fork = fakeCtx();
       fork.effect = ctx.effect;
-      Object.assign(fork, { webServer: server });
+      Object.assign(fork, { webServer: server, skills });
       callback(fork);
     };
+    // 只对 webServer 模拟"晚于 apply 才就绪"（那正是真机上踩到的 405 bug）；
+    // 技能服务立刻给，避免每条用例都要手动 flush
+    if (names.includes('skills')) {
+      run();
+      return { dispose() {} };
+    }
     if (names.includes('webServer')) {
       if (late) {
         pending.push(run);
@@ -234,7 +249,7 @@ section('插件契约（导出形状）');
 {
   check('name 是 memory', name === 'memory', name);
   check('inject 声明了 tools 服务', Array.isArray(injectServices) && injectServices.includes('tools'), JSON.stringify(injectServices));
-  check('Config 声明了 root/maxBytes/enabled/dueWithin', ['root', 'maxBytes', 'enabled', 'dueWithin'].every((k) => !!Config[k]), Object.keys(Config).join(','));
+  check('Config 声明了 root/maxBytes/enabled/dueWithin/skill', ['root', 'maxBytes', 'enabled', 'dueWithin', 'skill'].every((k) => !!Config[k]), Object.keys(Config).join(','));
 }
 
 /* ------------------------------------------------------------------ 接线 */
@@ -250,6 +265,76 @@ check('注册了 2 个工具', ctx.registered.length === 2, ctx.registered.map((
 check('工具名正确', ctx.registered.map((t) => t.name).sort().join(",") === 'memory_search,memory_write', ctx.registered.map((t) => t.name).join(","));
 for (const tool of ctx.registered) {
   check(`${tool.name} 有 description/parameters/execute/output`, !!tool.description && !!tool.parameters && typeof tool.execute === 'function' && !!tool.output);
+}
+
+/* ------------------------------------------------- 自带技能（运行时注册） */
+
+section('自带技能：apply 时注册到 `skills` 服务');
+{
+  const skillCtx = fakeCtxWithWebServer();
+  apply(skillCtx, { root: ROOT, maxBytes: 3072, enabled: true });
+  check('注册了 1 个技能', skillCtx.registeredSkills.length === 1, String(skillCtx.registeredSkills.length));
+  const skill = skillCtx.registeredSkills[0] ?? {};
+  check('技能名符合 DSH 语法 ^[a-z0-9]+(?:-[a-z0-9]+)*$', /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.name ?? ''), String(skill.name));
+  check('技能名就是插件名 dsh-memory-delta', skill.name === 'dsh-memory-delta', String(skill.name));
+  check(
+    '技能有 description / whenToUse / content',
+    !!skill.description && !!skill.whenToUse && typeof skill.content === 'string' && skill.content.length > 500,
+    `${String(skill.content ?? '').length} 字符`,
+  );
+  check(
+    '技能正文讲清了权限边界（只写收件箱）',
+    typeof skill.content === 'string' && skill.content.includes('memory_write') && skill.content.includes('收件箱'),
+  );
+  check('技能描述不超过目录显示上限 500 字符', String(skill.description ?? '').length <= 500, String(String(skill.description ?? '').length));
+
+  // ⚠️ **目录摘要**只校验 name/description；**加载路径**（validateDefinition）还要 source / content
+  // 都是字符串。少给 source 的后果真机上出现过：目录里看得见，一调用就报
+  // `loaded skill "…" source must be a string`。这里把那契约镜像成断言，别再溜过去。
+  const loaderProblems = [
+    typeof skill.name !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.name) ? 'name' : null,
+    typeof skill.description !== 'string' || skill.description.length === 0 ? 'description' : null,
+    typeof skill.source !== 'string' || skill.source.length === 0 ? 'source' : null,
+    typeof skill.content !== 'string' ? 'content' : null,
+    skill.whenToUse !== undefined && typeof skill.whenToUse !== 'string' ? 'whenToUse' : null,
+  ].filter(Boolean);
+  check(
+    '镜像加载器 validateDefinition 的必填项（缺一个就是"看得见、加载报错"）',
+    loaderProblems.length === 0,
+    loaderProblems.join(','),
+  );
+
+  // 用户不想让技能目录多一行时可以关掉
+  const offCtx = fakeCtxWithWebServer();
+  apply(offCtx, { root: ROOT, maxBytes: 3072, enabled: true, skill: false });
+  check('skill=false 时不注册技能', offCtx.registeredSkills.length === 0, String(offCtx.registeredSkills.length));
+
+  // 服务晚到：不能靠 apply 那一刻的 ctx.get 一眼定生死（webServer 那次就是这么栽的）
+  const lateCtx = fakeCtxWithWebServer();
+  lateCtx.inject = () => ({ dispose() {} });
+  apply(lateCtx, { root: ROOT, maxBytes: 3072, enabled: true });
+  check('skills 服务未就绪时：不抛异常、也不假装注册', lateCtx.registeredSkills.length === 0);
+
+  // 注册抛异常不能把插件 apply 打断（它跑在宿主进程里）
+  const boomCtx = fakeCtxWithWebServer();
+  boomCtx.inject = (deps, callback) => {
+    callback({
+      skills: {
+        register() {
+          throw new Error('boom');
+        },
+      },
+    });
+    return { dispose() {} };
+  };
+  let threw = null;
+  try {
+    apply(boomCtx, { root: ROOT, maxBytes: 3072, enabled: true });
+  } catch (error) {
+    threw = error;
+  }
+  check('技能注册失败不打断 apply', threw === null, String(threw?.message));
+  check('技能注册失败写了 warn', boomCtx.warnings.some((w) => String(w).includes('注册自带技能失败')), JSON.stringify(boomCtx.warnings));
 }
 
 /* ------------------------------------------------- 差分注入：端到端三轮 */
