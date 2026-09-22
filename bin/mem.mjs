@@ -795,18 +795,39 @@ export function archiveEntry(L, id, opts = {}) {
  * 只是换层并清掉 `superseded_by`（它已经不是"被取代"的状态了）。
  * 放回**候选层**而不是直接回常驻：取回之后还要人再确认一次，才不会绕过"人确认"这道闸。
  *
- * @returns {{id: string, from: 'archive', to: 'inbox'}}
+ * ⚠️ 取回是**取代的反向操作**，所以必须**双向**清干净：除了把自己的 `superseded_by` 置空，
+ * 还要把这条从**对方**的 `supersedes` 里去掉。
+ * 真机上踩到（2026-09-22，用户库里真实出现）：只置空自己那一半，对方那条的 `supersedes`
+ * 就一直挂着它 → `validate` 报「supersedes X，但对方的 superseded_by=null（应双向一致）」，
+ * 而且**没有任何命令能修好这个悬挂引用**（promote/supersede/archive/restore 都不碰它）。
+ * 这和 `renameEntry` 同步引用是同一类纪律：**改关系就要两边一起改**。
+ *
+ * @returns {{id: string, from: 'archive', to: 'inbox', wasSupersededBy: string|null, refs: string[]}}
+ *   `refs` = 被顺带清掉引用的条目 id（它们不再声称取代这一条）
  */
 export function restoreEntry(L, id) {
   const e = requireOneOrThrow(L, id);
   if (e.where !== 'archive') throw new Error(`只有归档里的条目需要取回（这条在 ${e.where}/）`);
   const dest = path.join(L.inbox, `${e.id}.md`);
   if (fs.existsSync(dest)) throw new Error(`inbox/ 里已经有同名文件：${dest}`);
+  const wasSupersededBy = e.data.superseded_by ?? null;
   e.data.status = 'active';
   e.data.superseded_by = null;
   moveEntry(e.file, dest, serializeEntry(e));
+
+  // 反向清理悬挂引用（见上面的注释）
+  const refs = [];
+  for (const other of readAll(L)) {
+    if (other.error || other.id === e.id) continue;
+    if (Array.isArray(other.data.supersedes) && other.data.supersedes.includes(e.id)) {
+      other.data.supersedes = other.data.supersedes.filter((x) => x !== e.id);
+      fs.writeFileSync(other.file, serializeEntry(other), 'utf8');
+      refs.push(other.id);
+    }
+  }
+
   writeIndex(L);
-  return { id: e.id, from: 'archive', to: 'inbox' };
+  return { id: e.id, from: 'archive', to: 'inbox', wasSupersededBy, refs };
 }
 
 function cmdPromote(opts) {
@@ -869,6 +890,7 @@ function cmdRestore(opts) {
     fail(error.message);
   }
   ok(`已取回 ${c(1, result.id)}：archive/ → inbox/（status 复位为 active，等你再确认）`);
+  if (result.refs && result.refs.length) ok(`并清掉了悬挂引用：${result.refs.map((r) => `${r}.supersedes`).join(', ')}（它们不再声称取代这一条）`);
   console.log(dim('  想让它重新生效：mem promote ' + result.id));
 }
 

@@ -686,6 +686,28 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 }
 
+section('取回会清掉对方的悬挂引用（取代的**反向**操作必须双向）');
+{
+  // 真机踩到（2026-09-22，用户库里真实出现）：只置空自己的 superseded_by，
+  // 对方那条的 supersedes 一直挂着 → validate 报「supersedes X，但对方的 superseded_by=null」，
+  // 且没有任何命令能修好它。
+  const root = freshRoot('restore-refs');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  run(['new', '--root', root, '--type', 'fact', '--key', 'old-one', '--conclusion', '老结论', '--source', 's']);
+  run(['new', '--root', root, '--type', 'fact', '--key', 'new-one', '--conclusion', '新结论顶上', '--source', 's']);
+  run(['promote', '--root', root, 'old-one']);
+  run(['promote', '--root', root, 'new-one', '--supersedes', 'old-one']);
+  check('取代之后 validate 通过（两边一致）', run(['validate', '--root', root]).code === 0, flat(run(['validate', '--root', root]).out));
+  check('老条目被归档且标 superseded', /^status:\s*superseded$/m.test(fs.readFileSync(path.join(root, 'archive', 'old-one.md'), 'utf8')), 'status');
+
+  const re = run(['restore', '--root', root, 'old-one']);
+  check('restore 成功', re.code === 0, flat(re.out + re.err));
+  check('restore 报出清掉了哪些悬挂引用', /悬挂引用/.test(re.out) && /new-one\.supersedes/.test(re.out), flat(re.out));
+  const newRaw = fs.readFileSync(path.join(root, 'facts', 'new-one.md'), 'utf8');
+  check('对方 supersedes 里不再有它', /^supersedes: \[\]$/m.test(newRaw), newRaw.split(/\r?\n/).slice(0, 10).join(' | '));
+  check('取回之后 validate 通过（不再报双向不一致）', run(['validate', '--root', root]).code === 0, flat(run(['validate', '--root', root]).out + run(['validate', '--root', root]).err));
+}
+
 /* ------------------------------------------------------------------ 主题（topic） */
 
 section('M13：主题 topic（面板按它归纳条目）');

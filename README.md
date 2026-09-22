@@ -223,12 +223,12 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 909 assertions, zero dependencies
+npm test        # 915 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 200 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, and the `topic` lifecycle) |
+| `test/run-tests.mjs` | 206 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, and reference cleanup on `restore`) |
 | `test/planner-tests.mjs` | 43 | the diff algorithm (pure logic) |
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
@@ -268,8 +268,7 @@ Regression tests baked in from real bugs:
   sides — a structural contract check in `test/plugin-tests.mjs` (`undeclaredKeys`) and the real
   `validateJsonSchemaValue` in `test/preflight-import.mjs`. **Rule: when `searchLibrary` gains a
   field, the tool's `output.schema` must gain it too** — the tests now fail loudly if it does not.
-- **The declaration is not what the model reads: `render` is.** Fixing the schema above only stopped
-  the call from erroring — the tool still handed the model a single line, `Matched N memory entries.`,
+- **The declaration is not what the model reads: `render` is.** Fixing the schema above only stopped  the call from erroring — the tool still handed the model a single line, `Matched N memory entries.`,
   because DSH puts `result.content` into the `tool/result` message
   (`dsh-agent-loop/lib/index.js:307`) and the provider sends `flattenText(result.content)`
   (`dsh-llm-deepseek/lib/index.js:158`). **The structured `value` never reaches the model**, so a
@@ -277,6 +276,12 @@ Regression tests baked in from real bugs:
   every hit (layer, id, key, date, score, snippet, file path), says when `limit` cut the list short,
   and the default `limit` dropped to 10 since each rendered hit costs ~300 bytes. Pinned by
   "render really carries the hits" assertions in both `test/plugin-tests.mjs` and the preflight.
+- **`restore` used to leave a dangling reference behind.** Retrieving an archived entry nulls its own
+  `superseded_by` (correct — it is no longer superseded), but the *other* side's `supersedes` kept
+  listing it, so `mem validate` reported `supersedes X, but X's superseded_by=null (must be
+  bidirectional)` **and no command could fix it** (found in a real store: 6 of 7 links consistent, the
+  7th restored once and therefore broken forever). `restore` is the inverse of `supersede`, so it now
+  cleans the counterpart too — the same discipline `mem rename` already follows for references.
 
 ## Roadmap
 
