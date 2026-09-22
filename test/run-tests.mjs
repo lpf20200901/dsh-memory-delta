@@ -686,6 +686,72 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 }
 
+/* ------------------------------------------------------------------ 主题（topic） */
+
+section('M13：主题 topic（面板按它归纳条目）');
+{
+  const root = path.join(SANDBOX, 'topic', 'memory');
+  run(['init', '--root', root]);
+
+  // ① new --topic 落进 frontmatter；不写 topic 的条目照常可用（旧库不受影响）
+  run(['new', '--root', root, '--type', 'fact', '--id', 'tp-a', '--key', 'tp-a', '--conclusion', '沙箱禁止命名管道', '--topic', '环境与沙箱']);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'tp-b', '--key', 'tp-b', '--conclusion', '另一个坑', '--topic', '环境与沙箱']);
+  run(['new', '--root', root, '--type', 'decision', '--id', 'tp-c', '--conclusion', '没归类的一条']);
+  const raw = fs.readFileSync(path.join(root, 'inbox', 'tp-a.md'), 'utf8');
+  check('new --topic 写进 frontmatter', /^topic: 环境与沙箱$/m.test(raw), raw.split('\n').slice(0, 8).join('|'));
+  check('topic 排在 key 之后、tags 之前（frontmatter 顺序稳定）', raw.indexOf('key: tp-a') < raw.indexOf('topic:') && raw.indexOf('topic:') < raw.indexOf('tags:'), raw.split('\n').slice(1, 8).join('|'));
+
+  // ② topics 命令：列主题 + 条数 + 未归类条数
+  let r = run(['topics', '--root', root]);
+  check('mem topics 列出主题与条数', /2 条\s+环境与沙箱/.test(r.out), flat(r.out));
+  check('mem topics 报出未归类条数', /未归类 1 条/.test(r.out), flat(r.out));
+  const jt = JSON.parse(run(['topics', '--root', root, '--json']).out);
+  check('topics --json 是合法结构化结果', jt.total === 3 && jt.untopic === 1 && jt.topics[0].topic === '环境与沙箱' && jt.topics[0].count === 2, flat(JSON.stringify(jt)));
+
+  // ③ list 过滤 + 列表里显示主题
+  r = run(['list', '--root', root, '--topic', '环境与沙箱']);
+  check('list --topic 只列该主题', /tp-a/.test(r.out) && /tp-b/.test(r.out) && !/tp-c/.test(r.out), flat(r.out));
+  r = run(['list', '--root', root, '--untopic']);
+  check('list --untopic 只列没归类的', /tp-c/.test(r.out) && !/tp-a/.test(r.out), flat(r.out));
+  r = run(['list', '--root', root]);
+  check('列表行里显示主题，没写主题的标「未归类」', /环境与沙箱/.test(r.out) && /未归类/.test(r.out), flat(r.out));
+
+  // ④ set --topic / 清除
+  r = run(['set', '--root', root, 'tp-c', '--topic', '发布流程']);
+  check('set --topic 归类成功', r.code === 0 && /topic/.test(r.out), flat(r.out));
+  check('归类后 topics 里多一个', /发布流程/.test(run(['topics', '--root', root]).out));
+  r = run(['set', '--root', root, 'tp-c', '--topic', '']);
+  check('--topic "" 清除主题', r.code === 0 && /未归类 1 条/.test(run(['topics', '--root', root]).out), flat(r.out));
+
+  // ⑤ 太长 / 空白归一化
+  r = run(['set', '--root', root, 'tp-c', '--topic', 'x'.repeat(41)]);
+  check('过长的主题被拒（而不是静默截断）', r.code !== 0 && /太长/.test(r.out + r.err), flat(r.out + r.err));
+  run(['set', '--root', root, 'tp-c', '--topic', '  发布   流程  ']);
+  check('主题里的连续空白归一化成一个空格', /^topic: 发布 流程$/m.test(fs.readFileSync(path.join(root, 'inbox', 'tp-c.md'), 'utf8')), 'frontmatter');
+
+  // ⑥ 没归类的条目只是**告警**，不该卡 validate（归纳是人的活）
+  run(['set', '--root', root, 'tp-b', '--topic', '']); // 清掉一条，制造"未归类"
+  const v = run(['validate', '--root', root]);
+  check('validate 对没归类的条目给告警', /1 条条目没有 topic/.test(v.out), flat(v.out));
+  check('没归类不影响 validate 退出码', v.code === 0, `code=${v.code}`);
+
+  // ⑦ topic 不参与注入正文，也不影响差分 hash（它是给人看的分组标签）
+  const before = JSON.parse(run(['inject', '--root', root, '--json']).out);
+  run(['promote', '--root', root, 'tp-a']);
+  const afterPromote = JSON.parse(run(['inject', '--root', root, '--json']).out);
+  check('topic 不出现在注入正文里', !afterPromote.text.includes('环境与沙箱'), flat(afterPromote.text).slice(0, 120));
+  const hashBefore = afterPromote.entries.find((e) => e.id === 'tp-a').hash;
+  run(['set', '--root', root, 'tp-a', '--topic', '换个主题']);
+  const hashAfter = JSON.parse(run(['inject', '--root', root, '--json']).out).entries.find((e) => e.id === 'tp-a').hash;
+  check('改主题不改变注入 hash（不会触发一次无意义的差分注入）', hashBefore === hashAfter, `${hashBefore} vs ${hashAfter}`);
+  check('改主题之后仍参与注入', JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'tp-a'));
+  check('before 用于对照（注入条数不为零）', before !== null);
+
+  // ⑧ index.md 里也带上主题（派生视图要能看出归纳结果）
+  run(['index', '--root', root]);
+  check('index.md 带上主题', /「换个主题」/.test(fs.readFileSync(path.join(root, 'index.md'), 'utf8')), 'index');
+}
+
 /* ------------------------------------------------------------- 汇总 */
 rmrf(SANDBOX);
 console.log(`\n${pass} 通过 / ${fail} 失败`);

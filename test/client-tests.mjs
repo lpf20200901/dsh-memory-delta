@@ -116,6 +116,33 @@ function findAllByClass(node, className, out = []) {
   return out;
 }
 
+/** 按 props 上的任意键找第一个节点（`section()` 把分组 key 放在 props.key 上，断言分组要用它）。 */
+function findByProp(node, prop, value) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const n of node) {
+      const hit = findByProp(n, prop, value);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (node.props && node.props[prop] === value) return node;
+  return findByProp(node.kids ?? node.children, prop, value);
+}
+
+/**
+ * 切换归纳维度（主题 / 类型 / 标签 / 日期）。
+ *
+ * ⚠️ 维度是**三个阶段共用**的，默认是「主题」—— 所以任何断言"类型视图长什么样"的用例
+ * 都得先切过去，否则会在主题视图上断言类型分组（改默认维度时真踩到：测试直接崩在一句 undefined 上）。
+ */
+function selectDimension(mounted, label) {
+  const seg = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
+  const btn = seg && seg.kids.find((n) => allText(n).trim() === label);
+  if (!btn) throw new Error(`找不到维度按钮：${label}`);
+  btn.props.onClick({});
+}
+
 const CLIENT_SOURCE = fs.readFileSync(CLIENT_FILE, 'utf8');
 
 /** 在假 window 里执行 client.js，拿回它注册的 factory 与调用记录。 */
@@ -328,6 +355,7 @@ const SAMPLE = {
       type: 'fact',
       key: 'old-key',
       status: 'active',
+      topic: '环境与沙箱',
       tags: ['node'],
       date: '2026-09-01',
       file: 'D:\\proj\\memory\\facts\\fact-old.md',
@@ -338,12 +366,14 @@ const SAMPLE = {
       type: 'fact',
       key: 'node-rm-nonascii',
       status: 'active',
+      topic: '环境与沙箱',
       tags: ['node', 'sandbox'],
       date: '2026-09-17',
       file: 'D:\\proj\\memory\\facts\\node-rm-nonascii.md',
       line: '路径含非 ASCII 时不要用 rmSync',
     },
     {
+      // 故意**不写 topic**：面板里要落到「未归类」组，且它得排在命名组后面
       id: 'dec-b',
       type: 'decision',
       status: 'active',
@@ -400,6 +430,21 @@ section('组件：正常数据');
   );
 
   await flush();
+
+  // 默认维度是「主题」（人指定的归纳）—— 先验它，再切到「类型」验下面那一批类型视图的断言
+  const segHead = allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]);
+  check('头部有四个维度按钮（主题在前）', ['主题', '类型', '标签', '日期'].every((t) => segHead.includes(t)), segHead);
+  {
+    const first = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0].kids[0];
+    check('默认选中「主题」', String(first.props.className).includes('is-on') && allText(first).trim() === '主题', `${allText(first)} / ${first.props.className}`);
+  }
+  {
+    const topicHeaders = headerTexts(mounted.tree()).join(' | ');
+    check('主题视图：同主题的条目归到一组', topicHeaders.includes('环境与沙箱'), topicHeaders);
+    check('主题视图：没归类的单独一组，且排在命名组之后', topicHeaders.includes('未归类') && topicHeaders.indexOf('环境与沙箱') < topicHeaders.indexOf('未归类'), topicHeaders);
+  }
+  selectDimension(mounted, '类型');
+
   const text = allText(mounted.tree());
   check('显示记忆库 root', text.includes('D:\\proj\\memory'), text.slice(0, 200));
   // 条数只在流程条里报一次（状态行不再重复"常驻 N 条"）
@@ -485,6 +530,7 @@ section('组件：折叠 / 展开');
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
+  selectDimension(mounted, '类型'); // 下面断言的是「事实」分组头 —— 先切到类型视图
 
   const factsToggle = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) =>
     collectStrings(n.kids, []).join('').includes('事实'),
@@ -703,7 +749,7 @@ section('组件：搜索');
   check('搜索请求带上 workspace（宿主据此定位记忆库）', searchCalls[0]?.workspace === 'D:\\proj', JSON.stringify(searchCalls[0]));
 
   const text = allText(mounted.tree());
-  check('搜索时只显示结果（分组视图让位，避免两套列表混在一起）', text.includes('搜索结果') && !headerTexts(mounted.tree()).some((hd) => hd.includes('（facts）')), text.slice(0, 200));
+  check('搜索时只显示结果（分组视图让位，避免两套列表混在一起）', text.includes('搜索结果') && !headerTexts(mounted.tree()).some((hd) => hd.includes('已在用')), text.slice(0, 200));
   check('分组头上显示命中条数', headerTexts(mounted.tree()).some((hd) => hd.includes('搜索结果') && hd.includes('2')), headerTexts(mounted.tree()).join(' | '));
   check('结果里标出命中所在的层（事实 / 流水）', text.includes('事实') && text.includes('流水'), text.slice(0, 300));
   check('结果里显示命中片段（不只是首行）', text.includes('要重定向到文件'), text.slice(0, 400));
@@ -737,7 +783,7 @@ section('组件：搜索');
   clearBtn.props.onClick({});
   await flush();
   const back = allText(mounted.tree());
-  check('清空后回到分组视图', !back.includes('搜索结果') && headerTexts(mounted.tree()).some((hd) => hd.includes('（facts）')), back.slice(0, 200));
+  check('清空后回到分组视图', !back.includes('搜索结果') && headerTexts(mounted.tree()).some((hd) => hd.includes('已在用')), back.slice(0, 200));
   check('清空后不再发搜索请求', searchCalls.length === before + 1, String(searchCalls.length));
 
   globalThis.fetch = originalFetch;
@@ -1040,8 +1086,8 @@ section('组件：类型 / 标签 / 日期 三个维度可切换');
 
   const seg = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
   const segBtn = (label) => seg.kids.find((n) => allText(n).trim() === label);
-  check('头部有三个维度按钮', ['类型', '标签', '日期'].every((t) => allText(seg).includes(t)), allText(seg));
-  check('默认是「类型」选中', String(segBtn('类型').props.className).includes('is-on'), String(segBtn('类型').props.className));
+  check('头部有四个维度按钮', ['主题', '类型', '标签', '日期'].every((t) => allText(seg).includes(t)), allText(seg));
+  check('默认是「主题」选中', String(segBtn('主题').props.className).includes('is-on'), String(segBtn('主题').props.className));
 
   segBtn('日期').props.onClick({});
   const headers = headerTexts(mounted.tree()).join(' | ');
@@ -1057,6 +1103,109 @@ section('组件：类型 / 标签 / 日期 三个维度可切换');
   segBtn('类型').props.onClick({});
   check('能切回类型视图', headerTexts(mounted.tree()).join(' | ').includes('（facts）'), headerTexts(mounted.tree()).join(' | '));
 
+  globalThis.fetch = originalFetch;
+}
+
+/* ------------------- 组件：主题归纳（默认维度）+ 行内「归类」+ 三阶段共用维度 */
+
+section('组件：按主题归纳与「归类」按钮');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, body });
+    // 动作路由的真实回执形状：`{ ok, op, id, topic }`（topic 为 null = 已清除）
+    const payload =
+      url === '/dsh-memory-delta/action'
+        ? { ok: true, op: body?.op, id: body?.id, topic: body?.topic ? body.topic : null }
+        : SAMPLE;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  // 默认主题视图：命名组在前、未归类在后；条目行上**不再重复**标主题（分组头已经说了）
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('默认按主题分组，命名组在前、未归类在后', headers.includes('环境与沙箱') && headers.includes('未归类') && headers.indexOf('环境与沙箱') < headers.indexOf('未归类'), headers);
+  check('未归类组给一句"怎么做"', headers.includes('归类'), headers);
+  check('主题视图里条目行不重复标主题', findAllByClass(mounted.tree(), 'is-topic').length === 0, String(findAllByClass(mounted.tree(), 'is-topic').length));
+
+  // 换成类型视图：条目行要自己标出主题（那时分组头是事实/决策，主题得看行）
+  selectDimension(mounted, '类型');
+  const chips = findAllByClass(mounted.tree(), 'is-topic');
+  check('类型视图里条目行标出主题', chips.length >= 1 && allText(chips[0]).includes('环境与沙箱'), chips.map((c) => allText(c)).join('|'));
+
+  // 「归类」：行内输入（已有主题做候选）→ 保存 → 发 op=topic
+  // ⚠️ 按**条目内容**定位那一行：面板上每个条目都有「归类」，抓到第一个会点错行
+  const targetRow = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').find((n) => allText(n).includes('记忆的事实层只能由人确认后写入'));
+  check('找到目标条目行（dec-b）', Boolean(targetRow), allText(targetRow ?? {}).slice(0, 120));
+  const topicBtn = findAllByClass(targetRow, 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '归类');
+  check('条目上有「归类」按钮', Boolean(topicBtn), findAllByClass(targetRow, 'dsh-memory-delta-mini').map((n) => allText(n)).join('|'));
+  topicBtn.props.onClick({ stopPropagation() {} });
+  const row = findByClass(mounted.tree(), 'dsh-memory-delta-topic');
+  const input = row && row.kids.find((k) => k.type === 'input');
+  check('点「归类」展开行内输入', Boolean(input), row ? collectStrings(row.kids, []).join('|') : 'no-row');
+  check('输入框带已有主题候选（datalist）', input?.props?.list === 'dsh-memory-delta-topic-options', String(input?.props?.list));
+  {
+    const options = findByProp(mounted.tree(), 'id', 'dsh-memory-delta-topic-options');
+    // 假 React 是 `h(type, props, ...kids)`，所以传进去的数组会变成 kids[0] —— 摊平一层再取
+    const values = options ? options.kids.flat().filter(Boolean).map((o) => o.props?.value) : [];
+    check('候选里有库里已有的主题', values.includes('环境与沙箱'), JSON.stringify(values));
+  }
+
+  input.props.onChange({ target: { value: 'DSH 插件开发' } });
+  const save = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '保存');
+  check('输入行有「保存」', Boolean(save));
+  save.props.onClick({ stopPropagation() {} });
+  await flush();
+  const topicCall = calls.find((c) => c.body && c.body.op === 'topic');
+  check('归类发的是 op=topic（复用动作路由）', Boolean(topicCall) && topicCall.body.id === 'dec-b' && topicCall.body.topic === 'DSH 插件开发', JSON.stringify(topicCall));
+  check('归类成功后给一句回执', allText(mounted.tree()).includes('已归类'), allText(mounted.tree()).slice(0, 200));
+
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已归档）');
+{
+  const originalFetch = globalThis.fetch;
+  // 三个阶段各有两个主题 —— 主题分组头应当**在每个阶段内部**出现
+  const THREE = {
+    ...SAMPLE,
+    inbox: [
+      { id: 'i1', type: 'fact', topic: 'DSH 插件开发', tags: ['dsh'], line: '候选一', date: '2026-09-17', file: 'D:\\proj\\memory\\inbox\\i1.md' },
+      { id: 'i2', type: 'decision', topic: 'DSH 技能', tags: [], line: '候选二', date: '2026-09-17', file: 'D:\\proj\\memory\\inbox\\i2.md' },
+    ],
+    archive: [
+      { id: 'a1', type: 'fact', topic: 'DSH 插件开发', status: 'expired', tags: ['dsh'], line: '老的坑一', date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a1.md' },
+      { id: 'a2', type: 'decision', status: 'superseded', tags: [], line: '老的坑二', date: '2026-09-09', file: 'D:\\proj\\memory\\archive\\a2.md' },
+    ],
+    counts: { ...SAMPLE.counts, inbox: 2, archive: 2 },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(THREE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+
+  check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
+  check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
+  check('已归档里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:__untopic__')), headerTexts(mounted.tree()).join(' | '));
+
+  // 换维度：三个阶段一起跟着变
+  selectDimension(mounted, '类型');
+  check('切到类型：三个阶段都改按类型分组', Boolean(findByProp(mounted.tree(), 'key', 'inbox:type:facts')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:type:facts')), headerTexts(mounted.tree()).join(' | '));
+
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：某一层只有一组时不加分组头（避免凭空多一层折叠）');
+{
+  const originalFetch = globalThis.fetch;
+  // 只有一条候选、且没主题 → 主题视图下"归纳"没有发生，不该套一个头
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  check('单条候选的收件箱不加子分组头', !findByProp(mounted.tree(), 'key', 'inbox:topic:__untopic__'), headerTexts(mounted.tree()).join(' | '));
+  check('但候选本身照常列出来', allText(mounted.tree()).includes('沙箱禁止命名管道'), allText(mounted.tree()).slice(0, 300));
   globalThis.fetch = originalFetch;
 }
 

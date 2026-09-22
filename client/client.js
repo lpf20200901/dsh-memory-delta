@@ -62,6 +62,9 @@ window.__ModuleLoader__.load({
 }
 .dsh-memory-delta-head {
   display: flex;
+  /* 四个维度按钮 + 标题 + 刷新，侧栏很窄时会挤到一行放不下 → 允许换行，
+     不要让"日期"被压出可视区（宁可换行，也不要横着溢出） */
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   position: sticky;
@@ -251,6 +254,13 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.14));
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
+/* 主题（人指定的归纳）与 tags（关键词）**视觉上必须能分开**：
+   主题是"这条属于哪一堆"，所以给它边框 + 主色，别让两者看着一样 */
+.dsh-memory-delta-tag.is-topic {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.45));
+  background: transparent;
+  color: var(--dsw-alias-label-primary, inherit);
+}
 .dsh-memory-delta-file {
   margin-top: 1px;
   font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
@@ -352,9 +362,12 @@ window.__ModuleLoader__.load({
   border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3));
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
-/* 「整理文件名」的内联输入行（改 id 是危险动作，所以不做猜名字的自动操作，让用户自己填） */
-.dsh-memory-delta-rename { display: flex; gap: 4px; margin-top: 3px; }
-.dsh-memory-delta-rename > input {
+/* 「整理文件名」与「归类」的内联输入行：都是"让人自己填一个值"的小动作，
+   共用同一套样式（两者都刻意**不猜**：猜错文件名会改全库引用，猜错主题会造出同义主题） */
+.dsh-memory-delta-rename,
+.dsh-memory-delta-topic { display: flex; gap: 4px; margin-top: 3px; }
+.dsh-memory-delta-rename > input,
+.dsh-memory-delta-topic > input {
   flex: 1 1 auto;
   min-width: 0;
   padding: 1px 5px;
@@ -558,6 +571,8 @@ window.__ModuleLoader__.load({
           h(
             'span',
             { className: 'dsh-memory-delta-meta' },
+            // 主题只在"没按主题分组"时显示 —— 那时分组头就是主题，再标一遍是纯噪音
+            opts.showTopic && e.topic ? h('span', { className: 'dsh-memory-delta-tag is-topic', title: `主题：${e.topic}` }, String(e.topic)) : null,
             tags.slice(0, 3).map((t) => h('span', { className: 'dsh-memory-delta-tag', key: t }, String(t))),
             e.date ? h('span', { className: 'dsh-memory-delta-dim' }, String(e.date)) : null,
             actions,
@@ -626,7 +641,15 @@ window.__ModuleLoader__.load({
       // 「全局规范」默认**折叠**：它是工作区外的整篇指令文件，展开会把面板淹掉
       //（也避免截图时把里面的个人信息带出去）。
       const [collapsed, setCollapsed] = useState({ 'stage:global': true });
-      const [groupBy, setGroupBy] = useState('type');
+      /**
+       * 归纳维度：**三个阶段共用**（待你确认 / 已在用 / 已归档 都跟随它）。
+       *
+       * 默认 `topic`（主题）—— 主题是**人**指定的归纳（`mem set --topic` / 面板「归类」），
+       * 因为类型只回答"该放哪边"，标签又被书写习惯带偏（实测库里 27 条有 21 条的 tags[0]
+       * 是 dsh / dsh-memory / dsh-memory-delta 三个几乎同义的桶），只有主题真的把条目**归纳到一起**。
+       */
+      const [groupBy, setGroupBy] = useState('topic');
+      const [topicing, setTopicing] = useState(null);
       const [actionError, setActionError] = useState(null);
       const [notice, setNotice] = useState(null);
       // 搜索：query 是输入框内容，results 是宿主回的命中（null = 还没搜/已清空）
@@ -1095,6 +1118,81 @@ window.__ModuleLoader__.load({
             )
           : null;
 
+      /* ---------------------------------------------------------------- 归类 */
+      // 主题是**人**的归纳（模型不写它），所以只给一个内联输入 —— 复用「整理文件名」那套交互，
+      // 不造完整 CRUD：点「归类」→ 填一个主题名（已有主题做候选）→ 保存。
+      const startTopic = (e) => {
+        setConfirming(null);
+        setRenaming(null);
+        setTopicing((prev) => (prev && prev.id === e.id ? null : { id: e.id, value: typeof e.topic === 'string' ? e.topic : '' }));
+      };
+
+      const doTopic = (id, topic) => {
+        setPendingId(id);
+        return callAction({ op: 'topic', id, topic: String(topic || '') })
+          .then((r) => {
+            setTopicing(null);
+            setActionError(null);
+            setNotice(r.topic ? `已归类 ${r.id} → 「${r.topic}」` : `已清除 ${r.id} 的主题（回到「未归类」）`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`归类失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** 条目行上的「归类」按钮（三种阶段都有 —— 归档层恰恰是最需要归纳的那一层）。 */
+      const topicButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: e.topic ? `改主题（现在是「${e.topic}」）` : '归类：给这条指定一个主题（面板按主题归纳）',
+            onClick: (ev) => {
+              stop(ev);
+              startTopic(e);
+            },
+          },
+          e.topic ? '改主题' : '归类',
+        );
+
+      /** 展开的内联「归类」输入行；`datalist` 给的是**库里已有的主题**，避免同义主题越写越多。 */
+      const topicRow = (e) =>
+        topicing && topicing.id === e.id
+          ? h(
+              'div',
+              { className: 'dsh-memory-delta-topic', key: `${e.id}:topic`, onClick: stop },
+              h('input', {
+                value: topicing.value,
+                list: 'dsh-memory-delta-topic-options',
+                placeholder: '主题名，例如 DSH 插件开发（留空 = 未归类）',
+                'aria-label': '主题',
+                onChange: (ev) => setTopicing({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
+                onKeyDown: (ev) => {
+                  stop(ev);
+                  if (ev && ev.key === 'Enter') doTopic(e.id, topicing.value);
+                },
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini',
+                  disabled: pendingId === e.id,
+                  onClick: (ev) => {
+                    stop(ev);
+                    doTopic(e.id, topicing.value);
+                  },
+                },
+                pendingId === e.id ? '保存中…' : '保存',
+              ),
+            )
+          : null;
+
       const head = h(
         'div',
         { className: 'dsh-memory-delta-head' },
@@ -1102,6 +1200,13 @@ window.__ModuleLoader__.load({
         h(
           'span',
           { className: 'dsh-memory-delta-seg' },
+          // 顺序即推荐顺序：主题（真正把条目归纳到一起）→ 类型 → 标签 → 日期。
+          // 四个维度都**作用于三个阶段**（待你确认 / 已在用 / 已归档）。
+          h(
+            'button',
+            { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳；没归类的落在「未归类」，在条目上点「归类」即可）' },
+            '主题',
+          ),
           h(
             'button',
             { type: 'button', className: groupBy === 'type' ? 'is-on' : undefined, onClick: () => setGroupBy('type'), title: '按类型分组：事实（facts）/ 决策（decisions）' },
@@ -1298,50 +1403,25 @@ window.__ModuleLoader__.load({
           ),
         );
 
-      const groupSection = (key, title, slug, list, hint, note) =>
-        list.length
-          ? section(
-              {
-                key: `type:${key}`,
-                title,
-                slug,
-                count: list.length,
-                // 分组名只说明"是什么"，hint 说明"在流程哪一步、管不管注入" ——
-                // 光看 `facts` 这个名字判断不出它在流程里的位置（真实反馈）。
-                hint,
-                open: isOpen(`type:${key}`),
-                onToggle: () => toggleSection(`type:${key}`),
-              },
-              // note = 这一组"到底记什么"的人话说明（用户反馈：`事实`/`决策` 这两个词太抽象）
-              (note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : []).concat(
-                byDateDesc(list).map((e) => renderItem(e)),
-              ),
-            )
-          : null;
+      /* ------------------------------------------------------------ 归纳维度
+         四个维度：**主题**（人指定的归纳，默认）/ 类型（该放哪边）/ 标签 / 日期（什么时候记的）。
+
+         ⚠️ 这些分组以前只作用于「已在用」，于是「待你确认」和「已归档」是两坨平铺的列表
+         （用户 2026-09-22 反馈："待我确认和已归档没有跟着类型/标签、日期进行归纳"）——
+         尤其归档层（实测 27 条里 21 条在归档）平铺起来最乱。现在**三个阶段共用这一份实现**。 */
+
+      /** 库里已有的主题（给「归类」输入做候选，避免同义主题越写越多）。 */
+      const KNOWN_TOPICS = [
+        ...new Set(
+          [...(Array.isArray(state.entries) ? state.entries : []), ...(Array.isArray(state.inbox) ? state.inbox : []), ...(Array.isArray(state.archive) ? state.archive : [])]
+            .map((e) => (e && typeof e.topic === 'string' && e.topic ? e.topic : null))
+            .filter(Boolean),
+        ),
+      ].sort((a, b) => a.localeCompare(b));
 
       /**
-       * 按标签分组（"自动归纳"里唯一确定有用的那半）：
-       * 取每条**第一个**标签当主题，其余标签仍在条目行上显示；
-       * 没标签的归到最后一组。组间按条数从多到少 —— 大头在前。
-       */
-      const tagGroups = () => {
-        const map = new Map();
-        for (const e of entries) {
-          const tag = Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : '__untagged__';
-          if (!map.has(tag)) map.set(tag, []);
-          map.get(tag).push(e);
-        }
-        const named = [...map.entries()].filter(([k]) => k !== '__untagged__');
-        named.sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-        const untagged = map.get('__untagged__');
-        if (untagged) named.push(['__untagged__', untagged]);
-        return named;
-      };
-
-      /**
-       * 按记录日期分组（第三个维度）：
-       * 同一天归一组、**新的在前**；日期还带上人话（今天 / 昨天 / 周几），
-       * 这样"我什么时候记的这条"一眼就有 —— 比一串 ISO 日期好读。
+       * 按记录日期分组用的日期人话（今天 / 昨天 / 前天 / 周几）——
+       * 比一串 ISO 日期好读，且**用 state.today 算差**，不靠浏览器本地时区猜。
        */
       const TODAY = typeof state.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.today) ? state.today : null;
       const dayLabel = (day) => {
@@ -1354,89 +1434,125 @@ window.__ModuleLoader__.load({
         const week = '日一二三四五六'[new Date(`${day}T00:00:00Z`).getUTCDay()];
         return diff > 0 ? `${day}（周${week}）` : `${day}（未来）`;
       };
-      const dateGroups = () => {
+
+      /** 按"取值函数"分组：命名组按条数降序（大头在前），未命名的组**永远放最后**。 */
+      const bucket = (list, pick, { missingKey, missingTitle, missingHint, hint, namedHint }) => {
         const map = new Map();
-        for (const e of entries) {
-          const day = typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date) ? e.date : '__nodate__';
-          if (!map.has(day)) map.set(day, []);
-          map.get(day).push(e);
+        for (const e of list) {
+          const k = pick(e) || missingKey;
+          if (!map.has(k)) map.set(k, []);
+          map.get(k).push(e);
         }
-        const days = [...map.entries()].filter(([k]) => k !== '__nodate__');
-        // ISO 日期字符串按字典序倒排 == 时间倒序（新的一天在最上面）
-        days.sort((a, b) => b[0].localeCompare(a[0]));
-        const nodate = map.get('__nodate__');
-        if (nodate) days.push(['__nodate__', nodate]);
-        return days;
+        const named = [...map.entries()].filter(([k]) => k !== missingKey);
+        named.sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
+        const groups = named.map(([k, l]) => ({ key: k, title: String(k), hint: namedHint || hint, list: l }));
+        const missing = map.get(missingKey);
+        if (missing) groups.push({ key: missingKey, title: missingTitle, hint: missingHint, list: missing });
+        return groups;
       };
 
-      const facts = entries.filter((e) => e.type === 'fact');
-      const decisions = entries.filter((e) => e.type === 'decision');
-      const other = entries.filter((e) => e.type !== 'fact' && e.type !== 'decision');
+      /**
+       * 当前维度下的子分组 —— **三个阶段共用**。
+       *
+       * ⚠️ 分组头里的 `slug`（`（facts）` 这种磁盘目录名）与 hint 必须**按层**给：
+       * `facts/` 只对「已在用」才是这条条目真正住的地方；候选住在 `inbox/`，
+       * 给它标个 `（facts）` 会让人以为文件在那儿（写测试时真踩到）。
+       */
+      const subGroups = (list, dimension, layer) => {
+        if (dimension === 'topic') {
+          return bucket(list, (e) => (typeof e.topic === 'string' && e.topic ? e.topic : ''), {
+            missingKey: '__untopic__',
+            missingTitle: '未归类',
+            missingHint: '还没归纳 · 在条目上点「归类」填一个主题名',
+            namedHint: '按主题（你指定的归纳）',
+          });
+        }
+        if (dimension === 'tag') {
+          return bucket(list, (e) => (Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : ''), {
+            missingKey: '__untagged__',
+            missingTitle: '未加标签',
+            missingHint: '这条没有 tags',
+            namedHint: '按第一个标签',
+          });
+        }
+        if (dimension === 'date') {
+          return bucket(list, (e) => (typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date) ? e.date : ''), {
+            missingKey: '__nodate__',
+            missingTitle: '没有日期',
+            missingHint: '条目没写 date',
+            namedHint: '按记录日期',
+          }).map((g) => ({ ...g, title: dayLabel(g.key) }))
+            .sort((a, b) => (a.key === '__nodate__' ? 1 : b.key === '__nodate__' ? -1 : b.key.localeCompare(a.key)));
+        }
+        // 类型：事实 / 决策 / 其它。目录名（slug）与说明都按层给 —— 见函数头的注释
+        const real = layer === 'standing';
+        const typeHints =
+          layer === 'standing'
+            ? { facts: '踩过的坑 & 绕开的方法', decisions: '你定下的约定', other: 'type 未识别' }
+            : layer === 'inbox'
+              ? { facts: '提升后进 facts/', decisions: '提升后进 decisions/', other: 'type 未识别' }
+              : { facts: '归档的事实', decisions: '归档的决策', other: 'type 未识别' };
+        const facts = list.filter((e) => e.type === 'fact');
+        const decisions = list.filter((e) => e.type === 'decision');
+        const other = list.filter((e) => e.type !== 'fact' && e.type !== 'decision');
+        return [
+          { key: 'facts', title: '事实', slug: real ? 'facts' : null, hint: typeHints.facts, list: facts },
+          { key: 'decisions', title: '决策', slug: real ? 'decisions' : null, hint: typeHints.decisions, list: decisions },
+          { key: 'other', title: '其它', slug: null, hint: typeHints.other, list: other },
+        ].filter((g) => g.list.length);
+      };
+
+      /** 某一阶段的条目按钮组 —— 三个阶段各自的动作不一样（提升 / 撤回 / 取回…）。 */
+      const actionsFor = (layer, e) => {
+        const base = layer === 'inbox' ? [promoteButton(e)] : layer === 'archive' ? [restoreButton(e)] : [demoteButton(e), archiveButton(e)];
+        return [...base, topicButton(e), tidyButton(e), layer === 'inbox' ? removeButton(e) : null];
+      };
+
+      /**
+       * 渲染一个阶段的条目：按当前维度分子组。
+       *
+       * **只有一组时不出分组头** —— 那时"归纳"其实没发生，一个折叠头包着全部条目只是噪音
+       * （「待你确认」经常只有两三条，套一层头更难看）。这条判据让三个阶段都能跟随维度，
+       * 又不会在小列表上凭空多一层。
+       */
+      const groupedBody = (list, dimension, layer) => {
+        const groups = subGroups(list, dimension, layer);
+        const rowOf = (e) =>
+          renderItem(e, {
+            showType: dimension !== 'type',
+            showTopic: dimension !== 'topic',
+            actions: actionsFor(layer, e),
+            extraRow: confirmRow(e) || renameRow(e) || topicRow(e),
+          });
+        if (groups.length <= 1) return list.map(rowOf);
+        return groups.map((g) => {
+          const key = `${layer}:${dimension}:${g.key}`;
+          const note = dimension === 'type' && layer === 'standing' && g.key === 'facts'
+            ? '换个环境或换个版本，它可能就不成立了 —— 所以写清"什么情况下适用"最有价值。'
+            : dimension === 'type' && layer === 'standing' && g.key === 'decisions'
+              ? '业务/流程/口味上的决定：只有你改主意才会变 —— 记下"为什么这么定"，我就不会再问第二遍。'
+              : null;
+          return section(
+            {
+              key,
+              title: g.title,
+              slug: g.slug ?? null,
+              count: g.list.length,
+              hint: g.hint,
+              open: isOpen(key),
+              onToggle: () => toggleSection(key),
+            },
+            (note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : []).concat(byDateDesc(g.list).map(rowOf)),
+          );
+        });
+      };
 
       /* -------------------------------------------------- 已在用（常驻层）
          阶段视角：这一层 = "每轮会话都会自动发给模型"的结论。
          类型（事实/决策）是**这一层内部**的子分组 —— 它回答的是"这条该放哪边"，
          不是"这条在流程哪一步"。以前把类型放在最外层，于是流程位置只能靠小字注释，
-         结果是"一眼看不出是干啥的"（真实反馈）。
-         三个维度可切换：类型（该放哪边）/ 标签（按主题）/ 日期（什么时候记的）。 */
-      const standingBody =
-        groupBy === 'tag'
-          ? tagGroups().map(([tag, list]) =>
-              section(
-                {
-                  key: `tag:${tag}`,
-                  title: tag === '__untagged__' ? '未加标签' : tag,
-                  slug: null,
-                  count: list.length,
-                  hint: '按标签',
-                  open: isOpen(`tag:${tag}`),
-                  onToggle: () => toggleSection(`tag:${tag}`),
-                },
-                byDateDesc(list).map((e) => renderItem(e, { showType: true })),
-              ),
-            )
-          : groupBy === 'date'
-            ? dateGroups().map(([day, list]) =>
-                section(
-                  {
-                    key: `date:${day}`,
-                    title: dayLabel(day),
-                    slug: null,
-                    count: list.length,
-                    hint: day === '__nodate__' ? '条目没写 date' : '按记录日期',
-                    open: isOpen(`date:${day}`),
-                    onToggle: () => toggleSection(`date:${day}`),
-                  },
-                  byDateDesc(list).map((e) => renderItem(e, { showType: true })),
-                ),
-              )
-            : [
-              groupSection(
-                'facts',
-                '事实',
-                'facts',
-                facts,
-                '踩过的坑 & 绕开的方法',
-                '换个环境或换个版本，它可能就不成立了 —— 所以写清"什么情况下适用"最有价值。',
-              ),
-              groupSection(
-                'decisions',
-                '决策',
-                'decisions',
-                decisions,
-                '你定下的约定',
-                '业务/流程/口味上的决定：只有你改主意才会变 —— 记下"为什么这么定"，我就不会再问第二遍。',
-              ),
-              // 「其它」没有对应目录（type 不是 fact/decision 的条目仍放在两个有类型目录里），所以不给 slug
-              groupSection(
-                'other',
-                '其它',
-                null,
-                other,
-                'type 未识别',
-                '这些条目的 type 字段不是 fact / decision，面板不知道该怎么归类。',
-              ),
-            ];
+         结果是"一眼看不出是干啥的"（真实反馈）。 */
+      const standingBody = groupedBody(entries, groupBy, 'standing');
 
       /* -------------------------------------------------- 全局规范（工作区外）
          这份是 **DSH 自己**注入的用户级指令文件（`$DSH_HOME/AGENTS.md`），每个工作区都生效 ——
@@ -1589,7 +1705,7 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : inbox.map((e) => renderItem(e, { showType: true, actions: [promoteButton(e), tidyButton(e), removeButton(e)] })),
+            : groupedBody(inbox, groupBy, 'inbox'),
         ],
       );
 
@@ -1615,15 +1731,7 @@ window.__ModuleLoader__.load({
               ? '还没有归档 —— 结论被取代（supersede）或不再适用（归档）时会搬到这里，不再发给模型'
               : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。',
           ),
-          ...(archived.length
-            ? archived.map((e) =>
-                renderItem(e, {
-                  showType: true,
-                  actions: [restoreButton(e)],
-                  extraRow: confirmRow(e) || null,
-                }),
-              )
-            : []),
+          ...(archived.length ? groupedBody(archived, groupBy, 'archive') : []),
           archiveCount > archived.length
             ? h(
                 'div',
@@ -1689,6 +1797,14 @@ window.__ModuleLoader__.load({
         statusRow,
         overBudgetNotice,
         flow,
+        // 「归类」输入的候选 = 库里**已有**的主题（写新主题是允许的，只是别造同义词）
+        KNOWN_TOPICS.length
+          ? h(
+              'datalist',
+              { id: 'dsh-memory-delta-topic-options' },
+              KNOWN_TOPICS.map((t) => h('option', { key: t, value: t })),
+            )
+          : null,
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
         // 有搜索词时**只显示结果**（否则一屏里两套列表，谁也看不清）

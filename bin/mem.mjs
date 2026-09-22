@@ -26,7 +26,7 @@ const CONFIG_FILE = 'memory.config.json';
 const TYPES = ['fact', 'decision'];
 const STATUSES = ['active', 'superseded', 'expired'];
 const DIR_OF = { fact: 'facts', decision: 'decisions', inbox: 'inbox', archive: 'archive' };
-const FM_KEYS = ['id', 'type', 'scope', 'key', 'tags', 'status', 'date', 'source', 'supersedes', 'superseded_by', 'verify_when'];
+const FM_KEYS = ['id', 'type', 'scope', 'key', 'topic', 'tags', 'status', 'date', 'source', 'supersedes', 'superseded_by', 'verify_when'];
 
 /* ------------------------------------------------------------------ 输出 */
 
@@ -310,12 +310,30 @@ function cmdInit(opts) {
 }
 
 /**
+ * 归一化 `topic`（主题）—— 面板按它归纳条目。
+ *
+ * 为什么需要一个**独立字段**而不是复用 `tags`：主题要**唯一且稳定**（一条一个主题名），
+ * 而 tags 是复数关键词、顺序还由写条目的那一方（常常是模型）随手决定。实测把 tags[0] 当主题时，
+ * 库里 27 条里有 21 条落进 `dsh / dsh-memory / dsh-memory-delta` 三个几乎同义的桶 —— 归纳等于没做。
+ * 所以主题**由人指定**（面板「归类」/ `mem set --topic`），模型不写它。
+ *
+ * @returns {string|null} 清空 / 空白 → null（= 落在面板的「未归类」组）
+ */
+export function normalizeTopic(value) {
+  if (value === null || value === undefined) return null;
+  const t = String(value).replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (t.length > 40) throw new Error(`topic 太长了（${t.length} 字，最多 40）：${t.slice(0, 20)}…`);
+  return t;
+}
+
+/**
  * 创建一个候选条目（落在 inbox）—— CLI 的 `new` 与插件的 `memory_write` 工具共用这一份逻辑，
  * 保证"模型只能写收件箱"这条纪律只有一处实现。
  *
  * @returns {{id: string, file: string}}
  */
-export function createEntry(L, { type, conclusion, reason, tags, scope, key, id: explicitId, source, verifyWhen }) {
+export function createEntry(L, { type, conclusion, reason, tags, scope, key, topic, id: explicitId, source, verifyWhen }) {
   if (!TYPES.includes(type)) throw new Error(`type 必须是 ${TYPES.join(' | ')}`);
   const text = String(conclusion ?? '').trim();
   if (!text) throw new Error('缺少结论（conclusion）');
@@ -352,6 +370,7 @@ export function createEntry(L, { type, conclusion, reason, tags, scope, key, id:
     type,
     scope: scope || loadConfig(L.root)?.scope || defaultConfig(L.root).scope,
     key: k,
+    topic: normalizeTopic(topic),
     tags: Array.isArray(tags) ? tags : tags ? String(tags).split(',').map((s) => s.trim()).filter(Boolean) : [],
     status: 'active',
     date: today(),
@@ -384,6 +403,7 @@ function cmdNew(opts) {
       tags: opts.tags,
       scope: opts.scope || (cfg && cfg.scope),
       key: opts.key,
+      topic: opts.topic,
       id: opts.id,
       source: opts.source,
       verifyWhen: opts['verify-when'],
@@ -409,6 +429,8 @@ function cmdList(opts) {
   if (opts.type) entries = entries.filter((e) => e.data.type === opts.type);
   if (opts.scope) entries = entries.filter((e) => e.data.scope === opts.scope);
   if (opts.tag) entries = entries.filter((e) => (e.data.tags || []).includes(opts.tag));
+  if (opts.topic) entries = entries.filter((e) => String(e.data.topic || '') === String(opts.topic));
+  if (opts.untopic) entries = entries.filter((e) => !e.data.topic);
   if (opts.where) entries = entries.filter((e) => e.where === opts.where);
   entries.sort((a, b) => String(b.data.date || '').localeCompare(String(a.data.date || '')) || a.id.localeCompare(b.id));
 
@@ -422,10 +444,44 @@ function cmdList(opts) {
   }
   for (const e of entries) {
     const st = e.data.status === 'active' ? c(32, 'active') : e.data.status === 'superseded' ? c(90, 'superseded') : c(33, String(e.data.status));
-    console.log(`${st.padEnd(20)} ${c(36, e.id)}  ${dim(`[${e.where}] ${e.data.type} ${e.data.date || ''}`)}`);
+    // 主题（人工归纳）跟在层/类型/日期后面 —— 一眼看出这条归在哪，以及**哪些还没归类**
+    const topic = e.data.topic ? ` · ${e.data.topic}` : dim(' · 未归类');
+    console.log(`${st.padEnd(20)} ${c(36, e.id)}  ${dim(`[${e.where}] ${e.data.type} ${e.data.date || ''}`)}${topic}`);
     console.log(`    ${firstLine(e.body)}`);
   }
   console.log(dim(`\n共 ${entries.length} 条`));
+}
+
+/**
+ * `mem topics` —— 列出库里已有的主题与条数（含分层分布、以及还没归类的条数）。
+ *
+ * 为什么要有它：主题是**人**维护的（面板「归类」按钮 / `mem set --topic`），
+ * 那就得能一眼看到"现在有哪些主题、各自多少条、还有多少没归类" ——
+ * 否则同义主题会越写越多（"DSH 插件开发" / "插件开发" / "plugin"）。
+ */
+function cmdTopics(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const topics = listTopics(L);
+  const all = readAll(L).filter((e) => !e.error);
+  const untopic = all.filter((e) => !normalizeTopic(e.data?.topic));
+
+  if (opts.json) {
+    console.log(JSON.stringify({ total: all.length, topics, untopic: untopic.length }, null, 2));
+    return;
+  }
+  if (!topics.length) {
+    console.log(dim('（还没有主题）'));
+  } else {
+    for (const t of topics) {
+      const where = ['facts', 'decisions', 'inbox', 'archive'].filter((w) => t.where[w]).map((w) => `${w} ${t.where[w]}`).join(' / ');
+      console.log(`${String(t.count).padStart(3)} 条  ${c(1, t.topic.padEnd(20))} ${dim(where)}`);
+    }
+    console.log(dim(`\n共 ${topics.length} 个主题`));
+  }
+  if (untopic.length) {
+    console.log(dim(`未归类 ${untopic.length} 条（面板里归到「未归类」组；给它一个主题：mem set <id> --topic "…"）`));
+  }
 }
 
 function firstLine(body) {
@@ -607,6 +663,47 @@ export function renameEntry(L, oldId, newId) {
 
   writeIndex(L);
   return { from, to, file: dest, refs };
+}
+
+/**
+ * **归类**：给条目指定 / 清除 `topic`（面板按它把条目归纳到一起）。
+ *
+ * 为什么是"人指定的字段"而不是自动聚类：归纳的判据在用户脑子里（"这几条都是 DSH 插件开发的"），
+ * 面板只负责**照他给的归纳摆**（用户 2026-09-22 的原话：记忆归纳主要靠人，太乱会影响体验）。
+ *
+ * 三个层都能归类（候选 / 常驻 / 归档）—— 归档层正是最需要归纳的那一层（实测 27 条里 21 条在归档）。
+ * **不改 status、不搬文件**：它只是给这条加一个显示用的标签。
+ *
+ * 与 `mem set --topic` 共用同一套归一化（`normalizeTopic`），面板按钮与 CLI 不会分叉。
+ *
+ * @param {string|null} topic 空串 / null = 清除（回到「未归类」）
+ * @returns {{id: string, topic: string|null, file: string}}
+ */
+export function setTopicEntry(L, id, topic) {
+  const e = requireOneOrThrow(L, id);
+  const next = normalizeTopic(topic);
+  e.data.topic = next;
+  fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
+  return { id: e.id, topic: next, file: e.file };
+}
+
+/**
+ * 列出库里已有的主题（面板的「归类」输入用它做候选，避免同义主题越写越多）。
+ *
+ * @returns {Array<{topic: string, count: number, where: Record<string, number>}>} 按条数降序
+ */
+export function listTopics(L) {
+  const map = new Map();
+  for (const e of readAll(L)) {
+    if (e.error) continue;
+    const t = normalizeTopic(e.data?.topic);
+    if (!t) continue;
+    if (!map.has(t)) map.set(t, { topic: t, count: 0, where: {} });
+    const row = map.get(t);
+    row.count += 1;
+    row.where[e.where] = (row.where[e.where] ?? 0) + 1;
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count || a.topic.localeCompare(b.topic));
 }
 
 /**
@@ -865,6 +962,15 @@ function cmdSet(opts) {
     e.data.tags = opts.tags === true ? [] : String(opts.tags).split(',').map((s) => s.trim()).filter(Boolean);
     changed.push('tags');
   }
+  if (opts.topic !== undefined) {
+    // 与面板的「归类」按钮共用 normalizeTopic：`--topic ""` 清除（回到「未归类」）
+    try {
+      e.data.topic = normalizeTopic(opts.topic === true ? '' : opts.topic);
+    } catch (error) {
+      fail(error.message);
+    }
+    changed.push('topic');
+  }
   if (opts.scope) {
     e.data.scope = String(opts.scope);
     changed.push('scope');
@@ -935,7 +1041,8 @@ function writeIndex(L) {
     for (const e of list.sort((a, b) => a.id.localeCompare(b.id))) {
       const tags = (e.data.tags || []).length ? `  #${(e.data.tags || []).join(' #')}` : '';
       const key = e.data.key ? `  [key: ${e.data.key}]` : '';
-      lines.push(`- \`${e.id}\` — ${firstLine(e.body)}${key}${tags}`);
+      const topic = e.data.topic ? `  「${e.data.topic}」` : '';
+      lines.push(`- \`${e.id}\` — ${firstLine(e.body)}${key}${topic}${tags}`);
     }
     lines.push('');
   }
@@ -995,6 +1102,10 @@ function injectPayload(L, budget) {
     type: e.data.type,
     scope: e.data.scope,
     key: e.data.key || null,
+    // 主题（人指定的归纳）：**只进载荷、不进注入正文** —— 它是给人看的分组标签，
+    // 每轮发给模型只是白花字节；也**不参与 hash**（entryHash 只看 id/type/key/scope/结论首行），
+    // 所以改主题不会触发一次差分注入。
+    topic: e.data.topic || null,
     tags: e.data.tags || [],
     status: e.data.status,
     where: e.where,
@@ -1343,6 +1454,13 @@ function cmdValidate(opts) {
     warnings.push(`${activeWithoutKey} 条 active 条目没有 key —— 它们不参与冲突检测（给事实/决策指定 --key 更安全）`);
   }
 
+  // 主题（人工归纳）：**告警**不是问题 —— 没归类的条目照样能用、照样注入，
+  // 只是面板里会落在「未归类」组。归纳是人的活，不该卡 CI。
+  const untopic = entries.filter((e) => !e.error && !normalizeTopic(e.data?.topic));
+  if (untopic.length) {
+    warnings.push(`${untopic.length} 条条目没有 topic（面板里落在「未归类」组）—— 归纳一下：mem set <id> --topic "…"，或看 mem topics`);
+  }
+
   // index 一致性
   if (fs.existsSync(L.index)) {
     const idx = fs.readFileSync(L.index, 'utf8');
@@ -1425,6 +1543,7 @@ if (isMain) {
     case 'init': cmdInit(opts); break;
     case 'new': cmdNew(opts); break;
     case 'list': cmdList(opts); break;
+    case 'topics': cmdTopics(opts); break;
     case 'show': cmdShow(opts); break;
     case 'promote': cmdPromote(opts); break;
     case 'demote': cmdDemote(opts); break;
@@ -1481,11 +1600,13 @@ function usage() {
 
   init                    初始化记忆库（--root <路径> 可指定；默认 <cwd>/memory）
   new --type fact|decision --conclusion "…" [--key <语义键>] [--id <短id>]
-      [--reason "…"] [--tags a,b] [--scope s]
+      [--reason "…"] [--tags a,b] [--scope s] [--topic "主题"]
                           在 inbox 创建候选条目（--json 输出机器可读结果）
                           · --key：一个 scope+key 上只能有一个 active 真相（冲突检测依据）
                           · --id ：推荐显式给短 id；不给则从结论派生（压到 20 字符）
-  list [--status --type --scope --tag --where --all --json]
+                          · --topic：**面板按它归纳条目**（人指定的主题名，模型不写；缺省落「未归类」）
+  list [--status --type --scope --tag --topic --untopic --where --all --json]
+  topics [--json]         列出已有主题与条数（+ 还没归类的条数）—— 主题是人维护的，同义主题别越写越多
   show <id> [--json]
   promote <id> [--supersedes <旧id>]     inbox → facts/decisions（人确认）
   demote <id>                            撤回：facts/decisions → inbox（先不当真，等以后再说）
@@ -1495,8 +1616,9 @@ function usage() {
   rename <旧id> <新id>                   安全改名（id + 文件名 + 引用一起改）
                           同 key 已有 active 时必须显式 --supersedes
   supersede <旧id> <新id>                标记取代 + 归档 + 双向链接
-  set <id> [--key k] [--tags a,b] [--scope s] [--status …] [--conclusion "…"]
-      [--verify-when "…"]  修改已有条目（补 key、改措辞、标 expired）
+  set <id> [--key k] [--tags a,b] [--topic "主题"] [--scope s] [--status …] [--conclusion "…"]
+      [--verify-when "…"]  修改已有条目（补 key、归类、改措辞、标 expired）
+                           · --topic "" 清除主题（回到「未归类」）
                            · --verify-when：复核时机。写 '2026-03-01' 或相对条目日期的
                              '3个月后' / '2周后'（相对写法取条目自己的 date 为基准）
   validate [--fix]        校验（格式 / id / 双向链接 / 环 / 同 key 冲突 / 索引 / 注入预算）

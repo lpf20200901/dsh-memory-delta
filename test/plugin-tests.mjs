@@ -793,6 +793,13 @@ section('侧边栏「记忆」页签：只读 JSON 路由');
   check('counts.due 与 due 长度一致', okRes.json.counts.due === okRes.json.due.length, `${okRes.json.counts.due} vs ${okRes.json.due.length}`);
   check('counts.active 与 entries 长度一致', okRes.json.counts.active === okRes.json.entries.length, `${okRes.json.counts.active} vs ${okRes.json.entries.length}`);
   check('inbox 列出候选（memory_write 写过一条）', okRes.json.inbox.length >= 1 && okRes.json.inbox.every((e) => !!e.id && !!e.line), JSON.stringify(okRes.json.inbox).slice(0, 160));
+  // 面板的维度是**三层共用**的：按主题/标签分组要用到 topic 与 tags，
+  // 而 inbox / archive 过去不带这两样 → 那两层只能平铺（用户 2026-09-22 反馈的就是这个）
+  check('inbox 每条都带 tags（面板要按标签分组）', okRes.json.inbox.every((e) => Array.isArray(e.tags)), JSON.stringify(okRes.json.inbox.map((e) => Object.keys(e))));
+  check('inbox 带 topic 键（没归类时是 undefined→整条省掉，但要有这个位置）', okRes.json.inbox.every((e) => e.topic === undefined || typeof e.topic === 'string'), JSON.stringify(okRes.json.inbox.map((e) => e.topic)));
+  check('archive 每条都带 tags 与 topics 位置', okRes.json.archive.every((e) => Array.isArray(e.tags) && (e.topic === undefined || typeof e.topic === 'string')), JSON.stringify(okRes.json.archive.slice(0, 2).map((e) => Object.keys(e))));
+  check('常驻条目带 topic（面板默认就按它分组）', okRes.json.entries.every((e) => e.topic === undefined || typeof e.topic === 'string'), JSON.stringify(okRes.json.entries.slice(0, 2).map((e) => Object.keys(e))));
+  check('注入正文里**不出现** topic（它是给人看的分组标签，不该花每轮的字节）', !injectPayload(L, 3072).text.includes('topic:'), injectPayload(L, 3072).text.slice(0, 120));
   check('响应是无损 JSON（没有 undefined 值）', losslessError(okRes.json) === null, losslessError(okRes.json) ?? '');
   check('响应带 workspace（客户端据此反推）', okRes.json.workspace === cwdOfProject, String(okRes.json.workspace));
 
@@ -1064,7 +1071,7 @@ section('「搜索」路由');
 
 /* ------------------------------------- 「动作」路由（真的写记忆库） */
 
-section('「动作」路由（promote / rename）');
+section('「动作」路由（promote / rename / topic）');
 {
   const actionRoot = path.join(SANDBOX, 'action', 'memory');
   const L = ensureLayout(actionRoot);
@@ -1103,6 +1110,20 @@ section('「动作」路由（promote / rename）');
   check('未知 op 不会碰文件', readAll(L).some((e) => e.id === 'panel-promote-renamed'), 'entry survived');
   const noId = await callRoute(route, { body: JSON.stringify({ op: 'promote' }) });
   check('缺 id → 400', noId.status === 400 && /缺少 id/.test(String(noId.json.error)), String(noId.json.error));
+
+  // ④b 归类：面板按主题归纳条目，写的是同一个 `topic` 字段（人指定，模型不写）
+  //     此时 panel-promote-renamed 在 facts/（promote + rename 之后，⑤ 才 demote 回 inbox）
+  const topicSet = await callRoute(route, { body: JSON.stringify({ op: 'topic', id: 'panel-promote-renamed', topic: 'DSH 插件开发' }) });
+  check('op=topic → 200 并回执主题', topicSet.status === 200 && topicSet.json.topic === 'DSH 插件开发', JSON.stringify(topicSet.json));
+  check('topic 真的写进 frontmatter', /^topic: DSH 插件开发$/m.test(fs.readFileSync(path.join(L.facts, 'panel-promote-renamed.md'), 'utf8')), 'frontmatter');
+  check('归类不改 status、不搬文件（还在 facts/）', readAll(L).find((e) => e.id === 'panel-promote-renamed')?.where === 'facts', 'where');
+  const topicClear = await callRoute(route, { body: JSON.stringify({ op: 'topic', id: 'panel-promote-renamed', topic: '' }) });
+  check('空主题 = 清除（回到「未归类」）', topicClear.status === 200 && topicClear.json.topic === null, JSON.stringify(topicClear.json));
+  check('清除后 frontmatter 里是 topic: null', /^topic: null$/m.test(fs.readFileSync(path.join(L.facts, 'panel-promote-renamed.md'), 'utf8')), 'frontmatter');
+  const topicLong = await callRoute(route, { body: JSON.stringify({ op: 'topic', id: 'panel-promote-renamed', topic: 'x'.repeat(41) }) });
+  check('过长的主题 → 400（而不是静默截断）', topicLong.status === 400 && /太长/.test(String(topicLong.json.error)), String(topicLong.json.error));
+  const topicMissing = await callRoute(route, { body: JSON.stringify({ op: 'topic', id: 'nope-not-here', topic: 'x' }) });
+  check('给不存在的条目归类 → 400 而不是让宿主崩溃', topicMissing.status === 400 && /找不到条目/.test(String(topicMissing.json.error)), String(topicMissing.json.error));
 
   // ⑤ 双向：demote（常驻 → 候选）与 remove（只删候选）
   const demoted = await callRoute(route, { body: JSON.stringify({ op: 'demote', id: 'panel-promote-renamed' }) });

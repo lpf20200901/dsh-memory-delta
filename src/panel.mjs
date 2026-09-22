@@ -27,7 +27,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, restoreEntry, searchLibrary, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, restoreEntry, searchLibrary, setTopicEntry, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -41,7 +41,7 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
  *
  * `promote` 与 `demote` 是**双向**的：候选 ⇄ 常驻。`remove` 只删候选（见 `removeEntry` 的理由）。
  */
-export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename'];
+export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename', 'topic'];
 
 /** 搜索路由：面板搜索框 → 与 `mem recall` / `memory_search` 同一份检索实现。 */
 export const MEMORY_SEARCH_PATH = '/dsh-memory-delta/search';
@@ -300,6 +300,8 @@ export function buildMemoryState(L, opts = {}) {
         id: e.id,
         type: e.type,
         key: e.key ?? undefined,
+        // 主题（人指定的归纳）：面板默认就按它分组，所以三层都要带 —— 缺了它条目会全部掉进「未归类」
+        topic: e.topic ?? undefined,
         status: e.status,
         tags: Array.isArray(e.tags) ? e.tags : [],
         date: e.date,
@@ -322,7 +324,16 @@ export function buildMemoryState(L, opts = {}) {
       }),
     ),
     inbox: inboxEntries.slice(0, inboxLimit).map((e) =>
-      defined({ id: e.id, type: e.data.type, line: firstLine(e.body), date: e.data.date, file: e.file }),
+      defined({
+        id: e.id,
+        type: e.data.type,
+        // 候选也要能被归到主题、也能按标签/主题分组 —— 面板的维度是**三层共用**的
+        topic: e.data.topic ?? undefined,
+        tags: Array.isArray(e.data.tags) ? e.data.tags : [],
+        line: firstLine(e.body),
+        date: e.data.date,
+        file: e.file,
+      }),
     ),
     // 全局规范（工作区外、DSH 自己注入的那份）+ 本库里的源文件 —— 面板要能看见"已经在生效"的东西
     global: defined({
@@ -339,6 +350,8 @@ export function buildMemoryState(L, opts = {}) {
           id: e.id,
           type: e.data?.type,
           key: e.data?.key || undefined,
+          topic: e.data?.topic ?? undefined,
+          tags: Array.isArray(e.data?.tags) ? e.data.tags : [],
           status: e.data?.status,
           date: e.data?.date,
           line: firstLine(e.body),
@@ -729,6 +742,13 @@ export function createActionRoute(opts = {}) {
           // 只允许删候选 —— 常驻条目直接删就是"静默消失"（removeEntry 里说明了理由）
           const r = removeEntry(L, id);
           writeJson(res, 200, { ok: true, op, id: r.id });
+          return;
+        }
+        if (op === 'topic') {
+          // 归类：给条目指定 / 清除主题（面板按主题归纳条目）。**不改 status、不搬文件** ——
+          // 它只是给这条加一个显示用的分组标签，所以三个阶段都能点。
+          const r = setTopicEntry(L, id, body?.topic);
+          writeJson(res, 200, { ok: true, op, id: r.id, topic: r.topic });
           return;
         }
         const to = typeof body?.to === 'string' ? body.to : '';
