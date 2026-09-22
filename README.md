@@ -141,7 +141,7 @@ Seven rules:
 | Capability | Detail |
 | --- | --- |
 | **Differential injection** | First round injects every active entry (baseline); afterwards only *added / updated / removed*; **nothing at all** when unchanged |
-| `memory_search` | Relevance-ranked search across facts / decisions / inbox / archive / journal / session index. Field weights (key/id > tags > conclusion > body), a whole-phrase bonus, and Chinese matched by **bigram** so a query like `沙箱禁管道` hits `沙箱禁止命名管道` without spaces. Each hit carries a score, a snippet from its best-matching line, its `tags`/`date`, and the **path of its file** (read it for the full conclusion and reason, since the snippet is clipped); `truncated` tells the model when `limit` cut the list short |
+| `memory_search` | Relevance-ranked search across facts / decisions / inbox / archive / journal / session index. Field weights (key/id > tags > conclusion > body), a whole-phrase bonus, and Chinese matched by **bigram** so a query like `沙箱禁管道` hits `沙箱禁止命名管道` without spaces. Each hit carries a score, a snippet from its best-matching line, its `tags`/`date`, and the **path of its file** (read it for the full conclusion and reason, since the snippet is clipped); `truncated` tells the model when `limit` cut the list short. **Every hit is rendered into the tool's text output** — DSH only ever shows the model what `render` returns (see the regression note below), and the tool's default `limit` is 10 because each rendered hit costs ~300 bytes |
 | `memory_write` | Record a candidate into the inbox — **the model cannot touch the standing layer** |
 | Distillation nudge | Once a session has run a few steps and memory is already current, it reminds the model to record conclusions with `memory_write`; one nudge per session, and the nudge message carries **no state**, so it cannot corrupt the diff baseline |
 | Due-for-review reminder | `verify_when` is no longer a dead field: when an entry reaches its review date, the session is told once — "this conclusion may be stale, re-check it" — with the commands **the user** should run to supersede or expire it — retiring a standing entry is a human action, so the model is told to hand it over (it may only add the new conclusion to the inbox as a candidate). Prose values (`等换机器时`) never trigger it, so the reminder can always be resolved; it fires only on a step that injects nothing else, and it carries **no state** either |
@@ -220,7 +220,7 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 847 assertions, zero dependencies
+npm test        # 855 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -230,14 +230,16 @@ npm test        # 847 assertions, zero dependencies
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 239 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks + tool-output contract) |
+| `test/plugin-tests.mjs` | 247 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks + tool-output contract and render text) |
 | `test/client-tests.mjs` | 178 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, entry click → `openFile`, promote/tidy, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable
 without a DSH installation. `test/preflight-import.mjs` goes one step further: run it from inside a
 profile and it exercises the **real** `@deepseek-ai/*` modules (does the real `defineTool` accept our
-tool definitions, does the real `schemastery` accept our config schema).
+tool definitions, does the real `schemastery` accept our config schema, does each tool's return value
+satisfy its own declared `output.schema` under the real `validateJsonSchemaValue`, and does its render
+text actually carry the hits the model needs).
 
 Regression tests baked in from real bugs:
 
@@ -263,6 +265,15 @@ Regression tests baked in from real bugs:
   sides — a structural contract check in `test/plugin-tests.mjs` (`undeclaredKeys`) and the real
   `validateJsonSchemaValue` in `test/preflight-import.mjs`. **Rule: when `searchLibrary` gains a
   field, the tool's `output.schema` must gain it too** — the tests now fail loudly if it does not.
+- **The declaration is not what the model reads: `render` is.** Fixing the schema above only stopped
+  the call from erroring — the tool still handed the model a single line, `Matched N memory entries.`,
+  because DSH puts `result.content` into the `tool/result` message
+  (`dsh-agent-loop/lib/index.js:307`) and the provider sends `flattenText(result.content)`
+  (`dsh-llm-deepseek/lib/index.js:158`). **The structured `value` never reaches the model**, so a
+  perfectly valid `matches` array is invisible unless the renderer prints it. The renderer now lists
+  every hit (layer, id, key, date, score, snippet, file path), says when `limit` cut the list short,
+  and the default `limit` dropped to 10 since each rendered hit costs ~300 bytes. Pinned by
+  "render really carries the hits" assertions in both `test/plugin-tests.mjs` and the preflight.
 
 ## Roadmap
 

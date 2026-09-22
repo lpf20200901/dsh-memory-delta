@@ -152,6 +152,15 @@ try {
   const renderSearch = searchTool.output?.render?.({}, found);
   check('memory_search 的 render 可用', Array.isArray(renderSearch) && typeof renderSearch[0]?.text === 'string');
 
+  /* ---- render 才是**模型可见**的那份文本 ----
+   * `value` 到不了模型眼前：dsh-agent-loop 把 `result.content` 放进 tool/result 消息，
+   * dsh-llm-deepseek 再 `flattenText(result.content)` 发给模型。
+   * 曾经的 render 只有一句 `Matched N memory entries.` —— 调用不报错，模型却一条命中都拿不到。
+   */
+  const searchText = String(renderSearch[0]?.text ?? '');
+  check('memory_search 的 render 真把命中交给了模型（含条目 id）', searchText.includes(written.id), searchText.slice(0, 240));
+  check('memory_search 的 render 带片段与条目文件路径', /file: /.test(searchText) && searchText.length > 80, searchText.slice(0, 240));
+
   /* ---- 差分注入链路（真实模块 + 真 pre-step） ---- */
   const preStep = handlers.get('agent/pre-step');
   const step1Decision = { kind: 'ok', messages: [] };

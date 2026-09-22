@@ -539,6 +539,32 @@ section('工具输出契约：返回值只能出现 output.schema 声明过的�
   check('全部返回时 truncated=false', cutAll.total === 3 && cutAll.truncated === false, JSON.stringify({ total: cutAll.total, truncated: cutAll.truncated }));
 }
 
+/* --------------------- 模型到底看到了什么：render 才是模型可见的那份文本 */
+
+section('工具 render：命中必须渲染成文本（模型只看得到 render，看不到 value）');
+{
+  // 依据：dsh-agent-loop `content: result.content` → tool/result 消息；
+  //       dsh-llm-deepseek `content: flattenText(result.content) || "(no output)"`。
+  // 曾经的 render 只有一句 `Matched N memory entries.` —— 调用能过、value 里字段齐全，
+  // 但模型一条命中都拿不到（id / 片段 / 路径全丢）。
+  const hit = await searchTool.execute({ query: 'rmSync' }, { agent: toolAgent });
+  const text = searchTool.output.render({}, hit)[0].text;
+  check('render 列出命中的 id', hit.matches.length > 0 && hit.matches.every((m) => text.includes(m.id)), text.slice(0, 240));
+  check('render 带上命中片段（不只是计数）', hit.matches.some((m) => m.snippet && text.includes(m.snippet.slice(0, 24))), text.slice(0, 240));
+  check('render 给条目文件路径（模型据此读全文）', hit.matches.some((m) => m.file && text.includes(m.file)), text.slice(0, 240));
+  check('render 说明片段被裁剪过', /clipped/.test(text), text.slice(-120));
+
+  const journalOnly = await searchTool.execute({ query: '命名管道那条坑', where: 'journal' }, { agent: toolAgent });
+  const journalText = searchTool.output.render({}, journalOnly)[0].text;
+  check('render 覆盖流水层命中', journalOnly.matches.every((m) => journalText.includes(m.id)), journalText.slice(0, 200));
+  check('流水层不给文件路径（行级命中，路径没用）', !journalText.includes('file:'), journalText.slice(0, 200));
+
+  const cut = searchTool.output.render({}, { total: 2, truncated: true, matches: [] })[0].text;
+  check('被 limit 截断时 render 告诉模型还有更多', /raise `limit`/.test(cut), cut.slice(0, 120));
+  const none = await searchTool.execute({ query: '绝对搜不到的词xyzzy' }, { agent: toolAgent });
+  check('零命中的 render 不是空话（给出下一步该怎么说）', /No memory entries matched/.test(searchTool.output.render({}, none)[0].text));
+}
+
 /* --------------------------- 超预算：在**写入那一刻**就提醒（不占注入预算） */
 
 section('超预算：memory_write 当场给一句可读告警');

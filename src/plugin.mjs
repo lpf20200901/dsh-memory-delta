@@ -68,6 +68,9 @@ const truncated = (s, n = 200) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
+/** 真有文件可读的层（流水/会话索引是**行级**命中，路径给了也用不上，id 里已经带行号）。 */
+const ENTRY_WHERE = new Set(['facts', 'decisions', 'inbox', 'archive']);
+
 /**
  * 丢掉值为 `undefined` 的属性 —— DSH 的工具返回值必须是**无损 JSON**
  * （值为 undefined 的属性会让整个工具调用失败，见记忆库的 tool-output-lossless-json）。
@@ -126,7 +129,7 @@ export function apply(ctx, config = {}) {
           enum: ['all', 'facts', 'decisions', 'inbox', 'archive', 'journal', 'sessions', 'index'],
           description: 'Narrow the search to one layer. Default all.',
         },
-        limit: { type: 'integer', description: 'Max matches to return. Default 20.' },
+        limit: { type: 'integer', description: 'Max matches to return. Default 10 — each hit renders a snippet plus its file path (~300 bytes), so raise it only when you really need more; `truncated` in the result tells you when more matched.' },
       },
       output: {
         // ⚠️ 这里的字段清单必须**覆盖 searchLibrary 真正会返回的每一个键**。
@@ -170,21 +173,46 @@ export function apply(ctx, config = {}) {
             },
           },
         },
-        render: (_args, value) => [
-          {
-            type: 'text',
-            text:
-              value.total === 0
-                ? 'No memory entries matched.'
-                : `Matched ${value.total} memory entr${value.total === 1 ? 'y' : 'ies'}.` +
-                  (value.truncated ? ' More entries matched than this — raise `limit` or narrow the query.' : ''),
-          },
-        ],
+        // ⚠️⚠️ **模型只看得到 render 产出的文本** —— `value`（结构化的 matches）到不了它眼前：
+        //   · dsh-agent-loop/lib/index.js:307   content: result.content  → 进 `tool/result` 消息
+        //   · dsh-llm-deepseek/lib/index.js:158 content: flattenText(result.content) || "(no output)"
+        // 所以**命中列表必须渲染成文本**。这里曾经只有一句 `Matched N memory entries.` ——
+        // 调用不报错、`value` 里字段也齐全，但模型一条都看不到（id / 片段 / 路径全凭空消失），
+        // 等于"搜了个寂寞"。改 render 时记住：output.schema 只决定**校验**，render 才决定**模型看到什么**。
+        render: (_args, value) => {
+          if (!value.total) {
+            return [
+              {
+                type: 'text',
+                text: 'No memory entries matched. Chinese is matched by bigram, so no spaces are needed — try other keywords or one distinctive term.',
+              },
+            ];
+          }
+          const lines = [
+            `Matched ${value.total} memory entr${value.total === 1 ? 'y' : 'ies'}` +
+              (value.truncated ? ' (more matched than `limit` allowed — raise `limit` or narrow the query)' : '') +
+              ':',
+          ];
+          value.matches.forEach((m, i) => {
+            const head = [`${i + 1}. [${m.where}] ${m.id}`];
+            if (m.key && m.key !== m.id) head.push(`key=${m.key}`);
+            if (m.date) head.push(String(m.date));
+            head.push(`score=${m.score}`);
+            lines.push(head.join('  '));
+            const body = m.snippet || m.line;
+            if (body) lines.push(`   ${body}`);
+            if (m.file && ENTRY_WHERE.has(m.where)) lines.push(`   file: ${m.file}`);
+          });
+          lines.push('Snippets are clipped — read the file for the full conclusion and reason.');
+          return [{ type: 'text', text: lines.join('\n') }];
+        },
       },
       execute(args, exec) {
         const store = storeOf(exec?.agent?.session?.header?.cwd);
         if (!store) return Promise.resolve({ total: 0, matches: [] });
-        const limit = Number.isFinite(args.limit) ? Number(args.limit) : 20;
+        // 默认 10（不是 CLI/面板的 20）：命中现在会**连片段一起**渲染给模型（约 300 字节/条），
+        // 20 条 ≈ 7 KB ≈ 2k tokens。不够时结果里的 `truncated` 会说话，模型自己调大 `limit`。
+        const limit = Number.isFinite(args.limit) ? Number(args.limit) : 10;
 
         // 检索与 `mem recall`、侧边栏搜索框**完全共用一份实现**（`searchLibrary` →
         // `src/search.mjs` 的分词/打分/片段）。返回的是无损 JSON（`searchLibrary` 已经
