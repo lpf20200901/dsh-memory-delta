@@ -363,6 +363,38 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
 /* 「整理文件名」与「归类」的内联输入行：都是"让人自己填一个值"的小动作，
+/* 勾选框：批量操作的入口。缩到最小、别抢注意力，但要一直看得见（否则不知道能选） */
+.dsh-memory-delta-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin: 0 2px 0 0;
+  accent-color: var(--dsw-alias-brand-primary, #4a7dff);
+  cursor: pointer;
+}
+/* 分组头下面那条小工具条（选本组 / 改主题名 / 搜这组）：一行、可换行、低调 */
+.dsh-memory-delta-groupbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 3px;
+}
+/* 批量工具条：勾选后出现，粘在顶部（滚动时也能操作） */
+.dsh-memory-delta-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  margin: 2px 0 4px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.45));
+  background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,.06));
+  font-size: 11px;
+}
+.dsh-memory-delta-batch-count { font-weight: 600; margin-right: 2px; }
+/* 「整理文件名」与「归类」的内联输入行：都是"让人自己填一个值"的小动作，
    共用同一套样式（两者都刻意**不猜**：猜错文件名会改全库引用，猜错主题会造出同义主题） */
 .dsh-memory-delta-rename,
 .dsh-memory-delta-topic { display: flex; gap: 4px; margin-top: 3px; }
@@ -456,11 +488,15 @@ window.__ModuleLoader__.load({
      * 片段必须和 `mem recall`、模型看到的 `memory_search` 一模一样，否则就会出现
      * "我明明记过这条，界面却搜不到"这种最难查的分歧。
      */
-    function requestSearch(query, workspace) {
+    function requestSearch(query, workspace, topic) {
+      const payload = { query };
+      if (workspace) payload.workspace = workspace;
+      // 主题筛选：只在这个主题里搜（分组头的「搜这组」）
+      if (topic) payload.topic = topic;
       return fetch(SEARCH_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(workspace ? { query, workspace } : { query }),
+        body: JSON.stringify(payload),
       }).then(async (res) => {
         let data = null;
         try {
@@ -557,6 +593,20 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dsh-memory-delta-item-head' },
+          // 勾选框：批量操作的入口。自己挡住冒泡（否则点勾选会打开文件），
+          // 用 `onChange` 而不是 `onClick` 切换（受控 checkbox 点一下会同时触发两者 → 会被切换两次）
+          opts.select
+            ? h('input', {
+                type: 'checkbox',
+                className: 'dsh-memory-delta-check',
+                checked: Boolean(opts.select.checked),
+                'aria-label': '选择这条',
+                onClick: (ev) => {
+                  if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+                },
+                onChange: () => opts.select.onToggle(),
+              })
+            : null,
           opts.showWhere && e.where
             ? h('span', { className: 'dsh-memory-delta-where' }, WHERE_LABEL[e.where] || e.where)
             : null,
@@ -650,6 +700,22 @@ window.__ModuleLoader__.load({
        */
       const [groupBy, setGroupBy] = useState('topic');
       const [topicing, setTopicing] = useState(null);
+      /**
+       * **勾选**（批量操作的入口）：`{ [id]: true }`。
+       *
+       * 为什么用勾选而不是"整组按钮"：用户要的两件事其实是同一件 ——
+       * "按主题/类型/标签/日期成批处理"（选整组）与"挑出具体几条标记主题"（选部分）。
+       * 勾选 + 一条批量工具条能同时满足，而且只有一套心智模型。
+       */
+      const [selected, setSelected] = useState({});
+      /** 批量归类的行内输入（`{ value }`，null = 没打开）。 */
+      const [batchTopic, setBatchTopic] = useState(null);
+      /** 主题改名（分组头「改主题名」）：`{ from, value }`。 */
+      const [renamingTopic, setRenamingTopic] = useState(null);
+      /** 按主题搜：`null` = 不限主题。 */
+      const [searchTopic, setSearchTopic] = useState(null);
+      /** 上一次请求实际用的主题（`runSearch` 用它去重；不然切主题后同词会被当成重复请求跳过）。 */
+      const [searchedTopic, setSearchedTopic] = useState(null);
       const [actionError, setActionError] = useState(null);
       const [notice, setNotice] = useState(null);
       // 搜索：query 是输入框内容，results 是宿主回的命中（null = 还没搜/已清空）
@@ -703,7 +769,7 @@ window.__ModuleLoader__.load({
        * 跑一次检索。同一个词不重复请求（回车会立刻调它，而防抖那一路稍后也会到）。
        * 清空输入框时不发请求，只把结果丢掉 —— 回到分组视图。
        */
-      const runSearch = (raw) => {
+      const runSearch = (raw, topicOverride) => {
         const q = String(raw ?? '').trim();
         if (!q) {
           setResults(null);
@@ -711,12 +777,15 @@ window.__ModuleLoader__.load({
           setSearchError(null);
           return;
         }
-        if (q === searchedQuery) return;
+        // 主题筛选：`topicOverride` 是"刚点了搜这组"那一路传进来的新主题（状态还没生效，不能用闭包里的）
+        const topic = topicOverride !== undefined ? topicOverride : searchTopic;
+        if (q === searchedQuery && topic === searchedTopic) return;
         setSearchedQuery(q);
+        setSearchedTopic(topic);
         setSearching(true);
-        requestSearch(q, actionWorkspace())
+        requestSearch(q, actionWorkspace(), topic)
           .then((data) => {
-            setResults({ total: data.total || 0, matches: Array.isArray(data.matches) ? data.matches : [], query: q });
+            setResults({ total: data.total || 0, matches: Array.isArray(data.matches) ? data.matches : [], query: q, topic: data.topic ?? null });
             setSearchError(null);
           })
           .catch((err) => {
@@ -726,7 +795,8 @@ window.__ModuleLoader__.load({
           .then(() => setSearching(false));
       };
 
-      // 输入停顿 200ms 自动搜（回车立即搜）：不轮询、不每次按键都砸一遍磁盘
+      // 输入停顿 200ms 自动搜（回车立即搜）：不轮询、不每次按键都砸一遍磁盘。
+      // 主题筛选也进依赖：切主题就该重搜一次（否则界面显示的是上一个主题的结果）。
       useEffect(() => {
         const q = query.trim();
         if (!q) {
@@ -737,7 +807,7 @@ window.__ModuleLoader__.load({
         }
         const timer = setTimeout(() => runSearch(q), 200);
         return () => clearTimeout(timer);
-      }, [query]);
+      }, [query, searchTopic]);
 
       /** 确认条上的动词（"要<动词>这条？"）。 */
       const CONFIRM_VERB = { demote: '撤回', archive: '归档', restore: '取回', remove: '删除' };
@@ -1193,6 +1263,129 @@ window.__ModuleLoader__.load({
             )
           : null;
 
+      /* ------------------------------------------------------------ 勾选与批量 */
+
+      const selectedIds = Object.keys(selected).filter((id) => selected[id]);
+      const isSelected = (id) => Boolean(selected[id]);
+      const toggleSelected = (id) =>
+        setSelected((prev) => {
+          const next = { ...prev };
+          if (next[id]) delete next[id];
+          else next[id] = true;
+          return next;
+        });
+      /** 整组勾选 / 取消（分组头与批量条都用它）。 */
+      const setSelection = (ids, on) =>
+        setSelected((prev) => {
+          const next = { ...prev };
+          for (const id of ids) {
+            if (on) next[id] = true;
+            else delete next[id];
+          }
+          return next;
+        });
+      const clearSelection = () => setSelected({});
+
+      /** 批量动作的中文动词（回执与确认条共用）。 */
+      const BATCH_VERB = { promote: '提升', demote: '撤回', archive: '归档', restore: '取回', remove: '删除候选', topic: '归类' };
+
+      /**
+       * 跑一批动作 —— 宿主侧是 `applyBatch`（逐个复用单条实现）。
+       *
+       * ⚠️ **部分失败必须说出来**：批量提升时撞上"同一个 key 已有 active"的那几条会失败，
+       * 只说"完成"会让人以为全都成功了（"点了没反应"是最难查的体验）。
+       */
+      const runBatch = (action, ids, extra) => {
+        if (!ids.length) return Promise.resolve();
+        setPendingId('__batch__');
+        return callAction({ op: 'batch', action, ids, ...extra })
+          .then((r) => {
+            clearSelection();
+            setBatchTopic(null);
+            setConfirming(null);
+            const okCount = Array.isArray(r.succeeded) ? r.succeeded.length : 0;
+            const failed = Array.isArray(r.failed) ? r.failed : [];
+            if (failed.length) {
+              const head = failed.slice(0, 3).map((f) => `${f.id}：${f.error}`).join('；');
+              setNotice(null);
+              setActionError(`批量${BATCH_VERB[action] || action}：成功 ${okCount} 条、失败 ${failed.length} 条 —— ${head}${failed.length > 3 ? `；其余 ${failed.length - 3} 条同类原因` : ''}`);
+            } else {
+              setActionError(null);
+              setNotice(`批量${BATCH_VERB[action] || action}：${okCount} 条完成`);
+            }
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`批量${BATCH_VERB[action] || action}失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** 批量工具条上的按钮：`stage` 限定只在选中的条目都属于该阶段时可用。 */
+      const batchButton = (action, label, stage, extra) => {
+        const ids = selectedIds;
+        const ok = ids.length > 0 && (!stage || ids.every((id) => layerOfId(id) === stage));
+        const danger = action === 'remove' || action === 'archive';
+        return h(
+          'button',
+          {
+            type: 'button',
+            className: danger ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
+            disabled: !ok || pendingId === '__batch__',
+            title: ok ? undefined : stage === 'inbox' ? '只有候选能做这个（选中的条目里混了别的阶段）' : stage === 'standing' ? '只有常驻条目能做这个' : stage === 'archive' ? '只有归档条目能做这个' : undefined,
+            onClick: (ev) => {
+              stop(ev);
+              if (!ok) return;
+              // 危险动作（归档 / 删除）走行内确认；提升本来就是"人确认"那一步，直接执行
+              if (action === 'demote' || action === 'archive' || action === 'restore' || action === 'remove') {
+                setConfirming({ batch: { action, ids, extra }, label: `${label} ${ids.length} 条`, hint: '' });
+                return;
+              }
+              runBatch(action, ids, extra);
+            },
+          },
+          label,
+        );
+      };
+
+      /* ------------------------------------------------------------ 主题改名 / 按主题搜 */
+
+      const doRenameTopic = (from, to) => {
+        const value = String(to || '').trim();
+        if (!value) {
+          setActionError('改主题名：新名字不能为空');
+          return Promise.resolve();
+        }
+        setPendingId('__topic__');
+        return callAction({ op: 'topic-rename', from, to: value })
+          .then((r) => {
+            setRenamingTopic(null);
+            setActionError(null);
+            setNotice(`主题「${r.from}」→「${r.to}」（改了 ${r.changed} 条，含归档层里同名的）`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`改主题名失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => setPendingId(null));
+      };
+
+      /** 在某个主题里搜：切到搜索视图并带上主题筛选（输入框里的词保留）。 */
+      const searchInTopic = (topic) => {
+        setSearchTopic(topic);
+        const q = query.trim();
+        if (q) runSearch(q, topic);
+      };
+
+      /** 这条在哪个阶段（批量按钮据此判断"这个动作对整批都成立吗"）。 */
+      const layerOfId = (id) => {
+        if ((Array.isArray(state.inbox) ? state.inbox : []).some((e) => e.id === id)) return 'inbox';
+        if ((Array.isArray(state.archive) ? state.archive : []).some((e) => e.id === id)) return 'archive';
+        return 'standing';
+      };
+
       const head = h(
         'div',
         { className: 'dsh-memory-delta-head' },
@@ -1509,6 +1702,98 @@ window.__ModuleLoader__.load({
       };
 
       /**
+       * 分组头下面那条小工具条：**选本组**（批量入口）+ 主题视图里的「改主题名」「搜这组」。
+       *
+       * 放在组体最前面而不是挤进分组头：分组头已经很满（标题/目录名/说明/条数），
+       * 再塞三个按钮就会在窄侧栏里换行难看。
+       */
+      const groupBar = (layer, dimension, g) => {
+        const ids = g.list.map((e) => e.id);
+        const allOn = ids.length > 0 && ids.every(isSelected);
+        const buttons = [
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-memory-delta-mini',
+              onClick: (ev) => {
+                stop(ev);
+                setSelection(ids, !allOn);
+              },
+            },
+            allOn ? `取消本组 ${ids.length} 条` : `选本组 ${ids.length} 条`,
+          ),
+        ];
+        const isNamedTopic = dimension === 'topic' && g.key !== '__untopic__';
+        if (isNamedTopic) {
+          buttons.push(
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-memory-delta-mini',
+                title: '改这个主题的名字（所有层里同名的条目一起改）',
+                onClick: (ev) => {
+                  stop(ev);
+                  setRenamingTopic((prev) => (prev && prev.from === g.key ? null : { from: g.key, value: g.key }));
+                },
+              },
+              '改主题名',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-memory-delta-mini',
+                title: `只在这个主题里搜（${ids.length} 条）`,
+                onClick: (ev) => {
+                  stop(ev);
+                  searchInTopic(g.key);
+                },
+              },
+              '搜这组',
+            ),
+          );
+        }
+        const renaming = isNamedTopic && renamingTopic && renamingTopic.from === g.key;
+        return h(
+          'div',
+          { className: 'dsh-memory-delta-groupbar', key: `${layer}:${dimension}:${g.key}:bar` },
+          ...buttons,
+          renaming
+            ? h(
+                'div',
+                { className: 'dsh-memory-delta-topic', onClick: stop },
+                h('input', {
+                  value: renamingTopic.value,
+                  list: 'dsh-memory-delta-topic-options',
+                  placeholder: '新主题名',
+                  'aria-label': '新主题名',
+                  onChange: (ev) => setRenamingTopic({ from: g.key, value: ev && ev.target ? ev.target.value : '' }),
+                  onKeyDown: (ev) => {
+                    stop(ev);
+                    if (ev && ev.key === 'Enter') doRenameTopic(g.key, renamingTopic.value);
+                  },
+                }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-memory-delta-mini',
+                    disabled: pendingId === '__topic__',
+                    onClick: (ev) => {
+                      stop(ev);
+                      doRenameTopic(g.key, renamingTopic.value);
+                    },
+                  },
+                  pendingId === '__topic__' ? '改名中…' : '改名',
+                ),
+              )
+            : null,
+        );
+      };
+
+      /**
        * 渲染一个阶段的条目：按当前维度分子组。
        *
        * **只有一组时不出分组头** —— 那时"归纳"其实没发生，一个折叠头包着全部条目只是噪音
@@ -1523,8 +1808,13 @@ window.__ModuleLoader__.load({
             showTopic: dimension !== 'topic',
             actions: actionsFor(layer, e),
             extraRow: confirmRow(e) || renameRow(e) || topicRow(e),
+            // 勾选：三个阶段都能选，批量条按"选中的条目属于哪个阶段"决定按钮可用性
+            select: { checked: isSelected(e.id), onToggle: () => toggleSelected(e.id) },
           });
-        if (groups.length <= 1) return list.map(rowOf);
+        // ⚠️ **不再"单组就不出头"**：早期为了少一层折叠试过这个判据，结果真实数据上翻车 ——
+        // 「待你确认」里两条候选没主题、第一个标签又相同 → 主题/标签/日期各只剩一组，
+        // 于是界面上"只有类型看得出分组"（用户 2026-09-22 反馈的就是这个）。
+        // 现在**每个阶段都照维度分组**，一致性优先；单组时那个头也顺带说明"这一组是什么"。
         return groups.map((g) => {
           const key = `${layer}:${dimension}:${g.key}`;
           const note = dimension === 'type' && layer === 'standing' && g.key === 'facts'
@@ -1542,7 +1832,9 @@ window.__ModuleLoader__.load({
               open: isOpen(key),
               onToggle: () => toggleSection(key),
             },
-            (note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : []).concat(byDateDesc(g.list).map(rowOf)),
+            [groupBar(layer, dimension, g)]
+              .concat(note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : [])
+              .concat(byDateDesc(g.list).map(rowOf)),
           );
         });
       };
@@ -1754,6 +2046,107 @@ window.__ModuleLoader__.load({
         h('span', { className: 'dsh-memory-delta-flow-dim' }, `已归档 ${archiveCount}`),
       );
 
+      /* --------------------------------------------------------- 批量操作条 */
+
+      /**
+       * 勾选之后出现的批量工具条。
+       *
+       * 按钮**按阶段的合法性启用**：选中的条目必须全属于该动作要求的阶段（比如"提升"要求全是候选），
+       * 混选时按钮禁用并在 title 里说明原因 —— 比"点了报错"友好，也比"静默只处理一部分"诚实。
+       * 危险动作（撤回/归档/取回/删除）走**行内确认条**（和单条一样，不用 window.confirm）。
+       */
+      const batchBar = selectedIds.length
+        ? (() => {
+            const batch = confirming && confirming.batch ? confirming.batch : null;
+            const inner = batch
+              ? [
+                  h('span', { className: 'dsh-memory-delta-confirm-text', key: 'ask' }, `要批量${BATCH_VERB[batch.action] || batch.action}这 ${batch.ids.length} 条？${batch.hint || ''}`),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      key: 'go',
+                      className: batch.action === 'remove' || batch.action === 'archive' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
+                      disabled: pendingId === '__batch__',
+                      onClick: (ev) => {
+                        stop(ev);
+                        runBatch(batch.action, batch.ids, batch.extra);
+                      },
+                    },
+                    `确认${BATCH_VERB[batch.action] || ''} ${batch.ids.length} 条`,
+                  ),
+                  h(
+                    'button',
+                    { type: 'button', key: 'cancel', className: 'dsh-memory-delta-mini', onClick: (ev) => { stop(ev); setConfirming(null); } },
+                    '取消',
+                  ),
+                ]
+              : [
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      key: 'topic',
+                      className: 'dsh-memory-delta-mini',
+                      disabled: pendingId === '__batch__',
+                      title: '给选中的条目指定同一个主题（留空 = 取消归类）',
+                      onClick: (ev) => {
+                        stop(ev);
+                        setBatchTopic((prev) => (prev ? null : { value: '' }));
+                      },
+                    },
+                    '归类…',
+                  ),
+                  batchButton('promote', '提升', 'inbox'),
+                  batchButton('demote', '撤回', 'standing'),
+                  batchButton('archive', '归档', 'standing'),
+                  batchButton('restore', '取回', 'archive'),
+                  batchButton('remove', '删除候选', 'inbox'),
+                  h(
+                    'button',
+                    { type: 'button', key: 'clear', className: 'dsh-memory-delta-mini', onClick: (ev) => { stop(ev); clearSelection(); } },
+                    '清空勾选',
+                  ),
+                ];
+            return h(
+              'div',
+              { className: 'dsh-memory-delta-batch' },
+              h('span', { className: 'dsh-memory-delta-batch-count' }, `已选 ${selectedIds.length} 条`),
+              ...inner,
+              batchTopic
+                ? h(
+                    'div',
+                    { className: 'dsh-memory-delta-topic', onClick: stop },
+                    h('input', {
+                      value: batchTopic.value,
+                      list: 'dsh-memory-delta-topic-options',
+                      placeholder: '主题名（留空 = 取消归类）',
+                      'aria-label': '批量主题',
+                      onChange: (ev) => setBatchTopic({ value: ev && ev.target ? ev.target.value : '' }),
+                      onKeyDown: (ev) => {
+                        stop(ev);
+                        if (ev && ev.key === 'Enter') runBatch('topic', selectedIds, { topic: batchTopic.value });
+                      },
+                    }),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-memory-delta-mini',
+                        disabled: pendingId === '__batch__',
+                        onClick: (ev) => {
+                          stop(ev);
+                          runBatch('topic', selectedIds, { topic: batchTopic.value });
+                        },
+                      },
+                      '保存归类',
+                    ),
+                  )
+                : null,
+            );
+          })()
+        : null;
+
       /* ------------------------------------------------------------ 搜索块 */
       const searching_ = query.trim().length > 0;
       const hits = results && Array.isArray(results.matches) ? results.matches : [];
@@ -1772,15 +2165,38 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { className: 'dsh-memory-delta-dim', key: 'hint' },
-                '在条目（facts/ decisions/ inbox/ archive）与流水里按相关度搜 —— 和 `mem recall`、模型用的 memory_search 是同一套打分。清空搜索框回到分组视图。',
+                searchTopic
+                  ? `只在这个主题里搜：「${searchTopic}」—— 主题筛选只作用于条目，流水/会话索引没有主题所以不参与。`
+                  : '在条目（facts/ decisions/ inbox/ archive）与流水里按相关度搜 —— 和 `mem recall`、模型用的 memory_search 是同一套打分。清空搜索框回到分组视图。',
               ),
+              searchTopic
+                ? h(
+                    'div',
+                    { className: 'dsh-memory-delta-groupbar', key: 'topic-filter' },
+                    h('span', { className: 'dsh-memory-delta-tag is-topic' }, `主题：${searchTopic}`),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-memory-delta-mini',
+                        onClick: (ev) => {
+                          stop(ev);
+                          setSearchTopic(null);
+                        },
+                      },
+                      '取消主题筛选',
+                    ),
+                  )
+                : null,
               searchError
                 ? h('div', { className: 'dsh-memory-delta-error', key: 'err' }, `搜索失败：${searchError}`)
                 : results && results.total === 0
                   ? h(
                       'div',
                       { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
-                      '没有匹配 —— 换个说法，或拆成几个关键词（中文连写会自动切 bigram，不用手动加空格）',
+                      searchTopic
+                        ? `「${searchTopic}」里没有匹配 —— 换个说法，或点上面的「取消主题筛选」去全库搜`
+                        : '没有匹配 —— 换个说法，或拆成几个关键词（中文连写会自动切 bigram，不用手动加空格）',
                     )
                   : hits.map((hit) =>
                       item(hit, { onOpen: openMemoryFile, showType: true, showWhere: true, showSnippet: true, actions: [] }),
@@ -1797,6 +2213,7 @@ window.__ModuleLoader__.load({
         statusRow,
         overBudgetNotice,
         flow,
+        batchBar,
         // 「归类」输入的候选 = 库里**已有**的主题（写新主题是允许的，只是别造同义词）
         KNOWN_TOPICS.length
           ? h(

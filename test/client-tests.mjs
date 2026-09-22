@@ -130,6 +130,23 @@ function findByProp(node, prop, value) {
   return findByProp(node.kids ?? node.children, prop, value);
 }
 
+/** 树里所有**分组**（`.dsh-memory-delta-section` 且带 props.key）的 key，按渲染顺序。 */
+function orderedSectionKeys(node, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) {
+    for (const n of node) orderedSectionKeys(n, out);
+    return out;
+  }
+  const cls = node.props?.className;
+  // ⚠️ className 用**整词**匹配：`dsh-memory-delta-section-head` 这类子节点也含这一段
+  if (typeof cls === 'string' && cls.split(/\s+/).includes('dsh-memory-delta-section') && node.props.key) out.push(node.props.key);
+  orderedSectionKeys(node.kids ?? node.children, out);
+  return out;
+}
+
+/** 某个分组（section）节点本身 —— 断言"这一组里有什么"时用它，避免命中同名的别层分组。 */
+const sectionByKey = (mounted, key) => findByProp(mounted.tree(), 'key', key);
+
 /**
  * 切换归纳维度（主题 / 类型 / 标签 / 日期）。
  *
@@ -439,9 +456,16 @@ section('组件：正常数据');
     check('默认选中「主题」', String(first.props.className).includes('is-on') && allText(first).trim() === '主题', `${allText(first)} / ${first.props.className}`);
   }
   {
-    const topicHeaders = headerTexts(mounted.tree()).join(' | ');
-    check('主题视图：同主题的条目归到一组', topicHeaders.includes('环境与沙箱'), topicHeaders);
-    check('主题视图：没归类的单独一组，且排在命名组之后', topicHeaders.includes('未归类') && topicHeaders.indexOf('环境与沙箱') < topicHeaders.indexOf('未归类'), topicHeaders);
+    check('主题视图：同主题的条目归到一组', Boolean(sectionByKey(mounted, 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
+    // 顺序要在**同一层内部**比：三层的分组头都在同一份列表里，跨层比会误判
+    const keys = orderedSectionKeys(mounted.tree());
+    check(
+      '主题视图：没归类的单独一组，且排在同一层的命名组之后',
+      Boolean(sectionByKey(mounted, 'standing:topic:__untopic__')) &&
+        keys.indexOf('standing:topic:环境与沙箱') < keys.indexOf('standing:topic:__untopic__'),
+      keys.join(' > '),
+    );
+    check('待你确认这一层也跟随维度（单条候选也有「未归类」分组头）', Boolean(sectionByKey(mounted, 'inbox:topic:__untopic__')), keys.join(' > '));
   }
   selectDimension(mounted, '类型');
 
@@ -532,11 +556,11 @@ section('组件：折叠 / 展开');
   await flush();
   selectDimension(mounted, '类型'); // 下面断言的是「事实」分组头 —— 先切到类型视图
 
-  const factsToggle = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) =>
-    collectStrings(n.kids, []).join('').includes('事实'),
-  );
-  check('找到「事实」分组头（是 button，键盘也能操作）', factsToggle?.type === 'button', String(factsToggle?.type));
-  check('展开时 aria-expanded=true', factsToggle?.props?.['aria-expanded'] === 'true', String(factsToggle?.props?.['aria-expanded']));
+  // ⚠️ 必须**按分组 key 定位**「已在用」的事实组：类型视图下「待你确认」里也可能有事实组，
+  // 按"第一个文字含事实的分组头"找会命中上面那一层（去掉"单组不出头"之后真踩到）
+  const factsToggle = () => findAllByClass(sectionByKey(mounted, 'standing:type:facts'), 'dsh-memory-delta-toggle')[0];
+  check('找到「已在用」的事实分组头（是 button，键盘也能操作）', factsToggle()?.type === 'button', String(factsToggle()?.type));
+  check('展开时 aria-expanded=true', factsToggle()?.props?.['aria-expanded'] === 'true', String(factsToggle()?.props?.['aria-expanded']));
 
   // ⚠️ 「路径含非 ASCII…」这句话在**待复核**块里也有一份（SAMPLE.due 用的同一行），
   // 所以不能拿全文断言，得盯住「事实」分组里的条目节点。
@@ -544,15 +568,12 @@ section('组件：折叠 / 展开');
     findAllByClass(mounted.tree(), 'dsh-memory-delta-item').filter((n) => allText(n).includes('路径含非 ASCII'));
   check('收起前「事实」分组里有这条条目', factItems().length === 1, String(factItems().length));
 
-  factsToggle.props.onClick({});
+  factsToggle().props.onClick({});
   check('收起后条目消失', factItems().length === 0, String(factItems().length));
   const after = allText(mounted.tree());
   check('收起后其它分组不受影响（决策仍在）', after.includes('记忆的事实层只能由人确认后写入'), after.slice(0, 300));
-  const factsHeader = findAllByClass(mounted.tree(), 'dsh-memory-delta-toggle').find((n) =>
-    collectStrings(n.kids, []).join('').includes('事实'),
-  );
-  check('收起后该分组头的箭头不再带 is-open', !findByClass(factsHeader, 'dsh-memory-delta-caret').props.className.includes('is-open'));
-  check('分组头的展开标志变成"展开"（标题提示）', factsHeader.props.title === '展开', String(factsHeader.props.title));
+  check('收起后该分组头的箭头不再带 is-open', !findByClass(factsToggle(), 'dsh-memory-delta-caret').props.className.includes('is-open'));
+  check('分组头的展开标志变成"展开"（标题提示）', factsToggle().props.title === '展开', String(factsToggle().props.title));
 
   // 重渲染（点刷新）之后折叠状态必须**记住** —— 早前用 <details open> 时会被弹回全展开
   const refresh = findAllByClass(mounted.tree(), 'dsh-memory-delta-btn')[0];
@@ -1127,7 +1148,7 @@ section('组件：按主题归纳与「归类」按钮');
 
   // 默认主题视图：命名组在前、未归类在后；条目行上**不再重复**标主题（分组头已经说了）
   const headers = headerTexts(mounted.tree()).join(' | ');
-  check('默认按主题分组，命名组在前、未归类在后', headers.includes('环境与沙箱') && headers.includes('未归类') && headers.indexOf('环境与沙箱') < headers.indexOf('未归类'), headers);
+  check('默认按主题分组：命名组与「未归类」都在（且同层内命名组在前）', Boolean(sectionByKey(mounted, 'standing:topic:环境与沙箱')) && Boolean(sectionByKey(mounted, 'standing:topic:__untopic__')) && orderedSectionKeys(mounted.tree()).indexOf('standing:topic:环境与沙箱') < orderedSectionKeys(mounted.tree()).indexOf('standing:topic:__untopic__'), orderedSectionKeys(mounted.tree()).join(' > '));
   check('未归类组给一句"怎么做"', headers.includes('归类'), headers);
   check('主题视图里条目行不重复标主题', findAllByClass(mounted.tree(), 'is-topic').length === 0, String(findAllByClass(mounted.tree(), 'is-topic').length));
 
@@ -1197,15 +1218,164 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   globalThis.fetch = originalFetch;
 }
 
-section('组件：某一层只有一组时不加分组头（避免凭空多一层折叠）');
+section('组件：每个阶段都照当前维度分组（不做"单组就不出头"的特殊处理）');
 {
   const originalFetch = globalThis.fetch;
-  // 只有一条候选、且没主题 → 主题视图下"归纳"没有发生，不该套一个头
+  // 只有一条候选、且没主题。**曾经**这种情况不加分组头，结果真实数据上表现为
+  // "待你确认只有类型看得出分组"（用户反馈）—— 现在一致性优先：单组也照样出那个头，
+  // 顺带说明"这一组是什么"。
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
-  check('单条候选的收件箱不加子分组头', !findByProp(mounted.tree(), 'key', 'inbox:topic:__untopic__'), headerTexts(mounted.tree()).join(' | '));
-  check('但候选本身照常列出来', allText(mounted.tree()).includes('沙箱禁止命名管道'), allText(mounted.tree()).slice(0, 300));
+  check('单条候选的收件箱也照维度出分组头（「未归类」）', Boolean(sectionByKey(mounted, 'inbox:topic:__untopic__')), headerTexts(mounted.tree()).join(' | '));
+  check('候选本身照常列出来', allText(mounted.tree()).includes('沙箱禁止命名管道'), allText(mounted.tree()).slice(0, 300));
+  // 换维度也一样：日期视图下同一天也算一组
+  selectDimension(mounted, '日期');
+  check('换到日期视图，收件箱同样跟着走', Boolean(sectionByKey(mounted, 'inbox:date:2026-09-17')), orderedSectionKeys(mounted.tree()).join(' > '));
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：勾选 + 批量操作 + 主题改名 + 按主题搜 */
+
+section('组件：勾选与批量操作');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, body });
+    const payload =
+      url === '/dsh-memory-delta/action'
+        ? { ok: true, op: body?.op, action: body?.action, total: (body?.ids || []).length, succeeded: body?.ids || [], failed: [] }
+        : SAMPLE;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  // 每条都有勾选框（⚠️ `findAllByClass` 是子串匹配，`...-item-head` 也会被算进来 → 用整词筛）
+  const boxes = findAllByClass(mounted.tree(), 'dsh-memory-delta-check');
+  const items = findAllByClass(mounted.tree(), 'dsh-memory-delta-item').filter((n) => n.props.className.split(/\s+/).includes('dsh-memory-delta-item'));
+  check('每条条目都有勾选框', boxes.length === items.length && boxes.length >= 3, `${boxes.length} 勾选框 / ${items.length} 条目`);
+  check('没勾选时不显示批量条', findByClass(mounted.tree(), 'dsh-memory-delta-batch') === null, 'batch bar');
+
+  // 勾一条 → 出现批量条
+  const firstBox = boxes[0];
+  firstBox.props.onChange({});
+  const bar = findByClass(mounted.tree(), 'dsh-memory-delta-batch');
+  check('勾选后出现批量工具条', Boolean(bar), 'batch bar');
+  check('批量条报出已选条数', allText(bar).includes('已选 1 条'), allText(bar));
+  check('勾选框不会连带着打开文件（自己停冒泡）', typeof firstBox.props.onClick === 'function', 'onClick 存在');
+
+  // 清空 → 批量条消失
+  findAllByClass(bar, 'dsh-memory-delta-mini').find((n) => allText(n).includes('清空勾选')).props.onClick({ stopPropagation() {} });
+  check('清空勾选后批量条消失', findByClass(mounted.tree(), 'dsh-memory-delta-batch') === null, 'batch bar');
+
+  // 「选本组 N 条」= 一次选整组（这就是"按主题/类型/标签/日期批量操作"的入口）
+  const groupSelect = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('选本组'));
+  check('主题分组头上有「选本组」', Boolean(groupSelect), '选本组');
+  groupSelect.props.onClick({ stopPropagation() {} });
+  check('选本组后条数变成本组条数（2 条）', allText(findByClass(mounted.tree(), 'dsh-memory-delta-batch')).includes('已选 2 条'), allText(findByClass(mounted.tree(), 'dsh-memory-delta-batch')));
+
+  // 批量归类：输入 → 保存 → op=batch action=topic
+  findByClass(mounted.tree(), 'dsh-memory-delta-batch');
+  const topicBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('归类'));
+  topicBtn.props.onClick({ stopPropagation() {} });
+  const topicInput = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
+  topicInput.props.onChange({ target: { value: 'DSH 技能' } });
+  const saveTopic = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('保存归类'));
+  saveTopic.props.onClick({ stopPropagation() {} });
+  await flush();
+  const batchCall = calls.find((c) => c.body && c.body.op === 'batch');
+  check('批量归类发的是 op=batch + action=topic', batchCall?.body.action === 'topic' && batchCall.body.topic === 'DSH 技能' && batchCall.body.ids.length === 2, JSON.stringify(batchCall));
+  check('批量成功后给回执并清空勾选', allText(mounted.tree()).includes('批量归类：2 条完成') && findByClass(mounted.tree(), 'dsh-memory-delta-batch') === null, allText(mounted.tree()).slice(0, 160));
+
+  // 危险动作（撤回/归档/删除）走行内确认条，不是直接执行
+  const standingBoxes = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-check');
+  standingBoxes[0].props.onChange({});
+  const demoteBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '撤回');
+  demoteBtn.props.onClick({ stopPropagation() {} });
+  check('批量撤回先要确认（不会直接动手）', !calls.some((c) => c.body && c.body.action === 'demote') && allText(findByClass(mounted.tree(), 'dsh-memory-delta-batch')).includes('要批量撤回这 1 条'), allText(findByClass(mounted.tree(), 'dsh-memory-delta-batch')));
+  const goBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('确认撤回'));
+  goBtn.props.onClick({ stopPropagation() {} });
+  await flush();
+  check('确认后才真的批量撤回', calls.some((c) => c.body && c.body.op === 'batch' && c.body.action === 'demote'), JSON.stringify(calls.filter((c) => c.body && c.body.op === 'batch').slice(-1)));
+
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：批量部分失败要如实说出来');
+{
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : null;
+    const payload =
+      url === '/dsh-memory-delta/action'
+        ? { ok: true, op: 'batch', action: body?.action, total: 2, succeeded: [body?.ids?.[0]], failed: [{ id: body?.ids?.[1], error: '同一个 key（x）上已经有 active 条目：y' }] }
+        : SAMPLE;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  findAllByClass(sectionByKey(mounted, 'inbox:topic:__untopic__'), 'dsh-memory-delta-check')[0].props.onChange({});
+  const promoteBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '提升');
+  promoteBtn.props.onClick({ stopPropagation() {} });
+  await flush();
+  const text = allText(mounted.tree());
+  check('部分失败时同时报成功与失败条数', /成功 1 条、失败 1 条/.test(text), text.slice(0, 240));
+  check('失败原因原样显示（不是"点了没反应"）', text.includes('同一个 key'), text.slice(0, 240));
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：主题改名与按主题搜');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : null;
+    calls.push({ url, body });
+    const payload =
+      url === '/dsh-memory-delta/action'
+        ? { ok: true, op: body?.op, from: body?.from, to: body?.to, changed: 2 }
+        : url === '/dsh-memory-delta/search'
+          ? { ok: true, query: body?.query, where: 'all', topic: body?.topic ?? null, total: 1, truncated: false, matches: [{ id: 'x', where: 'facts', line: '打桩的命中', snippet: '打桩的命中', score: 1 }] }
+          : SAMPLE;
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  // 改主题名：分组头 → 输入 → 改名（走 op=topic-rename，全库同名主题一起改）
+  const renameBtn = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('改主题名'));
+  check('主题分组头上有「改主题名」', Boolean(renameBtn), '改主题名');
+  renameBtn.props.onClick({ stopPropagation() {} });
+  const input = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
+  check('改名输入框预填当前主题名', input?.props?.value === '环境与沙箱', String(input?.props?.value));
+  input.props.onChange({ target: { value: '沙箱与环境' } });
+  const goRename = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('改名'));
+  goRename.props.onClick({ stopPropagation() {} });
+  await flush();
+  const renameCall = calls.find((c) => c.body && c.body.op === 'topic-rename');
+  check('改名发的是 op=topic-rename（from/to）', renameCall?.body.from === '环境与沙箱' && renameCall.body.to === '沙箱与环境', JSON.stringify(renameCall));
+  check('改名后给回执（说明改了几条）', /主题「环境与沙箱」→「沙箱与环境」（改了 2 条/.test(allText(mounted.tree())), allText(mounted.tree()).slice(0, 200));
+
+  // 搜这组：搜索请求要带上主题筛选
+  const searchBtn = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('搜这组'));
+  check('主题分组头上有「搜这组」', Boolean(searchBtn), '搜这组');
+  findByClass(mounted.tree(), 'dsh-memory-delta-search-input').props.onChange({ target: { value: '沙箱' } });
+  await wait(320);
+  searchBtn.props.onClick({ stopPropagation() {} });
+  await wait(320);
+  const scoped = calls.filter((c) => c.url === '/dsh-memory-delta/search' && c.body.topic);
+  check('「搜这组」把主题带进了搜索请求', scoped.length >= 1 && scoped.at(-1).body.topic === '环境与沙箱', JSON.stringify(calls.filter((c) => c.url === '/dsh-memory-delta/search').slice(-2)));
+  const text = allText(mounted.tree());
+  check('搜索视图里显示出主题筛选条', text.includes('主题：环境与沙箱'), text.slice(0, 240));
+  const clearTopic = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).includes('取消主题筛选'));
+  check('主题筛选可以取消', Boolean(clearTopic), '取消主题筛选');
+  clearTopic.props.onClick({ stopPropagation() {} });
+  await wait(320);
+  check('取消后搜索请求不再带主题', calls.filter((c) => c.url === '/dsh-memory-delta/search').at(-1).body.topic === undefined, JSON.stringify(calls.filter((c) => c.url === '/dsh-memory-delta/search').at(-1)));
+
   globalThis.fetch = originalFetch;
 }
 

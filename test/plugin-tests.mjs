@@ -1125,6 +1125,39 @@ section('「动作」路由（promote / rename / topic）');
   const topicMissing = await callRoute(route, { body: JSON.stringify({ op: 'topic', id: 'nope-not-here', topic: 'x' }) });
   check('给不存在的条目归类 → 400 而不是让宿主崩溃', topicMissing.status === 400 && /找不到条目/.test(String(topicMissing.json.error)), String(topicMissing.json.error));
 
+  // ④c 主题改名（分组头「改主题名」）：库里属于该主题的条目**一起**改，不会裂成两个近义主题
+  createEntry(L, { type: 'fact', conclusion: '同主题的另一条', key: 'ren-a', topic: 'DSH 插件开发' });
+  const beforeRename = readAll(L).filter((e) => e.data?.topic === 'DSH 插件开发').length;
+  const renamedTopic = await callRoute(route, { body: JSON.stringify({ op: 'topic-rename', from: 'DSH 插件开发', to: '插件开发' }) });
+  check('topic-rename → 200 并报出改了几条', renamedTopic.status === 200 && renamedTopic.json.changed === beforeRename, JSON.stringify(renamedTopic.json));
+  check('改名后库里不再有旧主题名', readAll(L).every((e) => e.data?.topic !== 'DSH 插件开发'), JSON.stringify(readAll(L).map((e) => e.data?.topic)));
+  const renameMissingTopic = await callRoute(route, { body: JSON.stringify({ op: 'topic-rename', from: '不存在的主题', to: 'x' }) });
+  check('改不存在的主题 → 400 并列出已有主题', renameMissingTopic.status === 400 && /找不到主题/.test(String(renameMissingTopic.json.error)), String(renameMissingTopic.json.error));
+
+  // ④d 批量：勾选若干条 → 一次做完（逐个复用单条实现，部分失败如实返回）
+  const batchA = createEntry(L, { type: 'fact', conclusion: '批量提升 A', key: 'batch-a', topic: '批量' });
+  const batchB = createEntry(L, { type: 'fact', conclusion: '批量提升 B', key: 'batch-b', topic: '批量' });
+  const batchRes = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: [batchA.id, batchB.id] }) });
+  check('批量提升 → 200 且报出成功条数', batchRes.status === 200 && batchRes.json.succeeded.length === 2 && batchRes.json.failed.length === 0, JSON.stringify(batchRes.json));
+  check('批量提升真的把两条都搬进 facts/', fs.existsSync(path.join(L.facts, `${batchA.id}.md`)) && fs.existsSync(path.join(L.facts, `${batchB.id}.md`)), 'files');
+
+  // 同一个 key 上已有 active：批量里那一条必须**如实失败**（不是静默跳过，也不是整批回滚）
+  const batchC = createEntry(L, { type: 'fact', conclusion: '批量提升 C', key: 'batch-c', topic: '批量' });
+  const clashB = createEntry(L, { type: 'fact', conclusion: '同一个 key 的第二条', key: 'batch-a', topic: '批量' });
+  const partial = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: [batchC.id, clashB.id] }) });
+  check('批量中的失败项如实返回（成功 1 / 失败 1）', partial.json.succeeded.length === 1 && partial.json.failed.length === 1 && partial.json.failed[0].id === clashB.id, JSON.stringify(partial.json));
+  check('同批里的其它条目照常成功（不是整批回滚）', fs.existsSync(path.join(L.facts, `${batchC.id}.md`)) && fs.existsSync(path.join(L.inbox, `${clashB.id}.md`)), 'files');
+  check('失败原因原样带出（能直接显示给用户）', /一个 key 只能有一个真相/.test(String(partial.json.failed[0].error)), String(partial.json.failed[0].error));
+
+  const batchTopicSet = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'topic', ids: [clashB.id], topic: '批量归类' }) });
+  check('批量归类（op=batch + action=topic）', batchTopicSet.json.succeeded.length === 1 && readAll(L).find((e) => e.id === clashB.id)?.data.topic === '批量归类', JSON.stringify(batchTopicSet.json));
+  const batchBadAction = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'rename', ids: ['x'] }) });
+  check('批量不支持的动作（rename）→ 400', batchBadAction.status === 400 && /不支持的批量动作/.test(String(batchBadAction.json.error)), String(batchBadAction.json.error));
+  const batchNoIds = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: [] }) });
+  check('批量缺 ids → 400', batchNoIds.status === 400 && /需要 ids/.test(String(batchNoIds.json.error)), String(batchNoIds.json.error));
+  const batchTooMany = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: Array.from({ length: 201 }, (_, i) => `x${i}`) }) });
+  check('批量超过上限 → 400（不会一个请求搅一遍全库）', batchTooMany.status === 400 && /一次最多处理/.test(String(batchTooMany.json.error)), String(batchTooMany.json.error));
+
   // ⑤ 双向：demote（常驻 → 候选）与 remove（只删候选）
   const demoted = await callRoute(route, { body: JSON.stringify({ op: 'demote', id: 'panel-promote-renamed' }) });
   check(

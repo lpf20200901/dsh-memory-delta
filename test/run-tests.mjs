@@ -772,6 +772,27 @@ section('M13：主题 topic（面板按它归纳条目）');
   // ⑧ index.md 里也带上主题（派生视图要能看出归纳结果）
   run(['index', '--root', root]);
   check('index.md 带上主题', /「换个主题」/.test(fs.readFileSync(path.join(root, 'index.md'), 'utf8')), 'index');
+
+  // ⑨ 按主题搜：只返回该主题的条目（流水/会话索引没有主题，会被排除）
+  run(['promote', '--root', root, 'tp-b']);
+  run(['set', '--root', root, 'tp-b', '--topic', '另一个主题']);
+  run(['journal', 'add', '--root', root, '沙箱里 spawnSync 会 EPERM']);
+  const allHits = JSON.parse(run(['recall', '--root', root, '沙箱', '--json']).out);
+  const scopedHits = JSON.parse(run(['recall', '--root', root, '沙箱', '--topic', '换个主题', '--json']).out);
+  check('recall --topic 只返回该主题的条目', scopedHits.matches.length > 0 && scopedHits.matches.every((m) => m.topic === '换个主题'), flat(JSON.stringify(scopedHits.matches.map((m) => m.topic))));
+  check('不带 --topic 时结果更宽（含别的主题与流水）', allHits.matches.length > scopedHits.matches.length, `${allHits.matches.length} vs ${scopedHits.matches.length}`);
+  check('--json 里每条命中都带回 topic 字段', scopedHits.topic === '换个主题' && scopedHits.matches.every((m) => 'topic' in m), JSON.stringify(scopedHits.matches[0] ?? {}));
+
+  // ⑩ 主题改名：全库（含归档层）同名主题一起改，不会裂成两个近义主题
+  run(['promote', '--root', root, 'tp-c']);
+  run(['archive', '--root', root, 'tp-c']);
+  const renamed = run(['topic-rename', '--root', root, '发布 流程', '发布与流程']);
+  check('topic-rename 成功并报出条数', renamed.code === 0 && /改了 1 条/.test(renamed.out), flat(renamed.out + renamed.err));
+  check('改名把归档层里同名的也一起改了', JSON.parse(run(['topics', '--root', root, '--json']).out).topics.some((t) => t.topic === '发布与流程' && t.count === 1), flat(run(['topics', '--root', root, '--json']).out));
+  const renameMissing = run(['topic-rename', '--root', root, '不存在的主题', 'x']);
+  check('改不存在的主题 → 非零退出 + 列出已有主题', renameMissing.code !== 0 && /找不到主题/.test(renameMissing.out + renameMissing.err) && /现有：/.test(renameMissing.out + renameMissing.err), flat(renameMissing.out + renameMissing.err));
+  const renameSame = run(['topic-rename', '--root', root, '发布与流程', '发布与流程']);
+  check('新旧同名 → 拒绝（什么也没做就说清楚）', renameSame.code !== 0 && /一样/.test(renameSame.out + renameSame.err), flat(renameSame.out + renameSame.err));
 }
 
 /* ------------------------------------------------------------- 汇总 */

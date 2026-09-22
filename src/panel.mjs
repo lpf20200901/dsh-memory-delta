@@ -27,7 +27,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, restoreEntry, searchLibrary, setTopicEntry, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, applyBatch, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, renameTopic, restoreEntry, searchLibrary, setTopicEntry, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -41,7 +41,16 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
  *
  * `promote` 与 `demote` 是**双向**的：候选 ⇄ 常驻。`remove` 只删候选（见 `removeEntry` 的理由）。
  */
-export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename', 'topic'];
+export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename', 'topic', 'topic-rename', 'batch'];
+
+/**
+ * 批量动作的白名单 —— 与 `applyBatch` 支持的一致。
+ * 刻意**不含 rename**：改名要人给新名字（一条一个名字），批量改名没有意义。
+ */
+export const BATCH_ACTIONS = ['promote', 'demote', 'archive', 'restore', 'remove', 'topic'];
+
+/** 一次批量最多处理多少条（防止一个请求把整个库搅一遍）。 */
+export const PANEL_BATCH_LIMIT = 200;
 
 /** 搜索路由：面板搜索框 → 与 `mem recall` / `memory_search` 同一份检索实现。 */
 export const MEMORY_SEARCH_PATH = '/dsh-memory-delta/search';
@@ -603,7 +612,9 @@ export function createSearchRoute(opts = {}) {
           return;
         }
         // 面板展示用不着 400 字的片段，240 够看且省流量
-        const found = searchLibrary(L, { query, where, limit, maxLen: 240 });
+        // `topic`：只在这个主题里搜（面板的分组头「搜这组」用它）—— 空/缺省 = 不限主题
+        const topic = typeof body?.topic === 'string' && body.topic.trim() ? body.topic : null;
+        const found = searchLibrary(L, { query, where, limit, maxLen: 240, topic });
         writeJson(res, 200, { ok: true, ...found });
       } catch (error) {
         writeJson(res, 500, { ok: false, error: `搜索失败：${error?.message ?? String(error)}` });
@@ -710,7 +721,8 @@ export function createActionRoute(opts = {}) {
         }
         const L = ensureLayout(root, { create: false });
         const id = typeof body?.id === 'string' ? body.id : '';
-        if (!id) {
+        // `topic-rename` 与 `batch` 不用（也不该要求）单条 id：前者按主题名，后者用 ids 数组
+        if (!id && op !== 'topic-rename' && op !== 'batch') {
           writeJson(res, 400, { ok: false, error: '缺少 id' });
           return;
         }
@@ -749,6 +761,33 @@ export function createActionRoute(opts = {}) {
           // 它只是给这条加一个显示用的分组标签，所以三个阶段都能点。
           const r = setTopicEntry(L, id, body?.topic);
           writeJson(res, 200, { ok: true, op, id: r.id, topic: r.topic });
+          return;
+        }
+        if (op === 'topic-rename') {
+          // 主题改名：库里属于该主题的条目**一起改**（面板分组头的「改主题名」）。
+          // 不做成"逐条 set"是怕中途漏掉一条 → 一个主题裂成两个近义主题。
+          const r = renameTopic(L, body?.from, body?.to);
+          writeJson(res, 200, { ok: true, op, from: r.from, to: r.to, changed: r.changed });
+          return;
+        }
+        if (op === 'batch') {
+          // 批量：勾选若干条 → 一次做完同一件事。**逐个走单条实现**，部分失败如实返回。
+          const action = typeof body?.action === 'string' ? body.action : '';
+          if (!BATCH_ACTIONS.includes(action)) {
+            writeJson(res, 400, { ok: false, error: `不支持的批量动作：${action || '（空）'}（只支持 ${BATCH_ACTIONS.join(' / ')}）` });
+            return;
+          }
+          const ids = Array.isArray(body?.ids) ? body.ids.filter((x) => typeof x === 'string' && x.trim()) : [];
+          if (!ids.length) {
+            writeJson(res, 400, { ok: false, error: '批量操作需要 ids（非空字符串数组）' });
+            return;
+          }
+          if (ids.length > PANEL_BATCH_LIMIT) {
+            writeJson(res, 400, { ok: false, error: `一次最多处理 ${PANEL_BATCH_LIMIT} 条（收到 ${ids.length} 条）` });
+            return;
+          }
+          const r = applyBatch(L, ids, action, { topic: body?.topic });
+          writeJson(res, 200, { ok: true, op, ...r });
           return;
         }
         const to = typeof body?.to === 'string' ? body.to : '';

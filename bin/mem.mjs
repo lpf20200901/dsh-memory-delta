@@ -484,6 +484,21 @@ function cmdTopics(opts) {
   }
 }
 
+/** `mem topic-rename <旧> <新>` —— 主题改名（库里属于该主题的条目一起改，见 `renameTopic`）。 */
+function cmdTopicRename(opts) {
+  const root = resolveRoot(opts.root);
+  const L = ensureLayout(root, { create: false });
+  const [from, to] = opts._;
+  if (!from || !to) fail('用法：mem topic-rename <旧主题名> <新主题名>');
+  let result;
+  try {
+    result = renameTopic(L, from, to);
+  } catch (error) {
+    fail(error.message);
+  }
+  ok(`主题「${result.from}」→「${result.to}」（改了 ${result.changed} 条，含归档层里同名的）`);
+}
+
 function firstLine(body) {
   const lines = String(body || '')
     .split(/\r?\n/)
@@ -704,6 +719,73 @@ export function listTopics(L) {
     row.where[e.where] = (row.where[e.where] ?? 0) + 1;
   }
   return [...map.values()].sort((a, b) => b.count - a.count || a.topic.localeCompare(b.topic));
+}
+
+/**
+ * **主题改名**：把库里所有属于 `from` 这个主题的条目一起改成 `to`。
+ *
+ * 为什么需要它：主题名是**人**起的（面板「归类」/ `mem set --topic`），起完想改很正常
+ * （"DSH 插件开发" → "插件开发"）。如果没有这个操作，用户只能一条条重设 ——
+ * 而且中途漏掉一条就会分裂成两个近义主题（正是要避免的事）。
+ *
+ * 改名是**全局**的（不分层）：`已在用` 与 `已归档` 里同名的主题一起改，
+ * 否则"一个主题"会按层裂成两份。
+ *
+ * @returns {{from: string, to: string, changed: number}}
+ */
+export function renameTopic(L, from, to) {
+  const src = normalizeTopic(from);
+  const dst = normalizeTopic(to);
+  if (!src) throw new Error('旧主题名不能为空');
+  if (!dst) throw new Error('新主题名不能为空（清除某条的主题请用 mem set <id> --topic ""）');
+  if (src === dst) throw new Error('新旧主题名一样，什么也没做');
+  const hit = readAll(L).filter((e) => !e.error && normalizeTopic(e.data?.topic) === src);
+  if (!hit.length) {
+    const known = listTopics(L).map((t) => t.topic);
+    throw new Error(`找不到主题「${src}」${known.length ? `（现有：${known.join('、')}）` : '（库里还没有任何主题）'}`);
+  }
+  let changed = 0;
+  for (const e of hit) {
+    setTopicEntry(L, e.id, dst);
+    changed += 1;
+  }
+  return { from: src, to: dst, changed };
+}
+
+/**
+ * **批量动作**：把同一件事施加到一批条目上（面板里"勾选若干条 → 批量操作"就走这里）。
+ *
+ * 两条纪律：
+ *   1. **逐个复用单条实现**（promoteEntry / demoteEntry / archiveEntry / restoreEntry /
+ *      removeEntry / setTopicEntry）—— 批量不是第二套逻辑，闸门（一个 key 一个真相、只删候选…）
+ *      必须一模一样。
+ *   2. **部分失败必须如实返回**，绝不静默跳过：批量提升时撞上"同 key 已有 active"的那几条会失败，
+ *      调用方要能把失败原因原样显示给人（"点了没反应"是最难查的体验）。
+ *
+ * @param {string[]} ids
+ * @param {'promote'|'demote'|'archive'|'restore'|'remove'|'topic'} action
+ * @returns {{action: string, total: number, succeeded: string[], failed: Array<{id: string, error: string}>}}
+ */
+export function applyBatch(L, ids, action, opts = {}) {
+  const list = [...new Set((Array.isArray(ids) ? ids : []).map((x) => String(x).trim()).filter(Boolean))];
+  const succeeded = [];
+  const failed = [];
+  for (const id of list) {
+    try {
+      if (action === 'promote') promoteEntry(L, id, { supersedes: opts.supersedes });
+      else if (action === 'demote') demoteEntry(L, id);
+      else if (action === 'archive') archiveEntry(L, id, { status: opts.status });
+      else if (action === 'restore') restoreEntry(L, id);
+      else if (action === 'remove') removeEntry(L, id);
+      else if (action === 'topic') setTopicEntry(L, id, opts.topic);
+      else throw new Error(`不支持批量执行：${action}（只支持 promote / demote / archive / restore / remove / topic）`);
+      succeeded.push(id);
+    } catch (error) {
+      failed.push({ id, error: error?.message ?? String(error) });
+    }
+  }
+  writeIndex(L);
+  return { action, total: list.length, succeeded, failed };
 }
 
 /**
@@ -1196,6 +1278,7 @@ function collectDocs(L, { where = 'all' } = {}) {
       type: e.data.type,
       status: e.data.status,
       key: e.data.key || null,
+      topic: e.data.topic || null,
       tags: e.data.tags || [],
       date: e.data.date || '',
       conclusion: firstLine(e.body),
@@ -1229,21 +1312,27 @@ function collectDocs(L, { where = 'all' } = {}) {
  * 结果稳定可复现），这里只负责两件事：把库摊成文档（`collectDocs`）、把命中裁成**无损 JSON**。
  *
  * @param {object} L `ensureLayout` 的结果
- * @param {{query: string, where?: string, limit?: number, maxLen?: number}} opts
+ * @param {{query: string, where?: string, limit?: number, maxLen?: number, topic?: string|null}} opts
  *   `where`：all | facts | decisions | inbox | archive | journal | sessions | index
+ *   `topic`：只在这个主题的条目里搜（流水/会话索引没有主题，因此会被排除）
  * @returns {{query: string, where: string, total: number, truncated: boolean, matches: Array<object>}}
  *   `total` = **实际返回**的条数（受 limit 限制，不等于命中总数）；
  *   `truncated` = 还有命中被 limit 截掉了 —— 没有它的话，调用方（尤其是模型）看到"正好 20 条"
  *   会以为那就是全部。CLI 与面板据此提示"还有更多"。
  */
-export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 240 } = {}) {
+export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 240, topic = null } = {}) {
   const q = String(query ?? '').trim();
   const want = typeof where === 'string' && where ? where : 'all';
-  if (!q) return { query: '', where: want, total: 0, truncated: false, matches: [] };
+  const wantTopic = normalizeTopic(topic);
+  if (!q) return { query: '', where: want, topic: wantTopic, total: 0, truncated: false, matches: [] };
 
   const n = Number(limit) || 20;
+  // 按主题检索 = 先按主题筛掉别的条目，再排名（流水/会话索引没有主题，因此被筛掉 ——
+  // "在这个主题里搜"就该只搜这个主题里的东西）。
+  const docs = collectDocs(L, { where: want });
+  const scoped = wantTopic ? docs.filter((d) => normalizeTopic(d.topic) === wantTopic) : docs;
   // 先全量打分再切片：这样才知道"有没有被截掉"。打分是纯内存计算，成本可忽略。
-  const ranked = rankDocs(collectDocs(L, { where: want }), q);
+  const ranked = rankDocs(scoped, q);
   const hits = Number.isFinite(n) && n >= 0 ? ranked.slice(0, n) : ranked;
   const clip = (s) => {
     const t = String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -1260,6 +1349,7 @@ export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 24
         type: h.type,
         status: h.status,
         key: h.key ?? undefined,
+        topic: h.topic ?? undefined,
         tags: Array.isArray(h.tags) && h.tags.length ? h.tags : undefined,
         date: h.date ? String(h.date) : undefined,
         file: typeof h.file === 'string' && h.file ? h.file : undefined,
@@ -1271,7 +1361,7 @@ export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 24
     ),
   );
 
-  return { query: q, where: want, total: matches.length, truncated: ranked.length > matches.length, matches };
+  return { query: q, where: want, topic: wantTopic, total: matches.length, truncated: ranked.length > matches.length, matches };
 }
 
 /** 把片段里的关键词标色 —— 扫结果时这一步最省事。 */
@@ -1291,12 +1381,13 @@ function cmdRecall(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
   const query = String(opts._[0] || '').trim();
-  if (!query) fail('用法：mem recall <关键词> [--where all|facts|decisions|inbox|archive|journal|sessions|index] [--limit N] [--json]');
+  if (!query) fail('用法：mem recall <关键词> [--where all|facts|decisions|inbox|archive|journal|sessions|index] [--topic <主题>] [--limit N] [--json]');
 
   // 与插件工具 `memory_search`、侧边栏搜索框共用同一份检索（`searchLibrary`）
   const found = searchLibrary(L, {
     query,
     where: typeof opts.where === 'string' ? opts.where : 'all',
+    topic: typeof opts.topic === 'string' ? opts.topic : null,
     limit: opts.limit ? Number(opts.limit) : 20,
     maxLen: 400,
   });
@@ -1566,6 +1657,7 @@ if (isMain) {
     case 'new': cmdNew(opts); break;
     case 'list': cmdList(opts); break;
     case 'topics': cmdTopics(opts); break;
+    case 'topic-rename': cmdTopicRename(opts); break;
     case 'show': cmdShow(opts); break;
     case 'promote': cmdPromote(opts); break;
     case 'demote': cmdDemote(opts); break;
@@ -1649,9 +1741,11 @@ function usage() {
   inject [--budget <字节>] [--json]  渲染"应注入的内容"并核对预算
                           --json 输出带 per-entry hash 的结构化载荷（差分注入用）
   journal add "内容"       追加流水（不注入）
-  recall <关键词> [--where <层>] [--limit N] [--json]
+  recall <关键词> [--where <层>] [--topic <主题>] [--limit N] [--json]
                            相关度排序检索；中文自动切 bigram，结果带命中片段
                            --where：all（默认）| facts | decisions | inbox | archive | journal | sessions | index
+                           --topic：只在这个主题的条目里搜（流水/会话索引没有主题，会被排除）
+  topic-rename <旧> <新>    主题改名（库里属于该主题的条目一起改，含归档层里同名的）
   due [--within N] [--json]
                            列出到了 verify_when 复核期的 active 条目（默认只看已到期）
                            --within N 提前 N 天提醒；没有到期项时不算失败（退出码 0）
