@@ -65,6 +65,34 @@ function losslessError(value, path = '$') {
   return `${path} 的类型 ${t} 不是 JSON 值`;
 }
 
+/**
+ * 用工具**自己声明的 output.schema** 检查它的返回值，只做 DSH 会做的那条最要命的检查：
+ * 每个对象键都必须被声明过（`additionalProperties: false`）。
+ *
+ * 为什么必须自己检查：DSH 的 `ToolRuntime.createSuccessResult()` 会对返回值跑这个校验，
+ * 不通过就 `throw ToolOutputError` —— **整个工具调用变成一条错误**（模型看不到任何命中）。
+ * 而这里的 `defineTool` 是桩（identity，不校验），真机预检又只调 `execute()`（校验在 runtime 层），
+ * 两边都看不见这一步。真机踩到（2026-09-21）：`memory_search` 的 output.schema 没声明
+ * `tags`/`date`/`file`，而 `searchLibrary` 给每条命中都带 `file` —— 于是**只要有任何命中**，
+ * `memory_search` 就报 `"value.matches[0].file" is not a declared property`；只有零命中看似正常。
+ *
+ * @returns {string[]} 未声明键的路径列表（空 = 契约一致）
+ */
+function undeclaredKeys(schema, value, at = 'value', out = []) {
+  if (!schema || typeof schema !== 'object') return out;
+  if (Array.isArray(value)) {
+    if (schema.items) value.forEach((v, i) => undeclaredKeys(schema.items, v, `${at}[${i}]`, out));
+    return out;
+  }
+  if (!value || typeof value !== 'object') return out;
+  const props = schema.properties ?? {};
+  if (schema.additionalProperties === false) {
+    for (const k of Object.keys(value)) if (!(k in props)) out.push(`${at}.${k}`);
+  }
+  for (const [k, sub] of Object.entries(props)) if (k in value) undeclaredKeys(sub, value[k], `${at}.${k}`, out);
+  return out;
+}
+
 function rmrf(p) {
   if (!fs.existsSync(p)) return;
   const st = fs.lstatSync(p);
@@ -460,6 +488,55 @@ const toolAgent = fakeAgent(cwdOfProject, 'session-tool');
     JSON.stringify(journalHit.matches.map((m) => Object.keys(m))),
   );
   check('memory_write 的输出也是无损 JSON', losslessError(await writeTool.execute({ type: 'fact', conclusion: '无损 JSON 探针' }, { agent: toolAgent })) === null);
+}
+
+/* ------------------------------- 工具输出契约：返回值 vs 自己声明的 output.schema */
+
+section('工具输出契约：返回值只能出现 output.schema 声明过的字段');
+{
+  // 自检：这个检查本身得能发现问题，否则它只是个摆设
+  const bogus = { type: 'object', additionalProperties: false, properties: { a: { type: 'string' } } };
+  const caught = undeclaredKeys(bogus, { a: '1', b: '2' });
+  check('自检：未声明的键会被抓出来', caught.join(',') === 'value.b', JSON.stringify(caught));
+  check('自检：声明过的键不误报', undeclaredKeys(bogus, { a: '1' }).length === 0);
+  check('自检：嵌套数组里的未声明键也能抓到', undeclaredKeys({ type: 'object', additionalProperties: false, properties: {} }, { xs: [{ y: 1 }] }).join(',') === 'value.xs', '顶层要抓');
+
+  // 命中「条目」：带 tags/date/file —— 真机上就是这几个字段让整个调用失败的
+  const rich = await searchTool.execute({ query: 'rmSync' }, { agent: toolAgent });
+  check(
+    'memory_search 命中条目：返回值只用声明过的字段',
+    undeclaredKeys(searchTool.output.schema, rich).length === 0,
+    undeclaredKeys(searchTool.output.schema, rich).join(' '),
+  );
+  check('命中里确实带上了 file/date（不是被"顺手删字段"蒙过去）', rich.matches.some((m) => m.file && m.date), JSON.stringify(Object.keys(rich.matches[0] ?? {})));
+
+  // 命中「流水行」：只有 id/where/file/line/snippet/matched/score
+  const journalOnly = await searchTool.execute({ query: '命名管道那条坑', where: 'journal' }, { agent: toolAgent });
+  check(
+    'memory_search 命中流水行：返回值只用声明过的字段',
+    undeclaredKeys(searchTool.output.schema, journalOnly).length === 0,
+    undeclaredKeys(searchTool.output.schema, journalOnly).join(' '),
+  );
+
+  const emptyHit = await searchTool.execute({ query: '绝对搜不到的词xyzzy' }, { agent: toolAgent });
+  check('memory_search 零命中：返回值合契约', undeclaredKeys(searchTool.output.schema, emptyHit).length === 0, undeclaredKeys(searchTool.output.schema, emptyHit).join(' '));
+
+  check('memory_write 返回值只用声明过的字段', undeclaredKeys(writeTool.output.schema, { id: 'x', status: 'inbox' }).length === 0);
+
+  // 改 searchLibrary 的返回形状、忘了同步 output.schema —— 这两条把"改一处忘另一处"钉死。
+  // 注意：只查**条目级**字段（顶层多出的 query/where 不会进工具返回值，工具自己投影了）。
+  const cutRoot = path.join(SANDBOX, 'truncation');
+  const CL = ensureLayout(cutRoot);
+  for (const n of [1, 2, 3]) createEntry(CL, { type: 'fact', conclusion: `沙箱管道第 ${n} 条结论`, tags: ['截断'], scope: 'workspace:cut' });
+  const sample = searchLibrary(CL, { query: '沙箱管道', limit: 1 }).matches[0] ?? {};
+  const itemKeys = Object.keys(searchTool.output.schema.properties.matches.items.properties);
+  check('searchLibrary 每条命中的字段都在 matches.items 里声明过', Object.keys(sample).every((k) => itemKeys.includes(k)), `命中=[${Object.keys(sample).join(',')}] schema=[${itemKeys.join(',')}]`);
+
+  // truncated：命中被 limit 截掉时要能看出来（否则"正好 20 条"会被当成全部）
+  const cutTwo = searchLibrary(CL, { query: '沙箱管道', limit: 2 });
+  check('命中被 limit 截断时 truncated=true', cutTwo.total === 2 && cutTwo.truncated === true, JSON.stringify({ total: cutTwo.total, truncated: cutTwo.truncated }));
+  const cutAll = searchLibrary(CL, { query: '沙箱管道', limit: 9 });
+  check('全部返回时 truncated=false', cutAll.total === 3 && cutAll.truncated === false, JSON.stringify({ total: cutAll.total, truncated: cutAll.truncated }));
 }
 
 /* --------------------------- 超预算：在**写入那一刻**就提醒（不占注入预算） */

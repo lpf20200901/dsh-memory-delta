@@ -1098,14 +1098,20 @@ function collectDocs(L, { where = 'all' } = {}) {
  * @param {object} L `ensureLayout` 的结果
  * @param {{query: string, where?: string, limit?: number, maxLen?: number}} opts
  *   `where`：all | facts | decisions | inbox | archive | journal | sessions | index
- * @returns {{query: string, where: string, total: number, matches: Array<object>}}
+ * @returns {{query: string, where: string, total: number, truncated: boolean, matches: Array<object>}}
+ *   `total` = **实际返回**的条数（受 limit 限制，不等于命中总数）；
+ *   `truncated` = 还有命中被 limit 截掉了 —— 没有它的话，调用方（尤其是模型）看到"正好 20 条"
+ *   会以为那就是全部。CLI 与面板据此提示"还有更多"。
  */
 export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 240 } = {}) {
   const q = String(query ?? '').trim();
   const want = typeof where === 'string' && where ? where : 'all';
-  if (!q) return { query: '', where: want, total: 0, matches: [] };
+  if (!q) return { query: '', where: want, total: 0, truncated: false, matches: [] };
 
-  const hits = rankDocs(collectDocs(L, { where: want }), q, { limit: Number(limit) || 20 });
+  const n = Number(limit) || 20;
+  // 先全量打分再切片：这样才知道"有没有被截掉"。打分是纯内存计算，成本可忽略。
+  const ranked = rankDocs(collectDocs(L, { where: want }), q);
+  const hits = Number.isFinite(n) && n >= 0 ? ranked.slice(0, n) : ranked;
   const clip = (s) => {
     const t = String(s ?? '').replace(/\s+/g, ' ').trim();
     if (t.length <= maxLen) return t;
@@ -1132,7 +1138,7 @@ export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 24
     ),
   );
 
-  return { query: q, where: want, total: matches.length, matches };
+  return { query: q, where: want, total: matches.length, truncated: ranked.length > matches.length, matches };
 }
 
 /** 把片段里的关键词标色 —— 扫结果时这一步最省事。 */
@@ -1177,6 +1183,7 @@ function cmdRecall(opts) {
     console.log(`    ${highlight(h.snippet, h.matched || [])}`);
   }
   console.log(dim(`\n命中 ${hits.length} 条（按相关度排序；--json 可机器读）`));
+  if (found.truncated) console.log(dim(`  还有更多命中被 --limit ${opts.limit ? Number(opts.limit) : 20} 截掉了：调大 --limit 或把关键词写具体些`));
 }
 
 /* ---------------------------------------------------------------- due */

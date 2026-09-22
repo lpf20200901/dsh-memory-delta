@@ -129,11 +129,23 @@ export function apply(ctx, config = {}) {
         limit: { type: 'integer', description: 'Max matches to return. Default 20.' },
       },
       output: {
+        // ⚠️ 这里的字段清单必须**覆盖 searchLibrary 真正会返回的每一个键**。
+        //
+        // 真机踩到（2026-09-21）：`tags` / `date` / `file` 曾没声明，而 `searchLibrary`
+        // 给每条命中都带上 `file` —— DSH 在 `ToolRuntime.createSuccessResult()` 里会对返回值
+        // 跑一遍 `additionalProperties: false` 校验，于是**只要有任何命中**，整个工具调用就变成
+        // `Error: tool "memory_search" returned invalid output: "value.matches[0].file" is not a
+        // declared property`；只有"零命中"才看起来正常。
+        //
+        // 这个坑能活下来是因为两条测试都绕过了这一步：plugin-tests 用桩 defineTool（identity，
+        // 不校验），preflight 只调 `execute()`（校验发生在 runtime 层）。现在两边都补上了
+        // 对输出契约的断言 —— **改 searchLibrary 的返回字段时，同步改这里**。
         schema: {
           type: 'object',
           additionalProperties: false,
           properties: {
-            total: { type: 'integer', required: true },
+            total: { type: 'integer', required: true, description: 'Number of matches actually returned (bounded by `limit`, so it is not the total number of hits).' },
+            truncated: { type: 'boolean', description: 'True when more entries matched than `limit` allowed: raise `limit` or narrow the query to see the rest.' },
             matches: {
               type: 'array',
               required: true,
@@ -142,10 +154,13 @@ export function apply(ctx, config = {}) {
                 additionalProperties: false,
                 properties: {
                   id: { type: 'string', required: true },
-                  where: { type: 'string', required: true },
+                  where: { type: 'string', required: true, description: 'facts | decisions | inbox | archive | journal | sessions | index' },
                   type: { type: 'string' },
                   status: { type: 'string' },
                   key: { type: 'string' },
+                  tags: { type: 'array', items: { type: 'string' } },
+                  date: { type: 'string', description: 'Date the entry was recorded (YYYY-MM-DD); use it to judge how fresh the conclusion is.' },
+                  file: { type: 'string', description: 'Absolute path of the entry (or journal/sessions) file — read it for the full conclusion and reason, since the snippet is clipped.' },
                   line: { type: 'string', required: true },
                   snippet: { type: 'string' },
                   score: { type: 'number' },
@@ -158,7 +173,11 @@ export function apply(ctx, config = {}) {
         render: (_args, value) => [
           {
             type: 'text',
-            text: value.total === 0 ? 'No memory entries matched.' : `Matched ${value.total} memory entr${value.total === 1 ? 'y' : 'ies'}.`,
+            text:
+              value.total === 0
+                ? 'No memory entries matched.'
+                : `Matched ${value.total} memory entr${value.total === 1 ? 'y' : 'ies'}.` +
+                  (value.truncated ? ' More entries matched than this — raise `limit` or narrow the query.' : ''),
           },
         ],
       },
@@ -171,7 +190,7 @@ export function apply(ctx, config = {}) {
         // `src/search.mjs` 的分词/打分/片段）。返回的是无损 JSON（`searchLibrary` 已经
         // 把值为 undefined 的字段整条省掉了，见那里的注释）。
         const found = searchLibrary(store.L, { query: args.query, where: args.where ?? 'all', limit, maxLen: 240 });
-        return Promise.resolve({ total: found.total, matches: found.matches });
+        return Promise.resolve({ total: found.total, truncated: found.truncated, matches: found.matches });
       },
       presentCall: (args) => ({ card: 'generic', title: `Search memory: ${truncated(args.query, 60)}`, kind: 'other', rawInput: args }),
     }),

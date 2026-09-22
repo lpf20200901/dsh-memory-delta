@@ -126,6 +126,27 @@ try {
   const found = await searchTool.execute({ query: '真机预检' }, { agent });
   check('memory_search 找得到刚写的条目', found.total >= 1, JSON.stringify(found).slice(0, 160));
 
+  /* ---- 工具输出契约：用**真实的** DSH 校验器验返回值 ----
+   *
+   * 这一步是 2026-09-21 真机翻车后补上的：`memory_search` 的 output.schema 漏声明了
+   * `tags`/`date`/`file`，而每条命中都带 `file` —— DSH 的
+   * `ToolRuntime.createSuccessResult()` 会对返回值跑 `additionalProperties: false` 校验，
+   * 不通过就 `throw ToolOutputError`，于是**只要有任何命中，整个工具调用就是一条错误**。
+   *
+   * 为什么原来没测出来：本文件只调 `execute()`，而校验发生在 runtime 层（execute 之外）；
+   * 桩测试里的 `defineTool` 是 identity、更不校验。所以这里显式复刻 runtime 那一步 ——
+   * 用的是**真的** `validateJsonSchemaValue`，和真机同一条代码路径。
+   */
+  const { validateJsonSchemaValue } = await import('@deepseek-ai/dsh-tools');
+  const contract = (tool, value) => validateJsonSchemaValue(tool.output.schema, value, 'value');
+  const writeViolations = contract(writeTool, written);
+  check('memory_write 的返回值满足自己声明的 output.schema', writeViolations.length === 0, writeViolations.join('; '));
+  const searchViolations = contract(searchTool, found);
+  check('memory_search 的返回值满足自己声明的 output.schema', searchViolations.length === 0, searchViolations.join('; '));
+  const missViolations = contract(searchTool, await searchTool.execute({ query: '绝对搜不到的词xyzzy' }, { agent }));
+  check('memory_search 零命中时也满足 output.schema', missViolations.length === 0, missViolations.join('; '));
+  check('校验器可用（不是空跑一场）', typeof validateJsonSchemaValue === 'function' && contract({ output: { schema: { type: 'object', additionalProperties: false, properties: {} } } }, { nope: 1 }).length === 1);
+
   const renderWrite = writeTool.output?.render?.({}, written);
   check('memory_write 的 render 可用', Array.isArray(renderWrite) && typeof renderWrite[0]?.text === 'string');
   const renderSearch = searchTool.output?.render?.({}, found);

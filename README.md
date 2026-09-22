@@ -141,10 +141,10 @@ Seven rules:
 | Capability | Detail |
 | --- | --- |
 | **Differential injection** | First round injects every active entry (baseline); afterwards only *added / updated / removed*; **nothing at all** when unchanged |
-| `memory_search` | Relevance-ranked search across facts / decisions / inbox / archive / journal / session index. Field weights (key/id > tags > conclusion > body), a whole-phrase bonus, and Chinese matched by **bigram** so a query like `沙箱禁管道` hits `沙箱禁止命名管道` without spaces. Each hit carries a score and a snippet from its best-matching line |
+| `memory_search` | Relevance-ranked search across facts / decisions / inbox / archive / journal / session index. Field weights (key/id > tags > conclusion > body), a whole-phrase bonus, and Chinese matched by **bigram** so a query like `沙箱禁管道` hits `沙箱禁止命名管道` without spaces. Each hit carries a score, a snippet from its best-matching line, its `tags`/`date`, and the **path of its file** (read it for the full conclusion and reason, since the snippet is clipped); `truncated` tells the model when `limit` cut the list short |
 | `memory_write` | Record a candidate into the inbox — **the model cannot touch the standing layer** |
 | Distillation nudge | Once a session has run a few steps and memory is already current, it reminds the model to record conclusions with `memory_write`; one nudge per session, and the nudge message carries **no state**, so it cannot corrupt the diff baseline |
-| Due-for-review reminder | `verify_when` is no longer a dead field: when an entry reaches its review date, the session is told once — "this conclusion may be stale, re-check it" — with the exact command to supersede or expire it. Prose values (`等换机器时`) never trigger it, so the reminder can always be resolved; it fires only on a step that injects nothing else, and it carries **no state** either |
+| Due-for-review reminder | `verify_when` is no longer a dead field: when an entry reaches its review date, the session is told once — "this conclusion may be stale, re-check it" — with the commands **the user** should run to supersede or expire it — retiring a standing entry is a human action, so the model is told to hand it over (it may only add the new conclusion to the inbox as a candidate). Prose values (`等换机器时`) never trigger it, so the reminder can always be resolved; it fires only on a step that injects nothing else, and it carries **no state** either |
 | **Bundled skill** | On `apply` the plugin registers a skill named `dsh-memory-delta` through `ctx.skills.register()` — **runtime registration**, so nothing is written into your skill directories and uninstalling/reloading the plugin removes it again. In any workspace that has the plugin, typing `/dsh-memory-delta` brings up the usage rules and the permission boundary (the model may only write the inbox; promoting/archiving is a human action), and the model itself can load it when the description matches. Set `skill: false` if you do not want that extra line in the skill catalog |
 | Sidebar memory tab | With [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) installed, a **记忆** tab groups entries **by stage in the flow** (`待你确认 → 已在用 → 已归档`, each with one plain-language line plus a flow strip on top), collapsible (a drawn caret), with a **search box** (entries *and* the journal, Chinese run-together queries included — the **same scoring** as `mem recall` and the model's `memory_search`). The standing layer can be viewed along **three axes**: **type** (facts/decisions — "which side does it belong to"), **tag** (by topic) and **date** (when it was recorded, labelled today / yesterday / weekday). **Clicking an entry opens its `.md`** through better-sidebar's official `openFile` (preview/edit in the sidebar editor). **Both directions**: candidates can be promoted, standing entries can be **withdrawn** (back to candidates) or **archived**, archived ones **restored**, candidates **deleted** — every destructive action goes through an **inline confirm bar** (never `window.confirm`, which blocks the page and would hang headless screenshots). The standing layer also shows the **global instructions** (`~/.dsh/AGENTS.md`, injected by DSH into every workspace — read-only preview, collapsed by default) and the **workspace instructions** (`AGENTS.md` / `AGENTS.local.md`, with an **Edit** button that opens them in the sidebar editor). The client half is a **hand-written, zero-build browser bundle** (a `window.__ModuleLoader__.load({id, factory})` wrapper, no bundler); its data comes from this plugin's own read-only `POST /dsh-memory-delta/state` and `POST /dsh-memory-delta/search` routes — loopback-only, JSON in / JSON out, reading nothing but the memory store. The one route that *writes* is `POST /dsh-memory-delta/action` (promote / withdraw / archive / restore / delete candidate / safe rename); turn it off with `allowWrite: false` |
 | Why editing/deleting memory is *not* built into the panel | The sidebar already ships an editor (opening an entry is enough) and a file tree with confirmed rename/delete. Re-implementing full CRUD in the panel would be duplication plus a permanent maintenance tax, so the panel offers **entry points** plus **the two actions that genuinely need human judgement**: open file, **one-click promote** of an inbox candidate (the human-confirmation step finally has a UI) and **tidy the file name** (`mem rename`: id + file name + references together). **Pure "jump to the folder" buttons are deliberately not built** — a caret to expand plus clicking an entry for detail is enough, and an extra button only adds noise plus a route that launches an external process. ⚠️ Do **not** rename memory entries through the file tree — the `id` lives in the frontmatter and must match the file name, or `mem validate` reports `id 与文件名不一致`; that is exactly why renaming is a dedicated safe operation instead of free-form editing |
@@ -213,13 +213,14 @@ Checked item by item inside a real DSH session:
 | delta · updated | after editing one entry, only "已更新：<that entry>" was pushed |
 | due-for-review reminder | adding an entry whose `verify_when` was 16 days overdue produced a one-time `form='due'` reminder on the next no-change step, and the step after it injected nothing (the reminder did not reset the diff baseline) |
 | sidebar **记忆** tab | the tab opened on a live store and showed the real root, "常驻 12 条", "注入 1792 / 3072 字节", the facts/decisions split and the (empty) inbox |
-| `memory_search` / `memory_write` | both called successfully in the real runtime |
+| `memory_search` / `memory_write` | `memory_write` called successfully in a live session; `memory_search` **failed** — see the tool-output-contract entry below |
+| tool output contract | `test/preflight-import.mjs` now replays the runtime's own step (`validateJsonSchemaValue` over each tool's declared `output.schema`) against the values both tools actually return |
 | writes land only in the inbox | the written candidate did **not** enter the injection payload; it appeared as a delta only after promotion |
 
 ## Development
 
 ```bash
-npm test        # 825 assertions, zero dependencies
+npm test        # 847 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -229,7 +230,7 @@ npm test        # 825 assertions, zero dependencies
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 217 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks) |
+| `test/plugin-tests.mjs` | 239 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename actually writing the store + whitelist/origin checks + tool-output contract) |
 | `test/client-tests.mjs` | 178 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, entry click → `openFile`, promote/tidy, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
@@ -251,6 +252,17 @@ Regression tests baked in from real bugs:
 - A field added to *some* early-return paths of an internal planner function (`due`) was destructured
   into `undefined` and threw on every step, which the outer `try/catch` silently reported as
   "failed to load memory" — hence the defensive read and the zero-warning assertion.
+- **`memory_search` never worked in a live session, and no test could see it.** The tool's declared
+  `output.schema` omitted `tags` / `date` / `file` while `searchLibrary` attaches `file` to *every*
+  hit, and DSH validates a tool's return value in `ToolRuntime.createSuccessResult()` with
+  `additionalProperties: false` — so any call that matched at least one entry came back as
+  `tool "memory_search" returned invalid output: "value.matches[0].file" is not a declared property`
+  (only "no matches" looked healthy). Both test layers had the same blind spot: the stub `defineTool`
+  is an identity function that validates nothing, and the preflight only called `execute()` while the
+  check lives in the runtime, *outside* `execute`. Fixed by declaring the fields, and pinned from both
+  sides — a structural contract check in `test/plugin-tests.mjs` (`undeclaredKeys`) and the real
+  `validateJsonSchemaValue` in `test/preflight-import.mjs`. **Rule: when `searchLibrary` gains a
+  field, the tool's `output.schema` must gain it too** — the tests now fail loudly if it does not.
 
 ## Roadmap
 

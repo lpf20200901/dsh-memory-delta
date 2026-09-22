@@ -179,8 +179,11 @@ export function renderDue(list, { max = 5 } = {}) {
   for (const d of shown) parts.push(`- ${clip(d.line)} —— verify_when: ${d.verifyWhen}（${duePhrase(d.overdueDays)}）`);
   if (items.length > shown.length) parts.push(`（另有 ${items.length - shown.length} 条也到期了）`);
   parts.push(
-    '不再成立的：用 `mem supersede <旧id> <新id>` 换成新结论，或 `mem set <id> --status expired`；',
-    '仍然成立的：用 `mem set <id> --verify-when "…"` 把复核时间往后推。',
+    // ⚠️ 这里必须写清"**谁**来动手"：提醒是发给模型的，而 promote/supersede/set 都是**人的动作**
+    // （见插件的 skill：模型只能写收件箱）。原文写成"用 mem supersede …"会让模型以为自己该去跑
+    // 这些命令 —— 那要么越界改常驻层、要么一脸问号。模型能做的只有一件事：把新结论写进候选。
+    '不再成立的：把新结论用 memory_write 写成候选，**提醒用户**用 `mem supersede <旧id> <新id>` 换掉或 `mem set <id> --status expired`；',
+    '仍然成立的：**提醒用户**用 `mem set <id> --verify-when "…"` 往后推（改常驻条目是用户的动作，你不做）。',
     '都处理过就忽略本条。',
     '</system-reminder>',
   );
