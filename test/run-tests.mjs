@@ -332,9 +332,11 @@ section('M2：mem set 修改已有条目');
   r = run(['set', '--root', root, '不存在', '--key', 'x']);
   check('改不存在的条目报错', r.code === 1 && /找不到条目/.test(r.err + r.out), flat(r.err + r.out));
 
-  r = run(['set', '--root', root, 'e1', '--status', 'expired']);
-  check('set --status expired', r.code === 0 && fileOf().includes('status: expired'), r.err);
-  check('expired 条目不再参与注入', JSON.parse(run(['inject', '--root', root, '--json']).out).entries.length === 0);
+  // 退场走 archive（`set --status expired` 只改字段、不搬文件 —— 那会造出界面看不到的条目，见 due 那一节）
+  r = run(['archive', '--root', root, 'e1']);
+  const archivedRaw = fs.readFileSync(path.join(root, 'archive', 'e1.md'), 'utf8');
+  check('archive 搬进 archive/ 且 status=expired', r.code === 0 && archivedRaw.includes('status: expired'), r.err);
+  check('归档后不再参与注入', JSON.parse(run(['inject', '--root', root, '--json']).out).entries.length === 0);
 }
 
 /* --------------------------------------------------------------- 检索排序 */
@@ -437,12 +439,33 @@ section('M3：verify_when 到期复核与 mem due');
   check('到期告警不影响 validate 退出码（仍是 0）', r.code === 0, `code=${r.code} ${flat(r.out + r.err)}`);
   check('告警提示跑 mem due', /跑 mem due 看明细/.test(r.out + r.err), flat(r.out + r.err));
 
-  // 收尾：把到期条目标 expired 后，due 与告警都该干净
-  run(['set', '--root', root, 'overdue', '--status', 'expired']);
+  // 收尾：把到期条目**归档**（不是 set --status expired —— 那会造出"哪都看不到"的条目，见下）
+  run(['archive', '--root', root, 'overdue']);
   r = run(['due', '--root', root]);
-  check('expired 条目不再出现在 due 里', r.code === 0 && /没有到期的复核项/.test(r.out), flat(r.out));
+  check('归档后不再出现在 due 里', r.code === 0 && /没有到期的复核项/.test(r.out), flat(r.out));
   r = run(['validate', '--root', root]);
   check('处理完之后 validate 没有到期告警', !/复核期/.test(r.out + r.err), flat(r.out + r.err));
+
+  // ⚠️ 回归（2026-09-23 审计）：`set --status expired|superseded` 只改字段不搬文件，
+  // 条目会同时"不在已在用（只列 active）、不计入已归档（按目录数）"→ 界面上彻底消失，
+  // 而且 restore 也救不了（它要求条目在 archive/）。所以这两个值现在**直接拒绝**并指向正确命令。
+  const expiredRefused = run(['set', '--root', root, 'plain', '--status', 'expired']);
+  check('set --status expired 被拒绝并指向 mem archive', expiredRefused.code !== 0 && /mem archive/.test(expiredRefused.out + expiredRefused.err), flat(expiredRefused.out + expiredRefused.err));
+  const supersededRefused = run(['set', '--root', root, 'plain', '--status', 'superseded']);
+  check('set --status superseded 被拒绝并指向 mem supersede', supersededRefused.code !== 0 && /mem supersede/.test(supersededRefused.out + supersededRefused.err), flat(supersededRefused.out + supersededRefused.err));
+  check('被拒之后条目没有被改动（还在 facts/ 且 active）', JSON.parse(run(['show', '--root', root, 'plain', '--json']).out).status === 'active', 'status');
+  run(['archive', '--root', root, 'plain']);
+  const revived = run(['set', '--root', root, 'plain', '--status', 'active']);
+  check('--status active 仍然允许（给历史遗留的坏状态复活）', revived.code === 0, flat(revived.out + revived.err));
+
+  // validate 兜底：手工造出"常驻层里 status 不是 active"的条目 → 必须告警（以前 0 问题）
+  run(['new', '--root', root, '--type', 'fact', '--id', 'dangling', '--conclusion', '常驻层里状态不对的条目']);
+  run(['promote', '--root', root, 'dangling']);
+  const dangling = path.join(root, 'facts', 'dangling.md');
+  fs.writeFileSync(dangling, fs.readFileSync(dangling, 'utf8').replace(/^status: active$/m, 'status: expired'), 'utf8');
+  const dv = run(['validate', '--root', root]);
+  check('validate 对"常驻层里 status=expired"告警（界面看不到的那种）', /status 不是 active/.test(dv.out) && /哪一层都看不到/.test(dv.out), flat(dv.out));
+  check('这条告警不影响退出码（仍是 0）', dv.code === 0, `code=${dv.code}`);
 }
 
 /* --------------------------------------- 注入载荷带上 date / verifyWhen */
@@ -709,7 +732,6 @@ section('取回会清掉对方的悬挂引用（取代的**反向**操作必须�
 }
 
 /* ------------------------------------------------------------------ 主题（topic） */
-
 section('M13：主题 topic（面板按它归纳条目）');
 {
   const root = path.join(SANDBOX, 'topic', 'memory');
@@ -793,6 +815,66 @@ section('M13：主题 topic（面板按它归纳条目）');
   check('改不存在的主题 → 非零退出 + 列出已有主题', renameMissing.code !== 0 && /找不到主题/.test(renameMissing.out + renameMissing.err) && /现有：/.test(renameMissing.out + renameMissing.err), flat(renameMissing.out + renameMissing.err));
   const renameSame = run(['topic-rename', '--root', root, '发布与流程', '发布与流程']);
   check('新旧同名 → 拒绝（什么也没做就说清楚）', renameSame.code !== 0 && /一样/.test(renameSame.out + renameSame.err), flat(renameSame.out + renameSame.err));
+}
+
+/* ------------------------------------- 数据保真 / 坏数据不崩（2026-09-23 审计修复） */
+
+section('frontmatter 往返保真：字符串不会被静默改类型');
+{
+  const { parseFrontmatter, renderFrontmatter } = await import(new URL('../bin/mem.mjs', import.meta.url).href);
+  const roundTrip = (data) => parseFrontmatter(renderFrontmatter(data)).data;
+  const trickyStrings = ['123', 'true', 'null', '~', '[a, b]', 'a: b', 'a,b', "it's", '#hash', '带 空格', ' a ', '', '-42'];
+  const bad = trickyStrings.filter((s) => roundTrip({ key: s }).key !== s);
+  check('难搞的字符串往返后仍是同一个字符串（不再变数字/布尔/数组）', bad.length === 0, JSON.stringify(bad.map((s) => [s, roundTrip({ key: s }).key])));
+  const typed = roundTrip({ id: 5, date: '2026-01-01', superseded_by: null, tags: ['a'] });
+  check(
+    '已知字段的"真类型"仍按类型解析（数字/字符串/null/数组）',
+    typed.id === 5 && typed.date === '2026-01-01' && typed.superseded_by === null && Array.isArray(typed.tags),
+    JSON.stringify(typed),
+  );
+  const arr = roundTrip({ tags: ['a', 'b,c', '带 空格'] });
+  check('行内数组往返保真（含逗号/空格的元素）', JSON.stringify(arr.tags) === JSON.stringify(['a', 'b,c', '带 空格']), JSON.stringify(arr.tags));
+  check('手写的带引号值不被强转', parseFrontmatter('---\nkey: "123"\n---\n').data.key === '123' && typeof parseFrontmatter('---\nkey: "123"\n---\n').data.key === 'string');
+  check('工具不认识的键进 extra（不进 data，但也没丢）', parseFrontmatter('---\ncustom: 1\n---\n').data.custom === undefined && parseFrontmatter('---\ncustom: 1\n---\n').extra[0]?.key === 'custom');
+}
+
+section('工具不认识的 frontmatter 键不会被静默删掉');
+{
+  const root = freshRoot('extra');
+  run(['init', '--root', root]);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'x1', '--conclusion', '带自定字段的条目']);
+  const f = path.join(root, 'inbox', 'x1.md');
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/^status: active$/m, 'status: active\nseverity: high\nrefs: [a, b]'), 'utf8');
+  run(['set', '--root', root, 'x1', '--topic', '某个主题']);
+  const after = fs.readFileSync(f, 'utf8');
+  check('自定键在写入后仍在', /^severity: high$/m.test(after) && /^refs: \[a, b\]$/m.test(after), flat(after.split('---')[1]));
+  check('自定键的值按原文保留（没被改写）', /^refs: \[a, b\]$/m.test(after), 'raw');
+  run(['promote', '--root', root, 'x1']);
+  check('搬到 facts/ 之后也还在', /^severity: high$/m.test(fs.readFileSync(path.join(root, 'facts', 'x1.md'), 'utf8')), 'moved');
+  const v = run(['validate', '--root', root]);
+  check('validate 会告诉你"有工具不认识的键"', /工具不认识的 frontmatter 键/.test(v.out), flat(v.out));
+  check('这条告警不影响退出码', v.code === 0, `code=${v.code}`);
+}
+
+section('坏数据不该把自检打崩（人手写的 frontmatter）');
+{
+  const root = freshRoot('rotdaten');
+  run(['init', '--root', root]);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'l1', '--conclusion', '主题名超长的条目']);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'b1', '--conclusion', '带 BOM 的条目']);
+  const long = path.join(root, 'inbox', 'l1.md');
+  fs.writeFileSync(long, fs.readFileSync(long, 'utf8').replace('topic: null', `topic: ${'甲'.repeat(45)}`), 'utf8');
+  const bomFile = path.join(root, 'inbox', 'b1.md');
+  fs.writeFileSync(bomFile, `\uFEFF${fs.readFileSync(bomFile, 'utf8')}`, 'utf8');
+
+  for (const cmd of [['topics'], ['validate'], ['recall', '主题名超长', '--topic', '甲'], ['list']]) {
+    const r = run([...cmd, '--root', root]);
+    check(`mem ${cmd[0]}${cmd[1] ? ` ${cmd[1]}` : ''} 不再堆栈崩溃`, r.code === 0 && !/at normalizeTopic|at listTopics|at cmdValidate/.test(r.out + r.err), flat(r.out + r.err).slice(0, 120));
+  }
+  const v = run(['validate', '--root', root]);
+  check('超长主题降级成告警（不再抛）', /主题名超过 40 字/.test(v.out), flat(v.out));
+  check('写入口仍然拦超长主题', run(['set', '--root', root, 'l1', '--topic', 'x'.repeat(41)]).code !== 0);
+  check('带 BOM 的文件不再被当成"缺少 frontmatter"', !/缺少 frontmatter/.test(v.out), flat(v.out));
 }
 
 /* ------------------------------------------------------------- 汇总 */

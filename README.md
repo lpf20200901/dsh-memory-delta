@@ -225,18 +225,18 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 959 assertions, zero dependencies
+npm test        # 994 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 213 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, and reference cleanup on `restore`) |
+| `test/run-tests.mjs` | 236 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, and reference cleanup on `restore`) |
 | `test/planner-tests.mjs` | 43 | the diff algorithm (pure logic) |
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 271 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename/topic actually writing the store + whitelist/origin checks + tool-output contract and render text) |
-| `test/client-tests.mjs` | 225 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, entry click → `openFile`, promote/tidy, failure states) |
+| `test/plugin-tests.mjs` | 278 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename/topic actually writing the store + whitelist/origin checks + tool-output contract and render text) |
+| `test/client-tests.mjs` | 230 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, entry click → `openFile`, promote/tidy, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable
@@ -284,6 +284,23 @@ Regression tests baked in from real bugs:
   bidirectional)` **and no command could fix it** (found in a real store: 6 of 7 links consistent, the
   7th restored once and therefore broken forever). `restore` is the inverse of `supersede`, so it now
   cleans the counterpart too — the same discipline `mem rename` already follows for references.
+- **A failed file operation could kill the host process.** `moveEntry` / `removeFile` (which every
+  panel write goes through: promote / withdraw / archive / restore / rename / classify) reported
+  failures with `fail()` — i.e. `process.exit(1)` — even though they run *inside DSH*. So "the
+  destination already exists", or a delete refused by the OS, ended the whole application on a single
+  button click (reproduced: exit 1, with the session's next statement never reached). `loadConfig`
+  had the same problem, which made a one-character typo in `memory.config.json` kill the host when
+  the *model* wrote a memory. Both now throw, and the routes turn that into a readable 400. The
+  regression test for this **is** the proof: with the old code the test process dies instead of
+  reporting a failure.
+- **The reading side used to be smarter than the writing side.** `parseFrontmatter` coerced
+  `123` → number, `true` → boolean, `[a, b]` → array and stripped quotes, while `renderFrontmatter`
+  wrote every value raw — so any written-back entry could silently change type: a topic named `123`
+  came back as a number and the panel (which groups by `typeof === 'string'`) dropped it into
+  "unclassified", and `[生产]` became an array that `mem list --topic` could no longer find. Values
+  that need quoting now get quoted, quoted values are never coerced, and a round-trip test pins it.
+  Unknown frontmatter keys are also preserved verbatim now instead of being deleted by the next
+  write, and the body's leading blank lines no longer accumulate one per write.
 
 ## Roadmap
 

@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
-import { createEntry, ensureLayout, injectPayload, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
+import { createEntry, ensureLayout, injectPayload, loadConfig, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
 import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
 
@@ -1067,6 +1067,66 @@ section('「搜索」路由');
   const registered = [];
   const returned = registerSearchRoute({ register: (r) => registered.push(r) }, { configRoot: searchRoot });
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_SEARCH_PATH && registered.length === 1, String(returned?.path));
+}
+
+/* -------------------------------- P0 回归：I/O 故障与坏配置不能让宿主进程退出 */
+
+section('「动作」路由：I/O 故障必须变成 400，绝不能让宿主进程退出');
+{
+  // ⚠️ 2026-09-23 审计抓到的 P0：面板写动作最后都走到 `moveEntry` / `removeFile`，
+  // 那两个函数原本用 `fail()`（= `process.exit(1)`）报错 —— 它跑在 **DSH 宿主进程**里，
+  // 等于"用户点一下按钮整个应用退出"。修法：改成抛异常，由路由翻成 400。
+  // **这一节本身就是证据**：修复前跑它，测试进程会被直接结束（而不是出现一条 FAIL）。
+  const root = path.join(SANDBOX, 'hostexit', 'memory');
+  const L = ensureLayout(root);
+  const route = createActionRoute({ configRoot: root });
+
+  const cand = createEntry(L, { type: 'fact', conclusion: '目标位置已被占用的候选', key: 'target' });
+  // 制造"目标已存在"：facts/ 里先放一个同名文件（真实场景：id 与文件名不一致、或手工搬过文件）
+  fs.writeFileSync(path.join(L.facts, `${cand.id}.md`), '---\nid: other-id\ntype: fact\nscope: s\nstatus: active\ndate: 2026-01-01\n---\n\n## 结论\n占位\n', 'utf8');
+
+  const res = await callRoute(route, { body: JSON.stringify({ op: 'promote', id: cand.id }) });
+  check('目标已存在时 promote → 400（不是退出进程）', res.status === 400, String(res.status));
+  check('错误信息说清是"目标已存在"（可读、能照着修）', /目标已存在/.test(String(res.json.error)), String(res.json.error).slice(0, 120));
+  check('失败后进程还活着（这一行能跑到就是证据）', true);
+
+  const okCand = createEntry(L, { type: 'fact', conclusion: '批量里正常的那条', key: 'ok-one' });
+  const batch = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: [okCand.id] }) });
+  check('同一条路上批量照常工作（进程活得下来）', batch.status === 200 && batch.json.succeeded.length === 1, JSON.stringify(batch.json));
+}
+
+section('坏掉的 memory.config.json 不该让模型工具/宿主进程退出');
+{
+  // `loadConfig` 以前也是 `fail()` —— 它被插件 `openStore`（两个模型工具）与 `createEntry` 调用，
+  // 所以一个尾逗号就能让"模型写一条记忆"把宿主进程带走。
+  const root = path.join(SANDBOX, 'badcfg', 'memory');
+  const L = ensureLayout(root);
+  fs.writeFileSync(L.config, '{\n  "version": 1,\n  "injectBudget": 3072,\n}\n', 'utf8');
+
+  let threw = null;
+  try {
+    loadConfig(root);
+  } catch (error) {
+    threw = error;
+  }
+  check('loadConfig 对坏 JSON 抛异常（不是退出进程）', threw !== null && /不是合法 JSON/.test(threw.message), String(threw?.message).slice(0, 120));
+
+  const route = createMemoryRoute((input) => memoryStateOf({ ...input, configRoot: root }));
+  const res = await callRoute(route, { body: JSON.stringify({ workspace: root }) });
+  check('状态路由不炸（200 或可读的 500，进程活着）', res.status === 200 || res.status === 500, String(res.status));
+
+  const tools = [];
+  const ctx = fakeCtx();
+  ctx.tools.register = (t) => tools.push(t);
+  apply(ctx, { root, maxBytes: 3072, enabled: true, skill: false });
+  const writeTool = tools.find((t) => t.name === 'memory_write');
+  let toolThrew = null;
+  try {
+    await writeTool.execute({ type: 'fact', conclusion: '坏配置下的一条' }, { agent: { session: { header: { cwd: root, id: 's' } } } });
+  } catch (error) {
+    toolThrew = error;
+  }
+  check('memory_write 在坏配置下抛异常（模型收到错误，宿主不退出）', toolThrew !== null && /不是合法 JSON/.test(toolThrew.message), String(toolThrew?.message).slice(0, 120));
 }
 
 /* ------------------------------------- 「动作」路由（真的写记忆库） */

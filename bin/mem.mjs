@@ -59,13 +59,30 @@ function defaultConfig(root) {
   };
 }
 
+/**
+ * 读库配置（`memory.config.json`）。
+ *
+ * ⚠️ 坏 JSON 时**抛异常、不 `fail()`** —— 这个函数在模型工具（`memory_search`/`memory_write`）
+ * 与 `createEntry` 的路径上，那两个都跑在 DSH 宿主进程里；`fail()` 是 `process.exit(1)`，
+ * 意味着**用户手工把配置写坏一个字符，模型写一条记忆就会把整个 DSH 弄没**
+ * （2026-09-23 审计实测：一个尾逗号 → 宿主 exit 1）。
+ */
 function loadConfig(root) {
   const f = path.join(root, CONFIG_FILE);
   if (!fs.existsSync(f)) return null;
   try {
     return JSON.parse(fs.readFileSync(f, 'utf8'));
   } catch (err) {
-    fail(`${CONFIG_FILE} 不是合法 JSON：${err.message}`);
+    throw new Error(`${CONFIG_FILE} 不是合法 JSON：${err.message}（修好它，或删掉文件让 mem init 重建）`);
+  }
+}
+
+/** CLI 专用包装：把 `loadConfig` 的异常翻译成"打印一行 + 退出码 1"。 */
+function loadConfigOrFail(root) {
+  try {
+    return loadConfig(root);
+  } catch (error) {
+    fail(error.message);
   }
 }
 
@@ -167,60 +184,157 @@ function ensureLayout(root, { create = true } = {}) {
 
 /**
  * 只支持这个子集（故意）：
- *   key: 字符串       key: [a, b]       key: null/true/false/123
+ *   key: 字符串       key: [a, b]       key: null/true/false/123       key: "带引号的字符串"
  * 不支持嵌套 map、多行字符串、锚点 —— 保持"可手写 + 可校验"。
+ *
+ * ⚠️ **读侧不能比写侧聪明**（这条是踩出来的）：解析时把 `123` 转成数字、把 `true` 转成布尔、
+ * 把 `[a, b]` 转成数组，是很自然的做法；但如果写侧只是 `${v}` 裸写，那么
+ * 「看起来不像字符串的字符串」只要**写回一次**就会被静默改类型：
+ *   `--topic "123"` → 磁盘 `topic: 123` → 读回来是 number → 面板按 `typeof === 'string'` 分组
+ *   就把它归到「未归类」（而条目上又显示着 123）；`--topic "[生产]"` 更会变成数组，
+ *   `mem list --topic "[生产]"` 直接匹配不上（设得进、搜不出来）。
+ * 所以两侧现在配成一套：**需要引号的值写侧加引号，带引号的值读侧不做任何强转**。
  */
 function parseFrontmatter(text) {
-  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) return { data: {}, body: text, hasFrontmatter: false };
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (!m) return { data: {}, body: text, hasFrontmatter: false };
+  // 带 UTF-8 BOM 的文件（记事本"另存为 UTF-8"、PowerShell Set-Content 等）也要认
+  const clean = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  if (!clean.startsWith('---\n') && !clean.startsWith('---\r\n')) {
+    return { data: {}, extra: [], body: text, hasFrontmatter: false };
+  }
+  const m = clean.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!m) return { data: {}, extra: [], body: text, hasFrontmatter: false };
   const data = {};
+  // 工具不认识的键**原样留着**（连值的原文一起）：它们不该因为"点了一次归类"就消失。
+  const extra = [];
   for (const rawLine of m[1].split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     const idx = line.indexOf(':');
     if (idx < 0) continue;
     const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1).trim();
-    if (val === '') data[key] = null;
-    else if (val === 'null' || val === '~') data[key] = null;
-    else if (val === 'true') data[key] = true;
-    else if (val === 'false') data[key] = false;
-    else if (/^-?\d+$/.test(val)) data[key] = Number(val);
-    else if (val.startsWith('[') && val.endsWith(']')) {
-      data[key] = val
-        .slice(1, -1)
-        .split(',')
-        .map((s) => s.trim().replace(/^["']|["']$/g, ''))
-        .filter(Boolean);
-    } else data[key] = val.replace(/^["']|["']$/g, '');
+    if (!FM_KEYS.includes(key)) {
+      extra.push({ key, raw: line.slice(idx + 1).trim() });
+      continue;
+    }
+    data[key] = parseFrontmatterValue(line.slice(idx + 1).trim());
   }
-  return { data, body: text.slice(m[0].length), hasFrontmatter: true };
+  // body 从原文里切（BOM 只可能出现在最前面，偏移量 = 被剥掉的字节数）
+  const bom = text.length - clean.length;
+  return { data, extra, body: text.slice(bom + m[0].length), hasFrontmatter: true };
 }
 
-function renderFrontmatter(data) {
+/** 解析一个 frontmatter 标量/行内数组；**带引号的一律当字符串**（不强转）。 */
+function parseFrontmatterValue(val) {
+  if (val === '') return null;
+  if (isQuoted(val)) return unquote(val);
+  if (val === 'null' || val === '~') return null;
+  if (val === 'true') return true;
+  if (val === 'false') return false;
+  if (/^-?\d+$/.test(val)) return Number(val);
+  if (val.startsWith('[') && val.endsWith(']')) return splitInlineArray(val.slice(1, -1));
+  return val;
+}
+
+const isQuoted = (v) => v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")));
+const unquote = (v) => v.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+
+/** 行内数组的切分：**引号内的逗号不切**（否则 `["a,b"]` 会被切成两半）。 */
+function splitInlineArray(inner) {
+  const parts = [];
+  let cur = '';
+  let quote = null;
+  for (const ch of inner) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === ',') {
+      parts.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts.map((s) => s.trim()).filter(Boolean).map((s) => (isQuoted(s) ? unquote(s) : s));
+}
+
+/**
+ * 这个值写出去时要不要加引号？
+ *
+ * **只覆盖"不加引号就会被读错"的情况**，别过度加引号 —— `scope: workspace:D:\a\b` 这种完全能原样解析
+ * （解析器只按**第一个**冒号切，反斜杠对未加引号的值不做处理），一旦给它套上引号，
+ * 库里所有条目的这一行都会变、外部按行读 frontmatter 的脚本也会跟着失配。
+ */
+function needsQuote(s) {
+  if (typeof s !== 'string') return false;
+  if (s === '') return true; // 空值会被读成 null
+  if (s !== s.trim()) return true; // 首尾空白会被 trim 掉
+  if (/^(?:null|~|true|false|-?\d+)$/.test(s)) return true; // 会被读成类型
+  if (s.startsWith('[') && s.endsWith(']')) return true; // 会被读成行内数组
+  if (isQuoted(s)) return true; // 首尾成对引号会被剥掉
+  if (/[\n\r]/.test(s)) return true; // 换行会拆掉整行
+  return false;
+}
+
+const quoteIfNeeded = (s) => (needsQuote(String(s)) ? `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : String(s));
+
+/**
+ * 行内数组里的元素：除了标量那套规则，**含逗号/方括号的也必须加引号** ——
+ * 否则 `['b,c']` 会被写成 `tags: [b,c]`，读回来变成两个标签（`splitInlineArray` 按逗号切）。
+ */
+const quoteArrayElement = (s) =>
+  needsQuote(String(s)) || /[,[\]]/.test(String(s))
+    ? `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    : String(s);
+
+/**
+ * 序列化一条条目 —— **幂等**：同一份内容写两次，字节必须完全一样。
+ *
+ * ⚠️ 以前是无条件 `frontmatter + '\n\n' + body`，而 body 本身已经带着**上一次写下的前导换行**：
+ * 于是**每写一次，正文开头就多一个空行**。真实库里实测 —— 一条被归类/编辑过几次的条目攒了 7 个空行，
+ * 既产生无意义的 diff，也让"格式稳定"不再成立（审计的"序列化不幂等"就是它）。
+ * 现在把开头统一规范化成恰好一个空行。
+ */
+function serializeEntry(entry) {
+  const body = String(entry.body ?? '')
+    .replace(/^\s*\n+/, '') // 去掉开头累积的空行
+    .replace(/\s+$/, '');
+  return `${renderFrontmatter(entry.data, entry.extra)}\n\n${body}\n`;
+}
+
+/**
+ * 把条目渲染回 frontmatter。
+ *
+ * @param {object} data 已知字段（`FM_KEYS`）
+ * @param {Array<{key: string, raw: string}>} [extra] 工具不认识的键：**值按原文回写**，不改写它们的语义
+ */
+function renderFrontmatter(data, extra = []) {
   const lines = ['---'];
   for (const k of FM_KEYS) {
     if (!(k in data)) continue;
     const v = data[k];
     if (v === null || v === undefined) lines.push(`${k}: null`);
-    else if (Array.isArray(v)) lines.push(`${k}: [${v.join(', ')}]`);
-    else lines.push(`${k}: ${v}`);
+    else if (Array.isArray(v)) lines.push(`${k}: [${v.map(quoteArrayElement).join(', ')}]`);
+    else if (typeof v === 'number' || typeof v === 'boolean') lines.push(`${k}: ${v}`);
+    else lines.push(`${k}: ${quoteIfNeeded(v)}`);
   }
+  for (const { key, raw } of extra) lines.push(`${key}: ${raw}`);
   lines.push('---');
   return lines.join('\n');
-}
-
-function serializeEntry(entry) {
-  const body = (entry.body || '').replace(/\s*$/, '');
-  return `${renderFrontmatter(entry.data)}\n\n${body}\n`;
 }
 
 /* ------------------------------------------------------------ 条目读写 */
 
 function readEntryFile(file) {
-  const { data, body, hasFrontmatter } = parseFrontmatter(fs.readFileSync(file, 'utf8'));
-  return { file, id: data.id || path.basename(file, '.md'), data, body, hasFrontmatter };
+  const { data, extra, body, hasFrontmatter } = parseFrontmatter(fs.readFileSync(file, 'utf8'));
+  return { file, id: data.id || path.basename(file, '.md'), data, extra, body, hasFrontmatter };
 }
 
 function listDir(dir) {
@@ -317,15 +431,25 @@ function cmdInit(opts) {
  * 库里 27 条里有 21 条落进 `dsh / dsh-memory / dsh-memory-delta` 三个几乎同义的桶 —— 归纳等于没做。
  * 所以主题**由人指定**（面板「归类」/ `mem set --topic`），模型不写它。
  *
+ * ⚠️ `strict` 只在**写路径**开：长度上限是"劝人写短"的输入校验，不是数据不变量。
+ * 早期版本无条件抛，于是**人手写**进 frontmatter 的一条 45 字主题会让
+ * `mem topics` / `mem validate` / `recall --topic` 全部堆栈崩溃 ——
+ * 读路径面对的是**已经在磁盘上的数据**，那里只该降级成一条告警（`validate` 会报）。
+ *
+ * @param {*} value
+ * @param {{strict?: boolean}} [opts] strict=true 时超长直接抛（写入口用）
  * @returns {string|null} 清空 / 空白 → null（= 落在面板的「未归类」组）
  */
-export function normalizeTopic(value) {
+export function normalizeTopic(value, { strict = false } = {}) {
   if (value === null || value === undefined) return null;
   const t = String(value).replace(/\s+/g, ' ').trim();
   if (!t) return null;
-  if (t.length > 40) throw new Error(`topic 太长了（${t.length} 字，最多 40）：${t.slice(0, 20)}…`);
+  if (strict && t.length > 40) throw new Error(`topic 太长了（${t.length} 字，最多 40）：${t.slice(0, 20)}…`);
   return t;
 }
+
+/** 主题名是不是过长（读路径用它出告警，不抛）。 */
+export const TOPIC_MAX = 40;
 
 /**
  * 创建一个候选条目（落在 inbox）—— CLI 的 `new` 与插件的 `memory_write` 工具共用这一份逻辑，
@@ -370,7 +494,7 @@ export function createEntry(L, { type, conclusion, reason, tags, scope, key, top
     type,
     scope: scope || loadConfig(L.root)?.scope || defaultConfig(L.root).scope,
     key: k,
-    topic: normalizeTopic(topic),
+    topic: normalizeTopic(topic, { strict: true }),
     tags: Array.isArray(tags) ? tags : tags ? String(tags).split(',').map((s) => s.trim()).filter(Boolean) : [],
     status: 'active',
     date: today(),
@@ -388,7 +512,7 @@ export function createEntry(L, { type, conclusion, reason, tags, scope, key, top
 
 function cmdNew(opts) {
   const root = resolveRoot(opts.root);
-  const cfg = loadConfig(root);
+  const cfg = loadConfigOrFail(root);
   const L = ensureLayout(root);
   const conclusion = opts.conclusion || opts._.join(' ').trim();
   if (!conclusion) fail('缺少内容。用法：mem new --type fact --conclusion "结论一句话" [--reason "..."] [--tags a,b]');
@@ -535,16 +659,20 @@ function cmdShow(opts) {
  *
  * 这个坑很阴：`rmSync` 的 `force` 会把错误吞掉，于是"移动"变成"复制"，
  * 条目会同时存在于 inbox/ 和 facts/ —— 所以这里再回读核实一次，绝不相信"删了就删了"。
+ *
+ * ⚠️ **一律抛异常，绝不 `fail()`**：本函数被面板的动作路由间接调用，而那条路由跑在
+ * **DSH 宿主进程**里 —— `fail()` 是 `process.exit(1)`，等于用户点一下按钮整个应用就没了
+ * （2026-09-23 审计实测：目标文件已存在 → 宿主 exit 1）。CLI 侧的调用者负责把异常翻译成一行错误。
  */
 function removeFile(file) {
   if (!fs.existsSync(file)) return;
   try {
     fs.unlinkSync(file);
   } catch (err) {
-    fail(`删除失败：${file}\n  ${err.code || ''} ${err.message}`);
+    throw new Error(`删除失败：${file}\n  ${err.code || ''} ${err.message}`);
   }
   if (fs.existsSync(file)) {
-    fail(
+    throw new Error(
       `删除后文件仍然存在：${file}\n` +
         `  可能原因：沙箱/权限拦截，或路径含非 ASCII 字符时 rmSync 静默失败（本函数已改用 unlinkSync）。`,
     );
@@ -558,11 +686,13 @@ function removeFile(file) {
  * 否则调用方在内存里刚改的字段（status / superseded_by / supersedes）会全部丢失，
  * 表现为"旧条目归档后还是 active、新条目没有 supersedes"。
  * 这个 bug 是被 test/run-tests.mjs 的「双向链接一致」断言抓出来的。
+ *
+ * ⚠️ 同样**一律抛异常**（理由见 `removeFile`）。
  */
 function moveEntry(from, to, content) {
-  if (fs.existsSync(to)) fail(`目标已存在：${to}`);
+  if (fs.existsSync(to)) throw new Error(`目标已存在：${to}`);
   fs.writeFileSync(to, content !== undefined ? content : fs.readFileSync(from, 'utf8'), 'utf8');
-  if (!fs.existsSync(to)) fail(`写入未生效：${to}`);
+  if (!fs.existsSync(to)) throw new Error(`写入未生效：${to}`);
   removeFile(from);
 }
 
@@ -696,7 +826,7 @@ export function renameEntry(L, oldId, newId) {
  */
 export function setTopicEntry(L, id, topic) {
   const e = requireOneOrThrow(L, id);
-  const next = normalizeTopic(topic);
+  const next = normalizeTopic(topic, { strict: true });
   e.data.topic = next;
   fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
   return { id: e.id, topic: next, file: e.file };
@@ -734,8 +864,9 @@ export function listTopics(L) {
  * @returns {{from: string, to: string, changed: number}}
  */
 export function renameTopic(L, from, to) {
+  // 新名字是"要写进库里的" → 严格校验；旧名字来自既有数据 → 只做归一化（不抛）
   const src = normalizeTopic(from);
-  const dst = normalizeTopic(to);
+  const dst = normalizeTopic(to, { strict: true });
   if (!src) throw new Error('旧主题名不能为空');
   if (!dst) throw new Error('新主题名不能为空（清除某条的主题请用 mem set <id> --topic ""）');
   if (src === dst) throw new Error('新旧主题名一样，什么也没做');
@@ -1030,7 +1161,13 @@ function cmdPromoteInternal(root, newId, oldId) {
   ok(`${oldId} → superseded by ${newId}（已归档）`);
 }
 
-/** 替换正文里的某个 `## 标题` 小节；不存在就追加。 */
+/**
+ * 替换正文里的某个 `## 标题` 小节；不存在就追加。
+ *
+ * ⚠️ 替换串末尾要有**两个**换行：`[\s\S]*?` 会把小节内容连同它与下一个 `##` 之间的那个换行一起吃掉，
+ * 只补一个 `\n` 的话**小节之间的空行就被越改越少**（审计实测：`set --conclusion` 之后
+ * `## 结论` 与 `## 理由` 挤在一起）。末尾多出来的空行由 `serializeEntry` 收尾时统一处理。
+ */
 function replaceSection(body, title, text) {
   const re = new RegExp(`(##\\s*${title}\\r?\\n)([\\s\\S]*?)(?=\\r?\\n##\\s|$)`);
   if (re.test(body)) return body.replace(re, `$1${text.trim()}\n`);
@@ -1048,9 +1185,12 @@ function cmdSet(opts) {
   const id = opts._[0];
   if (!id) {
     fail(
-      '用法：mem set <id> [--key k] [--tags a,b] [--scope s] [--status active|superseded|expired]\n' +
+      '用法：mem set <id> [--key k] [--tags a,b] [--topic "主题"] [--scope s] [--status active]\n' +
         '       [--verify-when "…"] [--conclusion "…"] [--reason "…"]\n' +
-        '  给 key 传空字符串可清除：--key ""',
+        '  给 key 传空字符串可清除：--key ""\n' +
+        '  · --status 只接受 active（把历史遗留的坏状态复活）。\n' +
+        '    退场请用 mem archive <id>（不再适用）或 mem supersede <旧> <新>（被取代）——\n' +
+        '    只改 status 不搬文件会让条目从面板上彻底消失。',
     );
   }
   const e = requireOne(L, id);
@@ -1069,7 +1209,7 @@ function cmdSet(opts) {
   if (opts.topic !== undefined) {
     // 与面板的「归类」按钮共用 normalizeTopic：`--topic ""` 清除（回到「未归类」）
     try {
-      e.data.topic = normalizeTopic(opts.topic === true ? '' : opts.topic);
+      e.data.topic = normalizeTopic(opts.topic === true ? '' : opts.topic, { strict: true });
     } catch (error) {
       fail(error.message);
     }
@@ -1085,6 +1225,17 @@ function cmdSet(opts) {
   }
   if (opts.status) {
     if (!STATUSES.includes(opts.status)) fail(`--status 必须是 ${STATUSES.join(' | ')}`);
+    // ⚠️ 只允许改成 active（= 给历史遗留的坏状态"复活"）。
+    // `--status expired|superseded` 只改 frontmatter、**不搬文件**，于是条目
+    // 不参与注入（对）却还留在 facts/：面板「已在用」只列 active、「已归档」按 archive/ 数文件
+    // → 它**哪一层都看不到**，`restore` 也救不了（那要求它在 archive/），validate 以前也不报。
+    // 这不是"少一条"的问题，是用户从界面上彻底失去它。正确的出口是两个已有命令。
+    if (opts.status === 'expired') {
+      fail(`不要用 mem set 标过期：它只改字段、不搬文件，条目会从界面上彻底消失。\n  请用 mem archive ${id}（搬进 archive/ + status=expired + 重建 index）`);
+    }
+    if (opts.status === 'superseded') {
+      fail(`不要用 mem set 标取代：它只改字段、不建双向链接。\n  请用 mem supersede <旧id> <新id>（会标 superseded、写双向链接、搬进 archive/）`);
+    }
     e.data.status = String(opts.status);
     changed.push('status');
   }
@@ -1230,7 +1381,7 @@ function injectPayload(L, budget) {
 
 function cmdInject(opts) {
   const root = resolveRoot(opts.root);
-  const cfg = loadConfig(root) || defaultConfig(root);
+  const cfg = loadConfigOrFail(root) || defaultConfig(root);
   const L = ensureLayout(root, { create: false });
   const budget = opts.budget ? Number(opts.budget) : cfg.injectBudget;
   const payload = injectPayload(L, budget);
@@ -1453,7 +1604,7 @@ function cmdDue(opts) {
 function cmdValidate(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
-  const cfg = loadConfig(root);
+  const cfg = loadConfigOrFail(root);
 
   // --fix：只做**机械可判定**的修：把已 superseded 但没归档的搬进 archive/，重建 index。
   // 语义层面的问题（冲突、缺 key）绝不自动改 —— 那需要人判断。
@@ -1572,6 +1723,28 @@ function cmdValidate(opts) {
   const untopic = entries.filter((e) => !e.error && !normalizeTopic(e.data?.topic));
   if (untopic.length) {
     warnings.push(`${untopic.length} 条条目没有 topic（面板里落在「未归类」组）—— 归纳一下：mem set <id> --topic "…"，或看 mem topics`);
+  }
+
+  // 三类"数据在磁盘上、界面与工具却看不见/看不懂"的状态：**告警**（多半来自手工改 frontmatter）
+  //  · 常驻层里 status 不是 active → 面板「已在用」只列 active、「已归档」按 archive/ 数文件 → 哪都看不到
+  //  · 主题名过长（写入口已经拦了，手写的拦不住；以前会让 topics/validate 直接崩，现在只告警）
+  //  · 工具不认识的 frontmatter 键 → 现在会原样保留，但工具不校验它们
+  const invisible = entries.filter((e) => !e.error && (e.where === 'facts' || e.where === 'decisions') && e.data.status !== 'active');
+  if (invisible.length) {
+    warnings.push(
+      `${invisible.length} 条常驻条目的 status 不是 active（${invisible.map((e) => `${e.id}=${e.data.status}`).join(', ')}）\n` +
+        `      它们在面板里哪一层都看不到（「已在用」只列 active、「已归档」按 archive/ 数文件）。` +
+        `处理：mem archive <id> 归档，或 mem set <id> --status active 复活`,
+    );
+  }
+  const longTopic = entries.filter((e) => !e.error && (normalizeTopic(e.data?.topic)?.length ?? 0) > TOPIC_MAX);
+  if (longTopic.length) {
+    warnings.push(`${longTopic.length} 条条目的主题名超过 ${TOPIC_MAX} 字（${longTopic.map((e) => e.id).join(', ')}）—— 建议 mem topic-rename 改短`);
+  }
+  const withExtra = entries.filter((e) => !e.error && Array.isArray(e.extra) && e.extra.length);
+  if (withExtra.length) {
+    const keys = [...new Set(withExtra.flatMap((e) => e.extra.map((x) => x.key)))];
+    warnings.push(`${withExtra.length} 条条目有工具不认识的 frontmatter 键（${keys.join(', ')}）—— 写入时原样保留，但工具不会校验它们`);
   }
 
   // index 一致性
@@ -1730,9 +1903,10 @@ function usage() {
   rename <旧id> <新id>                   安全改名（id + 文件名 + 引用一起改）
                           同 key 已有 active 时必须显式 --supersedes
   supersede <旧id> <新id>                标记取代 + 归档 + 双向链接
-  set <id> [--key k] [--tags a,b] [--topic "主题"] [--scope s] [--status …] [--conclusion "…"]
-      [--verify-when "…"]  修改已有条目（补 key、归类、改措辞、标 expired）
+  set <id> [--key k] [--tags a,b] [--topic "主题"] [--scope s] [--status active] [--conclusion "…"]
+      [--verify-when "…"]  修改已有条目（补 key、归类、改措辞）
                            · --topic "" 清除主题（回到「未归类」）
+                           · --status 只接受 active（复活历史遗留的坏状态）；退场用 archive / supersede
                            · --verify-when：复核时机。写 '2026-03-01' 或相对条目日期的
                              '3个月后' / '2周后'（相对写法取条目自己的 date 为基准）
   validate [--fix]        校验（格式 / id / 双向链接 / 环 / 同 key 冲突 / 索引 / 注入预算）
