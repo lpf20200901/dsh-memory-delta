@@ -244,24 +244,34 @@ function mountPanel(props) {
   const exportsOf = factory(fakeRequire);
 
   let tree = null;
+  let currentProps = props;
   // ⚠️ 这里数的是**渲染嵌套深度**，不是"总渲染次数"：
   // 一个用例里点十几次按钮本来就是正常的（每次 setState 都是一次重渲染），
   // 而"渲染过程中又 setState"才会让深度无限增长 —— 那才是 hooks 死循环。
   let renderDepth = 0;
-  react.setStateAt = () => {
+  const render = () => {
     if (renderDepth > 20) throw new Error('重渲染嵌套过深（hooks 里可能有死循环）');
     renderDepth += 1;
-    react.cursor = 0;
+    react.cursor = 0; // 直接调组件时必须自己归零，否则 hooks 槽位错位
     try {
-      tree = exportsOf.MemoryPanel(props);
+      tree = exportsOf.MemoryPanel(currentProps);
     } finally {
       renderDepth -= 1;
     }
   };
-  react.cursor = 0;
-  tree = exportsOf.MemoryPanel(props);
+  react.setStateAt = () => render();
+  render();
 
-  return { exportsOf, required, loadCalls, tree: () => tree, react };
+  /**
+   * 换 props 重新渲染（宿主替换页签 scope 时就是这样）。
+   * ⚠️ 必须走这个入口而不是直接调组件：`tree()` 读的是闭包变量，只有这里的 render 会更新它。
+   */
+  const setProps = (next) => {
+    currentProps = { ...currentProps, ...next, scope: { ...(currentProps.scope ?? {}), ...(next.scope ?? {}) } };
+    render();
+  };
+
+  return { exportsOf, required, loadCalls, tree: () => tree, react, setProps };
 }
 
 /** 等微任务队列清空（把 fetch 的 promise 链跑完）。 */
@@ -1403,6 +1413,55 @@ section('组件：主题改名与按主题搜');
   await wait(320);
   check('取消后搜索请求不再带主题', calls.filter((c) => c.url === '/dsh-memory-delta/search').at(-1).body.topic === undefined, JSON.stringify(calls.filter((c) => c.url === '/dsh-memory-delta/search').at(-1)));
 
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：截断提示 / 切工作区（2026-09-23 审计 P2） */
+
+section('组件：条数被截断时必须说出来（不能让"库里就这么点"成为错觉）');
+{
+  const originalFetch = globalThis.fetch;
+  // 宿主的上限是 常驻 200 / 候选 50 / 归档 50，而 counts 报的是**真实总数** ——
+  // 面板必须把"没列出来的部分"讲清楚，否则「取回」这类承诺会静默失效。
+  const TRUNCATED = {
+    ...SAMPLE,
+    entries: SAMPLE.entries.slice(0, 1),
+    inbox: SAMPLE.inbox.slice(0, 1),
+    archive: [
+      { id: 'a1', type: 'fact', topic: '旧主题', status: 'expired', tags: ['dsh'], line: '只列出来的一条归档', date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a1.md' },
+    ],
+    counts: { ...SAMPLE.counts, active: 3, inbox: 4, archive: 7 },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(TRUNCATED) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  const text = allText(mounted.tree());
+  check('常驻条目被截断时给出条数与去向', /还有 2 条常驻条目没列出来/.test(text), text.slice(0, 200));
+  check('候选被截断时也说出来', /还有 3 条候选没列出来/.test(text), text.slice(0, 200));
+  check('归档被截断时说明缺的是更老的、以及怎么找到它们', /还有 6 条归档没列出来/.test(text) && /更老的/.test(text) && /restore/.test(text), text.slice(0, 240));
+  check('流程条报的是真实总数（不是列表长度）', /已在用 3/.test(allText(findByClass(mounted.tree(), 'dsh-memory-delta-flow'))), allText(findByClass(mounted.tree(), 'dsh-memory-delta-flow')));
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：会话切了工作区要跟着换库');
+{
+  const originalFetch = globalThis.fetch;
+  const stateCalls = [];
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    if (url === '/dsh-memory-delta/state') stateCalls.push(body);
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\projA' } });
+  await flush();
+  check('首次按 scope.cwd 拉数据', stateCalls[0]?.workspace === 'D:\\projA', JSON.stringify(stateCalls));
+
+  // 宿主复用页签实例、只换 scope（审计给了 better-sidebar 侧的源码证据）——
+  // `workspace` 是 useState(cwd) 只取一次的旧值，没有跟随逻辑就会一直停在旧库。
+  mounted.setProps({ scope: { sessionId: 's2', cwd: 'D:\\projB' } });
+  await flush();
+  check('scope.cwd 变了 → 立刻按新工作区重拉', stateCalls.some((c) => c.workspace === 'D:\\projB'), JSON.stringify(stateCalls));
+  check('新请求确实发生了（不是只改了 state）', stateCalls.length >= 2, String(stateCalls.length));
   globalThis.fetch = originalFetch;
 }
 

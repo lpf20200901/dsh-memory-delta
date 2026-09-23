@@ -47,10 +47,24 @@ export const Config = z.object({
   skill: z.boolean().default(true),
 });
 
-/** 把 (config, cwd) 解析成一次可用的记忆库句柄。 */
+/**
+ * 把 (config, cwd) 解析成一次可用的记忆库句柄；**解析不出来就返回 null，绝不猜**。
+ *
+ * ⚠️ 这里以前是 `path.join(cwd ?? process.cwd(), 'memory')` —— 而插件的 `process.cwd()` 是
+ * harness 的启动目录（launch-root），不是会话的工作区。后果是"静默搜错库"：
+ * `memory_search` 会去 `<启动目录>/memory` 里找，返回空（模型以为"没记过"）或**别的工作区**的命中；
+ * `memory_write` 更糟 —— 它 `forWrite`，会在那个目录里**真的建出一个记忆库**。
+ * 拿不到工作区时应该是"用不了"，不是"随便挑一个"。
+ *
+ * @param {object} config 插件配置
+ * @param {string|null} cwd 会话工作区（`agent.session.header.cwd`）；缺了就不能靠猜
+ * @returns {{root: string, L: object, budget: number, scope: string}|null}
+ */
 function openStore(config, cwd, { forWrite = false } = {}) {
   if (config.enabled === false) return null;
-  const root = config.root ? path.resolve(config.root) : path.join(cwd ?? process.cwd(), 'memory');
+  // 显式配了 root 时与工作区无关（用户在别处维护的库）—— 这种情况不需要 cwd
+  if (!config.root && !cwd) return null;
+  const root = config.root ? path.resolve(config.root) : path.join(cwd, 'memory');
   // 读的时候**绝不产生副作用**（不能在用户每个工作区里都建出 memory/ 目录）；
   // 只有真要写（memory_write）时才按需建目录 —— 否则在一个还没有 memory/ 的工作区里，
   // 工具会抛出让人摸不着头脑的 ENOENT（真机预检抓到的）。
@@ -59,9 +73,18 @@ function openStore(config, cwd, { forWrite = false } = {}) {
   const budget = config.maxBytes || fileConfig?.injectBudget || 3072;
   // 会话工作区是权威的 scope，显式传下去 —— 否则 createEntry 会退到记忆库声明或
   // process.cwd()，而插件的 process.cwd() 是 harness 的 launch-root（真机试用踩到）。
-  const scope = `workspace:${cwd ?? process.cwd()}`;
+  // 只有在**没有工作区**时（插件配了固定 root 的那种部署）才退回用库根当 scope 名。
+  const scope = cwd ? `workspace:${cwd}` : `workspace:${path.resolve(config.root)}`;
   return { root, L, budget, scope };
 }
+
+/** 拿不到会话工作区时的统一说法（工具、hook 都复用它，别各写各的）。 */
+const NO_CWD_MESSAGE =
+  '拿不到会话工作目录（agent.session.header.cwd），无法确定是哪个工作区的记忆库 —— ' +
+  '本会话里记忆功能不可用（如果你把插件的 root 显式配成了固定的库，就不会有这个问题）';
+
+/** `memory_search` 一次最多返回多少条 —— 与面板搜索路由同一个上界（防止一次灌满上下文）。 */
+export const SEARCH_LIMIT_MAX = 100;
 
 const truncated = (s, n = 200) => {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim();
@@ -129,7 +152,7 @@ export function apply(ctx, config = {}) {
           enum: ['all', 'facts', 'decisions', 'inbox', 'archive', 'journal', 'sessions', 'index'],
           description: 'Narrow the search to one layer. Default all.',
         },
-        limit: { type: 'integer', description: 'Max matches to return. Default 10 — each hit renders a snippet plus its file path (~300 bytes), so raise it only when you really need more; `truncated` in the result tells you when more matched.' },
+        limit: { type: 'integer', description: `Max matches to return (default 10, hard cap ${SEARCH_LIMIT_MAX}). Each hit renders a snippet plus its file path (~300 bytes), so keep it small; \`truncated\` in the result tells you when more matched.` },
       },
       output: {
         // ⚠️ 这里的字段清单必须**覆盖 searchLibrary 真正会返回的每一个键**。
@@ -190,7 +213,7 @@ export function apply(ctx, config = {}) {
           }
           const lines = [
             `Matched ${value.total} memory entr${value.total === 1 ? 'y' : 'ies'}` +
-              (value.truncated ? ' (more matched than `limit` allowed — raise `limit` or narrow the query)' : '') +
+              (value.truncated ? ` (capped at ${SEARCH_LIMIT_MAX} — narrow the query to see the rest)` : '') +
               ':',
           ];
           value.matches.forEach((m, i) => {
@@ -209,10 +232,15 @@ export function apply(ctx, config = {}) {
       },
       execute(args, exec) {
         const store = storeOf(exec?.agent?.session?.header?.cwd);
-        if (!store) return Promise.resolve({ total: 0, matches: [] });
+        // 拿不到工作区就**明确报错**：以前这里返回"零命中"，模型会把"搜错库"读成"没记过"
+        if (!store) throw new Error(`memory_search: ${NO_CWD_MESSAGE}`);
         // 默认 10（不是 CLI/面板的 20）：命中现在会**连片段一起**渲染给模型（约 300 字节/条），
-        // 20 条 ≈ 7 KB ≈ 2k tokens。不够时结果里的 `truncated` 会说话，模型自己调大 `limit`。
-        const limit = Number.isFinite(args.limit) ? Number(args.limit) : 10;
+        // 20 条 ≈ 7 KB ≈ 2k tokens。
+        // ⚠️ **必须封顶**：工具描述在教模型"不够就 raise limit"，而这里原本没有上界 ——
+        // 一次 `limit: 100000` 就能把整个库（几十 KB）灌进上下文，正好把这个插件省的 token 全吐回去。
+        // 面板那条路由一直是 100，现在两边口径一致。
+        const requested = Number.isFinite(args.limit) ? Number(args.limit) : 10;
+        const limit = Math.max(1, Math.min(requested, SEARCH_LIMIT_MAX));
 
         // 检索与 `mem recall`、侧边栏搜索框**完全共用一份实现**（`searchLibrary` →
         // `src/search.mjs` 的分词/打分/片段）。返回的是无损 JSON（`searchLibrary` 已经
@@ -265,7 +293,7 @@ export function apply(ctx, config = {}) {
       execute(args, exec) {
         // forWrite：允许按需建出记忆库目录（读路径绝不建目录）
         const store = storeOf(exec?.agent?.session?.header?.cwd, { forWrite: true });
-        if (!store) throw new Error('memory_write: 记忆库不可用（检查插件配置 enabled/root）');
+        if (!store) throw new Error(`memory_write: ${NO_CWD_MESSAGE}`);
         const created = createEntry(store.L, {
           type: args.type,
           conclusion: args.conclusion,

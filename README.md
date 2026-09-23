@@ -225,18 +225,18 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 994 assertions, zero dependencies
+npm test        # 1020 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 236 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, and reference cleanup on `restore`) |
+| `test/run-tests.mjs` | 247 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, and reference cleanup on `restore`) |
 | `test/planner-tests.mjs` | 43 | the diff algorithm (pure logic) |
 | `test/search-tests.mjs` | 51 | tokenizing / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 278 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename/topic actually writing the store + whitelist/origin checks + tool-output contract and render text) |
-| `test/client-tests.mjs` | 230 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, entry click → `openFile`, promote/tidy, failure states) |
+| `test/plugin-tests.mjs` | 286 | plugin integration (stubbed DSH modules, real `apply()` + both tools + both panel routes + promote/rename/topic actually writing the store + whitelist/origin checks + tool-output contract and render text) |
+| `test/client-tests.mjs` | 237 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, entry click → `openFile`, promote/tidy, failure states) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable
@@ -301,6 +301,22 @@ Regression tests baked in from real bugs:
   that need quoting now get quoted, quoted values are never coerced, and a round-trip test pins it.
   Unknown frontmatter keys are also preserved verbatim now instead of being deleted by the next
   write, and the body's leading blank lines no longer accumulate one per write.
+- **Half-written supersede links, twice more.** `archive --superseded-by` set `superseded_by` on the
+  retired entry without adding the reverse `supersedes` to the entry replacing it, and
+  `promote --supersedes` would **silently rewrite** a chain someone else had already established.
+  Both produced the same `validate` failure ("must be bidirectional") with no obvious repair. The
+  three write paths (`promote --supersedes`, `archive --superseded-by`, `mem supersede`) now share
+  one link helper, and re-pointing an already-superseded entry is refused with an explanation.
+- **Silent degradation, three places.** `memory_search` had **no cap on `limit`** while its own
+  description invited raising it — one `limit: 100000` call could pour the entire store into the
+  context (now hard-capped at 100, the same as the panel route). A missing
+  `agent.session.header.cwd` fell back to `process.cwd()` — the harness launch directory — so a
+  search silently looked in the wrong store and a **write could create one there** (now: an explicit
+  error, and the injection path injects nothing rather than another workspace's memory). And the
+  panel silently hid entries past its caps (200 standing / 50 inbox / 50 archive, oldest archive
+  entries first) while the flow strip reported the true totals — past 50 archived entries "restore"
+  was unreachable from the UI with no hint; the panel now says how many are missing and how to reach
+  them.
 
 ## Roadmap
 

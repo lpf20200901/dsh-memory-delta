@@ -680,6 +680,33 @@ function removeFile(file) {
 }
 
 /**
+ * 建立**双向**取代关系：旧条目 → `status=superseded` + `superseded_by=新`，
+ * 新条目的 `supersedes` 里加上旧的；并把**新条目**的文件落盘（旧条目由调用方落盘 ——
+ * 它通常还要被 `moveEntry` 搬进 `archive/`，共用那一份实现）。
+ *
+ * 为什么抽出来：`promote --supersedes`、`archive --superseded-by`、CLI `supersede`
+ * 三条路都要写这份关系，**任何一条写漏一半就是悬挂引用** —— 那种状态 `validate` 会一直报
+ * 「应双向一致」，而且没有任何命令能原地修好（2026-09-23 审计抓到两处：archive 那条只写了一半；
+ * promote 那条会**静默改写**别人已经建立的替换链）。
+ *
+ * @param {object} old 旧条目（内存对象，来自 `requireOneOrThrow`）
+ * @param {object} target 新条目（内存对象）
+ */
+function applySupersedeLink(L, old, target) {
+  if (old.id === target.id) throw new Error('不能自己取代自己');
+  if (old.data.superseded_by && old.data.superseded_by !== target.id) {
+    throw new Error(
+      `${old.id} 已经被 ${old.data.superseded_by} 取代过了（superseded_by=${old.data.superseded_by}）\n` +
+        `  不静默改写替换链：先 mem restore ${old.id} 把它捞回候选层，或先处理 ${old.data.superseded_by} 之后再来。`,
+    );
+  }
+  old.data.status = 'superseded';
+  old.data.superseded_by = target.id;
+  target.data.supersedes = [...new Set([...(target.data.supersedes || []), old.id])];
+  fs.writeFileSync(target.file, serializeEntry(target), 'utf8');
+}
+
+/**
  * 把条目写到新位置并删源。
  *
  * ⚠️ 必须把**内存中的序列化结果**写过去，不能用 `copyFileSync` 复制磁盘原文件 ——
@@ -743,13 +770,10 @@ export function promoteEntry(L, id, opts = {}) {
   const superseded = [];
   for (const oldId of raw) {
     const old = requireOneOrThrow(L, oldId);
-    if (old.id === e.id) throw new Error('不能自己取代自己');
-    old.data.status = 'superseded';
-    old.data.superseded_by = e.id;
+    applySupersedeLink(L, old, e);
     const archived = path.join(L.archive, `${old.id}.md`);
     if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
     else moveEntry(old.file, archived, serializeEntry(old));
-    e.data.supersedes = [...new Set([...(e.data.supersedes || []), old.id])];
     superseded.push(old.id);
   }
 
@@ -993,12 +1017,19 @@ export function archiveEntry(L, id, opts = {}) {
   if (status !== 'expired' && status !== 'superseded') {
     throw new Error(`归档状态只能是 expired 或 superseded（收到 ${status}）`);
   }
-  e.data.status = status;
-  if (opts.supersededBy) e.data.superseded_by = String(opts.supersededBy);
+  // ⚠️ 给了 `--superseded-by` 就必须**双向**写链接（以前只写自己那一半）：
+  // 否则 validate 会一直报「superseded_by=X，但对方没有 supersedes 这条」，而这是**用户按 help 敲的**
+  // 正式用法（审计 2026-09-23：那条坏状态曾经连 --fix 都修不好）。
+  if (opts.supersededBy) {
+    const target = requireOneOrThrow(L, String(opts.supersededBy));
+    applySupersedeLink(L, e, target); // 会把 e 标成 superseded + 给对方补 supersedes + 落盘对方
+  } else {
+    e.data.status = status;
+  }
   const dest = path.join(L.archive, `${e.id}.md`);
   moveEntry(e.file, dest, serializeEntry(e));
   writeIndex(L);
-  return { id: e.id, from: e.where, status, file: dest };
+  return { id: e.id, from: e.where, status: e.data.status, file: dest };
 }
 
 /**
@@ -1150,14 +1181,15 @@ function cmdPromoteInternal(root, newId, oldId) {
   const L = ensureLayout(root, { create: false });
   const e = requireOne(L, newId);
   const old = requireOne(L, oldId);
-  if (old.data.status === 'superseded') fail(`${oldId} 已经被取代过了（superseded_by=${old.data.superseded_by}）`);
-  old.data.status = 'superseded';
-  old.data.superseded_by = newId;
+  // 与 promote --supersedes / archive --superseded-by 共用同一份双向链接与闸门
+  try {
+    applySupersedeLink(L, old, e);
+  } catch (error) {
+    fail(error.message);
+  }
   const archived = path.join(L.archive, `${old.id}.md`);
   if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
   else moveEntry(old.file, archived, serializeEntry(old));
-  e.data.supersedes = [...new Set([...(e.data.supersedes || []), oldId])];
-  fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
   ok(`${oldId} → superseded by ${newId}（已归档）`);
 }
 

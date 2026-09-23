@@ -877,6 +877,41 @@ section('坏数据不该把自检打崩（人手写的 frontmatter）');
   check('带 BOM 的文件不再被当成"缺少 frontmatter"', !/缺少 frontmatter/.test(v.out), flat(v.out));
 }
 
+section('取代关系必须两边一起写（2026-09-23 审计修复）');
+{
+  const root = freshRoot('supersede');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  for (const id of ['a', 'b', 'c', 'd']) run(['new', '--root', root, '--type', 'fact', '--id', id, '--key', id, '--conclusion', `真相 ${id}`, '--source', 's']);
+  run(['promote', '--root', root, 'a']);
+
+  // ① archive --superseded-by：以前只写自己那一半 → validate 两条问题、连 --fix 都修不掉
+  const ar = run(['archive', '--root', root, 'a', '--superseded-by', 'b']);
+  check('archive --superseded-by 成功', ar.code === 0, flat(ar.out + ar.err));
+  const aRaw = fs.readFileSync(path.join(root, 'archive', 'a.md'), 'utf8');
+  check('被取代的条目 status=superseded（不是 expired）', /^status: superseded$/m.test(aRaw), aRaw.split('\n').slice(0, 8).join('|'));
+  const bRaw = fs.readFileSync(path.join(root, 'inbox', 'b.md'), 'utf8');
+  check('对方补上了反向的 supersedes', /^supersedes: \[a\]$/m.test(bRaw), bRaw.split('\n').slice(0, 10).join('|'));
+  check('双向一致 → validate 通过', run(['validate', '--root', root]).code === 0, flat(run(['validate', '--root', root]).out));
+
+  // 目标不存在的分支：要先把 b 变成可归档的常驻条目（候选不能归档）
+  run(['promote', '--root', root, 'b']);
+  const badTarget = run(['archive', '--root', root, 'b', '--superseded-by', '不存在的id']);
+  check('指向不存在的条目 → 报错（而不是写个悬挂引用）', badTarget.code !== 0 && /找不到条目/.test(badTarget.out + badTarget.err), flat(badTarget.out + badTarget.err));
+  check('报错之后 b 没被搬走也没被改状态', fs.existsSync(path.join(root, 'facts', 'b.md')), 'facts/b.md');
+
+  // ② promote --supersedes 指向"已经被别人取代过"的条目：以前会静默改写替换链
+  run(['promote', '--root', root, 'c']);
+  const steal = run(['promote', '--root', root, 'd', '--supersedes', 'a']);
+  check('拒绝静默改写替换链（a 已经被 b 取代）', steal.code !== 0 && /已经被 b 取代过/.test(steal.out + steal.err), flat(steal.out + steal.err));
+  check('拒绝之后链没被改坏 → validate 仍通过', run(['validate', '--root', root]).code === 0, flat(run(['validate', '--root', root]).out));
+  check('拒绝之后 d 仍留在候选层', fs.existsSync(path.join(root, 'inbox', 'd.md')), 'inbox/d.md');
+
+  // ③ mem supersede 走同一份闸门与链接逻辑
+  const again = run(['supersede', '--root', root, 'a', 'c']);
+  check('mem supersede 同样拒绝重复取代', again.code !== 0 && /取代过/.test(again.out + again.err), flat(again.out + again.err));
+  check('用 supersede 重新指认（先取回）是可行的出路', run(['restore', '--root', root, 'a']).code === 0, 'restore a');
+}
+
 /* ------------------------------------------------------------- 汇总 */
 rmrf(SANDBOX);
 console.log(`\n${pass} 通过 / ${fail} 失败`);

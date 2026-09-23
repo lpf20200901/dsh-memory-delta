@@ -679,6 +679,17 @@ window.__ModuleLoader__.load({
         // workspace 变化时重新拉（例如会话切了工作区）
       }, [workspace]);
 
+      /**
+       * 会话切了工作区（或页签被宿主复用）时，`props.scope.cwd` 会变，而 `workspace` 是
+       * `useState(cwd)` **只取一次**的旧值 —— 上面那条 effect 只依赖 `workspace`，
+       * 所以它永远不会因为 cwd 变化而重跑：面板会一直显示（并用它发起写请求）**旧库**。
+       * 审计给了 better-sidebar 复用页签实例的源码证据（key 是静态串、scope 来自当前活动会话）。
+       * 这里补一条：cwd 变了就跟着换，换了自然触发上面那条 effect 重新拉。
+       */
+      useEffect(() => {
+        if (cwd && cwd !== workspace) setWorkspace(cwd);
+      }, [cwd]);
+
       const onRefresh = () => load(workspace);
 
       /**
@@ -1856,6 +1867,27 @@ window.__ModuleLoader__.load({
          类型（事实/决策）是**这一层内部**的子分组 —— 它回答的是"这条该放哪边"，
          不是"这条在流程哪一步"。以前把类型放在最外层，于是流程位置只能靠小字注释，
          结果是"一眼看不出是干啥的"（真实反馈）。 */
+      /**
+       * 面板有条数上限（常驻 200 / 候选 50 / 归档 50）。**超过时必须说出来** ——
+       * 否则界面看着"库里就这么点东西"，而「取回」「归档」这些承诺在真实数据量下会静默失效
+       * （审计 2026-09-23：流程条报的是真实总数，列表却只显示前 N 条，两边对不上还没提示）。
+       *
+       * ⚠️ 这两个函数必须定义在**用到它们的阶段块之前** —— 之前放在归档块后面，
+       * 结果 `standing`/`inboxBlock` 先构造时报 `Cannot access 'omissionFor' before initialization`
+       * （TDZ），面板直接变成"读取失败"。
+       */
+      const omitted = (total, shown, what, howTo) =>
+        typeof total === 'number' && total > shown
+          ? h('div', { className: 'dsh-memory-delta-note', key: `omitted:${what}` }, `还有 ${total - shown} 条${what}没列出来：${howTo}`)
+          : null;
+
+      /** 某个阶段的"省略提示"（放在该阶段的列表后面）。 */
+      const omissionFor = (layer) => {
+        if (layer === 'inbox') return omitted(typeof counts.inbox === 'number' ? counts.inbox : 0, inbox.length, '候选', '用搜索框搜，或在命令行 mem list --where inbox 看全量');
+        if (layer === 'standing') return omitted(typeof counts.active === 'number' ? counts.active : 0, entries.length, '常驻条目', '用搜索框搜，或在命令行 mem list 看全量');
+        return null;
+      };
+
       const standingBody = groupedBody(entries, groupBy, 'standing');
 
       /* -------------------------------------------------- 全局规范（工作区外）
@@ -1967,7 +1999,7 @@ window.__ModuleLoader__.load({
               open: isOpen('stage:standing'),
               onToggle: () => toggleSection('stage:standing'),
             },
-            [globalBlock, workspaceRulesBlock].concat(standingBody),
+            [globalBlock, workspaceRulesBlock].concat(standingBody).concat([omissionFor('standing')].filter(Boolean)),
           )
         : section(
             {
@@ -2009,7 +2041,7 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : groupedBody(inbox, groupBy, 'inbox'),
+            : [groupedBody(inbox, groupBy, 'inbox'), omissionFor('inbox')].filter(Boolean),
         ],
       );
 
@@ -2039,8 +2071,9 @@ window.__ModuleLoader__.load({
           archiveCount > archived.length
             ? h(
                 'div',
-                { className: 'dsh-memory-delta-dim', key: 'more' },
-                `面板只列前 ${archived.length} 条，其余用搜索框搜（归档层能被搜到）`,
+                { className: 'dsh-memory-delta-note', key: 'more' },
+                `还有 ${archiveCount - archived.length} 条归档没列出来（列表按日期**倒序**，所以缺的是更老的）：` +
+                  '用搜索框搜它们（归档层能被搜到），或在命令行按 id `mem restore <id>` 取回。',
               )
             : null,
         ].filter(Boolean),
@@ -2053,7 +2086,7 @@ window.__ModuleLoader__.load({
         '流程：模型写入 → ',
         h('span', { className: 'dsh-memory-delta-flow-now' }, `待你确认 ${typeof counts.inbox === 'number' ? counts.inbox : 0}`),
         ' → ',
-        h('span', { className: 'dsh-memory-delta-flow-now' }, `已在用 ${entries.length}`),
+        h('span', { className: 'dsh-memory-delta-flow-now' }, `已在用 ${typeof counts.active === 'number' ? counts.active : entries.length}`),
         ' → ',
         h('span', { className: 'dsh-memory-delta-flow-dim' }, `已归档 ${archiveCount}`),
       );

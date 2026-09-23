@@ -560,7 +560,7 @@ section('工具 render：命中必须渲染成文本（模型只看得到 render
   check('流水层不给文件路径（行级命中，路径没用）', !journalText.includes('file:'), journalText.slice(0, 200));
 
   const cut = searchTool.output.render({}, { total: 2, truncated: true, matches: [] })[0].text;
-  check('被 limit 截断时 render 告诉模型还有更多', /raise `limit`/.test(cut), cut.slice(0, 120));
+  check('被 limit 截断时 render 说明"封顶了、请收窄查询"', /capped at \d+/.test(cut), cut.slice(0, 120));
   const none = await searchTool.execute({ query: '绝对搜不到的词xyzzy' }, { agent: toolAgent });
   check('零命中的 render 不是空话（给出下一步该怎么说）', /No memory entries matched/.test(searchTool.output.render({}, none)[0].text));
 }
@@ -1067,6 +1067,79 @@ section('「搜索」路由');
   const registered = [];
   const returned = registerSearchRoute({ register: (r) => registered.push(r) }, { configRoot: searchRoot });
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_SEARCH_PATH && registered.length === 1, String(returned?.path));
+}
+
+/* -------------------------------- P2 回归：检索上界 / 拿不到工作区 */
+
+section('memory_search 的 limit 有硬上界（防止一次把整库灌进上下文）');
+{
+  // 直接写文件而不是 createEntry：105 次 createEntry 每次都会全库扫描（O(n²)），太慢
+  const root = path.join(SANDBOX, 'limitcap', 'memory');
+  ensureLayout(root);
+  for (let i = 1; i <= 105; i += 1) {
+    const id = `e${String(i).padStart(3, '0')}`;
+    fs.writeFileSync(
+      path.join(root, 'inbox', `${id}.md`),
+      `---\nid: ${id}\ntype: fact\nscope: s\nstatus: active\ndate: 2026-01-01\n---\n\n## 结论\n并发写入的坑 ${i}\n`,
+      'utf8',
+    );
+  }
+  const tools = [];
+  const ctx = fakeCtx();
+  ctx.tools.register = (t) => tools.push(t);
+  apply(ctx, { root, maxBytes: 3072, enabled: true, skill: false });
+  const tool = tools.find((t) => t.name === 'memory_search');
+  const agent = { session: { header: { cwd: root, id: 'limit' } } };
+
+  const greedy = await tool.execute({ query: '坑', limit: 100000 }, { agent });
+  check('要 100000 条也只给 100 条（上界生效）', greedy.matches.length === 100, String(greedy.matches.length));
+  check('同时如实告诉模型"被截断了"', greedy.truncated === true, JSON.stringify(greedy.truncated));
+  const rendered = tool.output.render({}, greedy)[0].text;
+  check('render 说明封了顶（不再劝模型 raise limit）', /capped at 100/.test(rendered), rendered.slice(0, 140));
+  const modest = await tool.execute({ query: '坑', limit: 3 }, { agent });
+  check('正常 limit 不受影响（按需取 3 条）', modest.matches.length === 3 && modest.truncated === true, String(modest.matches.length));
+}
+
+section('拿不到会话工作区时：明确报错，绝不猜（P2-9）');
+{
+  const noCwd = { session: { header: { id: 'no-cwd' } } };
+  const fresh = () => {
+    const tools = [];
+    const ctx = fakeCtx();
+    ctx.tools.register = (t) => tools.push(t);
+    return { ctx, tools };
+  };
+
+  const { ctx, tools } = fresh();
+  const hookNoRoot = apply(ctx, { maxBytes: 3072, enabled: true, skill: false }); // 故意不配 root
+  const search = tools.find((t) => t.name === 'memory_search');
+  const write = tools.find((t) => t.name === 'memory_write');
+
+  let searchErr = null;
+  try {
+    await search.execute({ query: '随便什么' }, { agent: noCwd });
+  } catch (error) {
+    searchErr = error;
+  }
+  check('memory_search 缺 cwd 时明确报错（不再静默返回"零命中"）', searchErr !== null && /拿不到会话工作目录/.test(searchErr.message), String(searchErr?.message).slice(0, 140));
+
+  let writeErr = null;
+  try {
+    await write.execute({ type: 'fact', conclusion: '不该被写下去' }, { agent: noCwd });
+  } catch (error) {
+    writeErr = error;
+  }
+  check('memory_write 缺 cwd 时也报错（不会在 harness 启动目录里建出一个库）', writeErr !== null && /拿不到会话工作目录/.test(writeErr.message), String(writeErr?.message).slice(0, 140));
+
+  const plan = await hookNoRoot.planFor({ session: { header: { id: 'no-cwd' } } }, [], { messages: [] });
+  check('注入侧同样不猜：缺 cwd 时不注入任何记忆', plan.plan === null && Array.isArray(plan.entries) && plan.entries.length === 0, JSON.stringify(plan).slice(0, 140));
+
+  // 配了固定 root 的部署与工作区无关，缺 cwd 也必须照常能用
+  const fixed = fresh();
+  apply(fixed.ctx, { root: ROOT, enabled: true, skill: false });
+  const fixedSearch = fixed.tools.find((t) => t.name === 'memory_search');
+  const ok = await fixedSearch.execute({ query: 'rmSync' }, { agent: noCwd });
+  check('显式配了 root 时缺 cwd 照常可用（不受影响）', typeof ok.total === 'number', JSON.stringify(ok).slice(0, 80));
 }
 
 /* -------------------------------- P0 回归：I/O 故障与坏配置不能让宿主进程退出 */

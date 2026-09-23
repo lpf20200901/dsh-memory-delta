@@ -102,7 +102,10 @@ export function createMemoryHook({
    *   （那时没有任何消息要发，但可能有记忆该提醒了）。
    */
   async function planFor(agent, messages, decision) {
-    const cwd = agent?.session?.header?.cwd ?? process.cwd();
+    // ⚠️ 缺 cwd 时**不要**兜 `process.cwd()`（插件进程的 cwd 是 harness 的启动目录）：
+    // 那会把**别的工作区**的记忆注入到这个会话里。拿不到就是拿不到 —— 交给 openStore 判空，
+    // 结果是不注入（插件配了固定 root 时不受影响）。
+    const cwd = agent?.session?.header?.cwd ?? null;
     const payload = await loadPayload(cwd);
     if (!payload || !Array.isArray(payload.entries) || payload.entries.length === 0) {
       // 记忆库为空或不可用 —— 不但不该注入，还应该把之前排队的清掉
