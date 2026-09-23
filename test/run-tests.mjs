@@ -374,6 +374,25 @@ section('recall：相关度排序 / 中文 bigram / 分层过滤');
   check('搜不到时不硬凑结果', /没有匹配/.test(none.out), flat(none.out));
 }
 
+section('recall：流水抢镜的两道闸（降权 + 行级封顶）');
+{
+  // 真机实测（2026-09-23）：查一个宽泛的词，21 条命中里 18 条是流水行 ——
+  // 每条还要渲染 120~200 字节片段，模型花了上下文却大半拿到过程记录。
+  const root = freshRoot('linecap');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  run(['new', '--root', root, '--type', 'fact', '--id', 'the-fact', '--key', 'the-fact', '--conclusion', '沙箱禁止命名管道', '--source', 's']);
+  run(['promote', '--root', root, 'the-fact']);
+  for (let i = 0; i < 10; i += 1) run(['journal', 'add', '--root', root, `第 ${i} 条流水：沙箱禁止命名管道相关的过程记录`]);
+
+  const j = JSON.parse(run(['recall', '--root', root, '沙箱禁管道', '--json']).out);
+  check('条目排在所有流水之前（降权生效）', j.matches[0].id === 'the-fact', JSON.stringify(j.matches.map((m) => `${m.id}:${m.score}`)));
+  check('行级命中被封顶到 5 条', j.matches.filter((m) => m.where === 'journal').length === 5, JSON.stringify(j.matches.map((m) => m.where)));
+  check('并报出被折叠了多少条', j.lineDropped === 5, String(j.lineDropped));
+  const text = run(['recall', '--root', root, '沙箱禁管道']).out;
+  check('CLI 提示怎么去看被折叠的流水', /另有 5 条流水\/会话索引命中被折叠/.test(text) && /--where journal/.test(text), flat(text).slice(-200));
+  check('想全看流水时仍然给全（--where journal 不受封顶影响）', JSON.parse(run(['recall', '--root', root, '沙箱禁管道', '--where', 'journal', '--limit', '50', '--json']).out).matches.length === 10, 'journal only');
+}
+
 /* --------------------------------------- M3：verify_when 到期复核（mem due） */
 section('M3：verify_when 到期复核与 mem due');
 {
@@ -734,6 +753,8 @@ section('取回会清掉对方的悬挂引用（取代的**反向**操作必须�
 /* ------------------------------------------------------------------ 主题（topic） */
 section('M13：主题 topic（面板按它归纳条目）');
 {
+  // 少数断言必须直接调函数（CLI 的 argv 传不了 `\u0000` —— 见 ⑫）
+  const { ensureLayout, normalizeTopic, readAll, renameTopic, setTopicEntry } = await import(new URL('../bin/mem.mjs', import.meta.url).href);
   const root = path.join(SANDBOX, 'topic', 'memory');
   run(['init', '--root', root]);
 
@@ -815,6 +836,46 @@ section('M13：主题 topic（面板按它归纳条目）');
   check('改不存在的主题 → 非零退出 + 列出已有主题', renameMissing.code !== 0 && /找不到主题/.test(renameMissing.out + renameMissing.err) && /现有：/.test(renameMissing.out + renameMissing.err), flat(renameMissing.out + renameMissing.err));
   const renameSame = run(['topic-rename', '--root', root, '发布与流程', '发布与流程']);
   check('新旧同名 → 拒绝（什么也没做就说清楚）', renameSame.code !== 0 && /一样/.test(renameSame.out + renameSame.err), flat(renameSame.out + renameSame.err));
+
+  // ⑪ P3（2026-09-23 审计）：index.md 是**派生视图**，改主题必须跟着重建
+  //    以前 `set --topic` 不重建 → 界面上主题已经改了、index.md 里还是旧名字，而且 validate 查不出来
+  //    （它只查"active 条目的 id 在不在索引里"）
+  run(['new', '--root', root, '--type', 'fact', '--id', 'tp-idx', '--key', 'tp-idx', '--conclusion', '索引要跟着主题走', '--topic', '索引 旧名']);
+  run(['promote', '--root', root, 'tp-idx']);
+  run(['index', '--root', root]);
+  const idxBefore = fs.readFileSync(path.join(root, 'index.md'), 'utf8');
+  check('重建后的 index.md 带着旧主题名', idxBefore.includes('索引 旧名'), idxBefore.split('\n').find((l) => l.includes('tp-idx')) ?? '(没有这一行)');
+  run(['set', '--root', root, 'tp-idx', '--topic', '索引 新名']);
+  const idxAfter = fs.readFileSync(path.join(root, 'index.md'), 'utf8');
+  check('改主题后 index.md 自动重建（不再停在旧名字）', idxAfter.includes('索引 新名') && !idxAfter.includes('索引 旧名'), idxAfter.split('\n').find((l) => l.includes('tp-idx')) ?? '(没有这一行)');
+
+  // ⑫ P3：保留主题名（面板的三个哨兵）在**写入侧**就要挡住
+  //    以前它们是字面量 `__untopic__` 这类**合法**主题名 —— 库里真出现同名主题就会和「未归类」并成一组，
+  //    而且事后无从分辨。现在哨兵带 `\u0000` 前缀 + 写入侧拒收，两道闸。
+  //    ⚠️ 这一条**只能直接调函数**，不能过 CLI：`\u0000` 是 NUL，`spawnSync` 的 argv 根本传不了
+  //    （`ERR_INVALID_ARG_VALUE: must be a string without null bytes`）—— 顺带说明这个值也只能由
+  //    代码自己构造，人手打不出来，这正是选它的理由。
+  let reservedError = null;
+  try {
+    normalizeTopic('\u0000untopic', { strict: true });
+  } catch (error) {
+    reservedError = error;
+  }
+  check('写入侧拒绝保留主题名（并说清是保留名）', reservedError !== null && /保留名/.test(reservedError.message), String(reservedError?.message));
+  check('读路径（strict:false）对同样的值只归一化、不抛', normalizeTopic('\u0000untopic') === '\u0000untopic', 'read path');
+  {
+    const L = ensureLayout(root, { create: false });
+    setTopicEntry(L, 'tp-idx', '改名前的主题', { index: false });
+    let renameError = null;
+    try {
+      renameTopic(L, '改名前的主题', '\u0000nodate');
+    } catch (error) {
+      renameError = error;
+    }
+    check('改名**目标**是保留名 → 拒绝（改名不能绕过闸门）', renameError !== null && /保留名/.test(renameError.message), String(renameError?.message));
+    check('被拒之后条目还是旧主题（没有改一半）', readAll(L).find((e) => e.id === 'tp-idx')?.data.topic === '改名前的主题', 'topic');
+    setTopicEntry(L, 'tp-idx', '索引 新名');
+  }
 }
 
 /* ------------------------------------- 数据保真 / 坏数据不崩（2026-09-23 审计修复） */

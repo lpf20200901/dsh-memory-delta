@@ -208,6 +208,13 @@ function makeFakeReact(makeElement) {
       react.cursor += 1;
       return fn;
     },
+    /** 与真 React 一样：**同一个槽位返回同一个对象**（跨渲染保持，且改它不触发重渲染）。 */
+    useRef(initial) {
+      const i = react.cursor;
+      react.cursor += 1;
+      if (!(i in react.hooks)) react.hooks[i] = { current: initial };
+      return react.hooks[i];
+    },
     useEffect(fn, deps) {
       const i = react.cursor;
       react.cursor += 1;
@@ -471,11 +478,11 @@ section('组件：正常数据');
     const keys = orderedSectionKeys(mounted.tree());
     check(
       '主题视图：没归类的单独一组，且排在同一层的命名组之后',
-      Boolean(sectionByKey(mounted, 'standing:topic:__untopic__')) &&
-        keys.indexOf('standing:topic:环境与沙箱') < keys.indexOf('standing:topic:__untopic__'),
+      Boolean(sectionByKey(mounted, 'standing:topic:\u0000untopic')) &&
+        keys.indexOf('standing:topic:环境与沙箱') < keys.indexOf('standing:topic:\u0000untopic'),
       keys.join(' > '),
     );
-    check('待你确认这一层也跟随维度（单条候选也有「未归类」分组头）', Boolean(sectionByKey(mounted, 'inbox:topic:__untopic__')), keys.join(' > '));
+    check('待你确认这一层也跟随维度（单条候选也有「未归类」分组头）', Boolean(sectionByKey(mounted, 'inbox:topic:\u0000untopic')), keys.join(' > '));
   }
   selectDimension(mounted, '类型');
 
@@ -1168,7 +1175,7 @@ section('组件：按主题归纳与「归类」按钮');
 
   // 默认主题视图：命名组在前、未归类在后；条目行上**不再重复**标主题（分组头已经说了）
   const headers = headerTexts(mounted.tree()).join(' | ');
-  check('默认按主题分组：命名组与「未归类」都在（且同层内命名组在前）', Boolean(sectionByKey(mounted, 'standing:topic:环境与沙箱')) && Boolean(sectionByKey(mounted, 'standing:topic:__untopic__')) && orderedSectionKeys(mounted.tree()).indexOf('standing:topic:环境与沙箱') < orderedSectionKeys(mounted.tree()).indexOf('standing:topic:__untopic__'), orderedSectionKeys(mounted.tree()).join(' > '));
+  check('默认按主题分组：命名组与「未归类」都在（且同层内命名组在前）', Boolean(sectionByKey(mounted, 'standing:topic:环境与沙箱')) && Boolean(sectionByKey(mounted, 'standing:topic:\u0000untopic')) && orderedSectionKeys(mounted.tree()).indexOf('standing:topic:环境与沙箱') < orderedSectionKeys(mounted.tree()).indexOf('standing:topic:\u0000untopic'), orderedSectionKeys(mounted.tree()).join(' > '));
   check('未归类组给一句"怎么做"', headers.includes('归类'), headers);
   check('主题视图里条目行不重复标主题', findAllByClass(mounted.tree(), 'is-topic').length === 0, String(findAllByClass(mounted.tree(), 'is-topic').length));
 
@@ -1235,7 +1242,7 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
 
   check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
   check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
-  check('已归档里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:__untopic__')), headerTexts(mounted.tree()).join(' | '));
+  check('已归档里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:\u0000untopic')), headerTexts(mounted.tree()).join(' | '));
 
   // 换维度：三个阶段一起跟着变
   selectDimension(mounted, '类型');
@@ -1253,7 +1260,7 @@ section('组件：每个阶段都照当前维度分组（不做"单组就不出�
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
-  check('单条候选的收件箱也照维度出分组头（「未归类」）', Boolean(sectionByKey(mounted, 'inbox:topic:__untopic__')), headerTexts(mounted.tree()).join(' | '));
+  check('单条候选的收件箱也照维度出分组头（「未归类」）', Boolean(sectionByKey(mounted, 'inbox:topic:\u0000untopic')), headerTexts(mounted.tree()).join(' | '));
   check('候选本身照常列出来', allText(mounted.tree()).includes('沙箱禁止命名管道'), allText(mounted.tree()).slice(0, 300));
   // 换维度也一样：日期视图下同一天也算一组
   selectDimension(mounted, '日期');
@@ -1348,7 +1355,7 @@ section('组件：批量部分失败要如实说出来');
   };
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
   await flush();
-  findAllByClass(sectionByKey(mounted, 'inbox:topic:__untopic__'), 'dsh-memory-delta-check')[0].props.onChange({});
+  findAllByClass(sectionByKey(mounted, 'inbox:topic:\u0000untopic'), 'dsh-memory-delta-check')[0].props.onChange({});
   const promoteBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '提升');
   promoteBtn.props.onClick({ stopPropagation() {} });
   await flush();
@@ -1462,6 +1469,217 @@ section('组件：会话切了工作区要跟着换库');
   await flush();
   check('scope.cwd 变了 → 立刻按新工作区重拉', stateCalls.some((c) => c.workspace === 'D:\\projB'), JSON.stringify(stateCalls));
   check('新请求确实发生了（不是只改了 state）', stateCalls.length >= 2, String(stateCalls.length));
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：检索时序与截断（2026-09-23 审计 P3） */
+
+section('组件：检索的时序纪律（重复请求 / 过期响应 / 失败可重试）');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  /** 让某个查询**挂着不返回**，用来制造"旧响应后到"。 */
+  const pending = new Map();
+  const okResult = (q) =>
+    ({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, query: q, where: 'all', total: 1, truncated: false, lineDropped: 0, matches: [{ id: `hit-${q}`, where: 'facts', line: `命中 ${q}`, snippet: `命中 ${q}`, score: 1 }] }) });
+  globalThis.fetch = (url, options) => {
+    if (url !== '/dsh-memory-delta/search') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+    const body = JSON.parse(options?.body ?? '{}');
+    calls.push({ query: body.query, topic: body.topic, at: Date.now() });
+    if (pending.has(body.query)) {
+      return new Promise((resolve) => {
+        pending.get(body.query).push(() => resolve(okResult(body.query)));
+      });
+    }
+    if (body.query === '会失败的词') return Promise.reject(new Error('沙箱里连不上'));
+    return Promise.resolve(okResult(body.query));
+  };
+
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  const box = () => findByClass(mounted.tree(), 'dsh-memory-delta-search-input');
+
+  // ① 同一句话不重复打请求：过去去重键读的是**渲染闭包**里的值，而防抖定时器持有旧闭包
+  //    → "输入后立刻回车"会发两次（一次来自定时器、一次来自回车）。
+  box().props.onChange({ target: { value: '时序' } });
+  box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  check('输入后立刻回车只发一次请求（不看闭包里的旧状态）', calls.filter((c) => c.query === '时序').length === 1, JSON.stringify(calls));
+  await wait(320); // 让防抖那一次也过去
+  check('防抖到点后也不会补发第二次', calls.filter((c) => c.query === '时序').length === 1, JSON.stringify(calls));
+  check('（对照）结果确实渲染出来了', allText(mounted.tree()).includes('命中 时序'), allText(mounted.tree()).slice(0, 160));
+
+  // ② 失败之后必须能重试：旧代码把"搜过"记在 state 上，失败也算搜过 → 再按回车发不出去，
+  //    界面永远停在错误上，只能改字。
+  box().props.onChange({ target: { value: '会失败的词' } });
+  box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  check('搜索失败时回显宿主的原因', allText(mounted.tree()).includes('沙箱里连不上'), allText(mounted.tree()).slice(0, 200));
+  const failCount = calls.filter((c) => c.query === '会失败的词').length;
+  box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  check('失败之后按回车能重试（失败不算"搜过"）', calls.filter((c) => c.query === '会失败的词').length === failCount + 1, `${failCount} → ${calls.filter((c) => c.query === '会失败的词').length}`);
+
+  // ③ 乱序返回：先发的慢请求后到，不能覆盖后发的结果（否则输入框写着 A、结果区是 B）
+  pending.set('慢的那个', []);
+  const slowCalls = [];
+  box().props.onChange({ target: { value: '慢的那个' } });
+  box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  box().props.onChange({ target: { value: '快的那个' } });
+  box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+  await flush();
+  check('（前置）后发的结果先渲染出来', allText(mounted.tree()).includes('命中 快的那个'), allText(mounted.tree()).slice(0, 200));
+  for (const release of pending.get('慢的那个')) release();
+  await flush();
+  await flush();
+  const afterStale = allText(mounted.tree());
+  check('过期响应被丢弃（不覆盖更新的结果）', afterStale.includes('命中 快的那个') && !afterStale.includes('命中 慢的那个'), afterStale.slice(0, 200));
+  check('（对照）两个请求都真的发出去了', calls.some((c) => c.query === '慢的那个') && calls.some((c) => c.query === '快的那个'), JSON.stringify(calls.map((c) => c.query)));
+
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：检索被截断时必须说出来（宿主早就在报，客户端以前直接丢）');
+{
+  const originalFetch = globalThis.fetch;
+  const scenarios = {
+    封顶: { truncated: true, lineDropped: 0, total: 137, matches: [{ id: 'h1', where: 'facts', line: '第一条命中', score: 1 }] },
+    折叠: { truncated: true, lineDropped: 4, total: 3, matches: [{ id: 'h2', where: 'facts', line: '第二条命中', score: 1 }] },
+    完整: { truncated: false, lineDropped: 0, total: 1, matches: [{ id: 'h3', where: 'facts', line: '第三条命中', score: 1 }] },
+  };
+  let mode = '封顶';
+  globalThis.fetch = (url, options) => {
+    if (url !== '/dsh-memory-delta/search') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+    const body = JSON.parse(options?.body ?? '{}');
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, query: body.query, where: 'all', ...scenarios[mode] }) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  const box = () => findByClass(mounted.tree(), 'dsh-memory-delta-search-input');
+  const search = async (word) => {
+    box().props.onChange({ target: { value: word } });
+    box().props.onKeyDown({ key: 'Enter', preventDefault() {} });
+    await flush();
+    return allText(mounted.tree());
+  };
+
+  const capped = await search('封顶的那个');
+  check('条数被封顶时说清"只列了最高的 N 条 / 共多少"', /只列了相关度最高的 1 条/.test(capped) && /共 137 条/.test(capped), capped.slice(0, 240));
+  check('截断提示块真的渲染出来了（`.dsh-memory-delta-trunc`）', findByClass(mounted.tree(), 'dsh-memory-delta-trunc') !== null, 'trunc');
+  check('给出收窄的下一步（换词 / 按主题搜 / CLI 看流水全量）', /mem recall --where journal/.test(capped), capped.slice(0, 300));
+
+  mode = '折叠';
+  const folded = await search('折叠的那个');
+  check('流水/会话命中被降权折叠时也说清条数', /另有 4 条流水/.test(folded), folded.slice(0, 240));
+
+  mode = '完整';
+  const full = await search('完整的那个');
+  check('结果完整时不给截断提示（不能变成常驻噪音）', findByClass(mounted.tree(), 'dsh-memory-delta-trunc') === null, full.slice(0, 200));
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：勾选残留与阶段判定（审计 P3）');
+{
+  const originalFetch = globalThis.fetch;
+  const state = { entries: SAMPLE.entries.slice(), inbox: SAMPLE.inbox.slice(), archive: [] };
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    if (url === '/dsh-memory-delta/action') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: body.op, action: body.action, total: (body.ids ?? []).length, succeeded: body.ids ?? [], failed: [] }) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...SAMPLE, entries: state.entries, inbox: state.inbox, archive: state.archive }) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+
+  // 勾一条常驻（fact-a，主题「环境与沙箱」）+ 一条候选（cand-1，收件箱）
+  const standingBox = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-check')[0];
+  standingBox.props.onChange({});
+  const inboxBox = findAllByClass(sectionByKey(mounted, 'inbox:topic:\u0000untopic'), 'dsh-memory-delta-check')[0];
+  inboxBox.props.onChange({});
+  const bar = () => findByClass(mounted.tree(), 'dsh-memory-delta-batch');
+  const miniTexts = (node) => findAllByClass(node, 'dsh-memory-delta-mini').map((n) => allText(n).trim());
+
+  check('先勾两条', /已选 2 条/.test(allText(bar())), allText(bar()));
+  // 混选（候选 + 常驻）→ 只对"任何阶段都成立"的动作开放
+  check('混选时「提升」被禁用（它只对候选成立）', findAllByClass(bar(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '提升')?.props.disabled === true, miniTexts(bar()).join(','));
+  const refreshButton = () => findAllByClass(mounted.tree(), 'dsh-memory-delta-btn').find((n) => allText(n).includes('读取中') || allText(n).includes('刷新'));
+
+  // 刷新后其中一条已经被别处搬走 → 残留的勾选**不该**还计入"已选 N 条"，也不该让按钮误判
+  state.entries = SAMPLE.entries.filter((e) => e.id !== 'fact-a');
+  state.inbox = SAMPLE.inbox.slice();
+  refreshButton().props.onClick({});
+  await flush();
+  check('刷新后残留的勾选被剔除（已选 1 条）', /已选 1 条/.test(allText(bar())), allText(bar()));
+  check(
+    '剩下的那条是候选 → 「提升」可用（残留的勾选不能把整批按钮拖成禁用）',
+    findAllByClass(bar(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '提升')?.props.disabled === false,
+    JSON.stringify(findAllByClass(bar(), 'dsh-memory-delta-mini').map((n) => [allText(n).trim(), n.props.disabled])),
+  );
+
+  // 让那条候选也消失（模拟"别处已经处理掉了"）→ 按钮必须一律禁用，而不是兜底当成常驻
+  state.inbox = [];
+  refreshButton().props.onClick({});
+  await flush();
+  check('条目全都不在了 → 批量条消失（不再拿"已选 N 条"骗人）', bar() === null, allText(mounted.tree()).slice(0, 200));
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：长路径截断（尾部才是可辨识的部分）');
+{
+  const originalFetch = globalThis.fetch;
+  const LONG = {
+    ...SAMPLE,
+    entries: [
+      {
+        ...SAMPLE.entries[1],
+        id: 'long-path',
+        file: 'D:\\idea2023\\ai\\workspace\\very-deep\\memory\\facts\\2026-09-23-a-quite-long-generated-file-name.md',
+      },
+    ],
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(LONG) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  // ⚠️ 必须**按 id 定位**那个条目再取它的路径行：收件箱那个候选也有一条 `.dsh-memory-delta-file`，
+  //    按 className 抓第一个会抓到它（`inbox/cand-1.md`），断言的其实是别人
+  const longItem = findByProp(mounted.tree(), 'key', 'long-path');
+  const node = findAllByClass(longItem, 'dsh-memory-delta-file')[0];
+  const shown = allText(node);
+  check('超长路径从开头截断（留尾部）', shown.startsWith('…') && shown.endsWith('name.md'), shown);
+  check('截断后的显示长度受控（不会把行撑爆）', shown.length <= 46, `${shown.length} 字符`);
+  check('截断的只是显示：title 仍是完整路径（不逼人去翻文件树）', String(node.props.title).endsWith('a-quite-long-generated-file-name.md') && String(node.props.title).startsWith('D:\\'), String(node.props.title));
+  check('未超长的路径原样显示（不无谓加省略号）', !allText(findAllByClass(findByProp(mounted.tree(), 'key', 'cand-1'), 'dsh-memory-delta-file')[0]).startsWith('…'), 'cand-1.md');
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：动作失败后按钮不能卡在「保存中…」（审计 P3）');
+{
+  const originalFetch = globalThis.fetch;
+  const actionCalls = [];
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    if (url === '/dsh-memory-delta/action') {
+      actionCalls.push(body);
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ ok: false, error: '记忆库操作失败（磁盘或权限问题…）：EISDIR' }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ...SAMPLE, entries: [], inbox: [SAMPLE.inbox[0]] }) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: fakeSidebar().service } });
+  await flush();
+  const topicButton = findAllByClass(sectionByKey(mounted, 'inbox:topic:\u0000untopic'), 'dsh-memory-delta-mini').find((n) => /归类|改主题/.test(allText(n)));
+  check('（前置）候选行上有「归类」入口', Boolean(topicButton), '归类');
+  topicButton.props.onClick({ stopPropagation() {} });
+  const topicInput = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
+  topicInput.props.onChange({ target: { value: '写不进去的主题' } });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('保存')).props.onClick({ stopPropagation() {} });
+  // ⚠️ 必须 await flush()：动作是**异步**的（fetch → .catch → .then 收尾），
+  //    点完立刻断言只能看到"进行中"那一帧（第一版就这么写错了，断言的是空话）
+  await flush();
+  const text = allText(mounted.tree());
+  check('点保存真的发了一次 op=topic（带上输入的主题）', actionCalls.length === 1 && actionCalls[0].op === 'topic' && actionCalls[0].topic === '写不进去的主题', JSON.stringify(actionCalls));
+  check('失败原因显示出来（含错误码，能对上日志）', /EISDIR/.test(text), text.slice(0, 400));
+  check('失败之后按钮回到「保存」（不是永远「保存中…」）', !text.includes('保存中…'), text.slice(0, 240));
+  check('失败之后还能再点一次保存', findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').some((n) => allText(n).includes('保存')), '保存按钮');
   globalThis.fetch = originalFetch;
 }
 

@@ -114,6 +114,21 @@ export function findMatches(text, tokens) {
 /** 字段权重：结构化字段比正文值钱，结论行比正文值钱。 */
 export const FIELD_WEIGHTS = { key: 6, tags: 4, conclusion: 3, body: 1 };
 
+/**
+ * **层级权重**：行级层（流水 / 会话索引 / 派生索引）整体降权。
+ *
+ * 为什么：那些层是**逐行**当文档的，一行又长又杂，能同时命中好几个 token ——
+ * 于是查一个宽泛的词时，它们会把真正的结论条目挤下去。
+ * 真机实测（2026-09-23）：查「记忆」返回 21 条命中，其中 **18 条是流水行**，
+ * 每条还要渲染 120~200 字节的片段 —— 模型花了上下文，拿到的却大半是过程记录。
+ *
+ * 只降权、**不隐藏**（`mem recall` / `--where journal` 照样搜得到）。
+ */
+export const LAYER_WEIGHT = { journal: 0.5, sessions: 0.5, index: 0.5 };
+
+/** 有条目命中时，行级层最多展开这么多条（其余折叠成一条计数）—— 见 `searchLibrary`。 */
+export const MAX_LINE_HITS = 5;
+
 /** 同一个字段里同一个 token 重复出现最多数这么多次（防止长篇正文靠刷词霸榜）。 */
 const MAX_OCCURRENCES = 3;
 
@@ -245,7 +260,9 @@ export function rankDocs(docs, query, { limit } = {}) {
     const { score, matched } = scoreDoc(doc, tokens, { phrase });
     if (score <= 0 || matched.length < need) continue;
     const snip = bestSnippet(doc, tokens);
-    scored.push({ ...doc, score, matched, snippet: snip.snippet, line: snip.line || String(doc.conclusion ?? '').trim() });
+    // 行级层（流水/会话索引）整体降权 —— 见 LAYER_WEIGHT 的说明
+    const weighted = score * (LAYER_WEIGHT[doc.where] ?? 1);
+    scored.push({ ...doc, score: weighted, matched, snippet: snip.snippet, line: snip.line || String(doc.conclusion ?? '').trim() });
   }
 
   scored.sort(

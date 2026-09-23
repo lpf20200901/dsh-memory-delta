@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { renderBaseline } from '../src/planner.mjs';
 import { collectDue, duePhrase } from '../src/due.mjs';
-import { findMatches, rankDocs } from '../src/search.mjs';
+import { LAYER_WEIGHT, MAX_LINE_HITS, findMatches, rankDocs } from '../src/search.mjs';
 
 const VERSION = '1.2.0';
 const CONFIG_FILE = 'memory.config.json';
@@ -445,11 +445,23 @@ export function normalizeTopic(value, { strict = false } = {}) {
   const t = String(value).replace(/\s+/g, ' ').trim();
   if (!t) return null;
   if (strict && t.length > 40) throw new Error(`topic 太长了（${t.length} 字，最多 40）：${t.slice(0, 20)}…`);
+  if (strict && RESERVED_TOPICS.includes(t)) throw new Error(`「${t}」是面板的保留名（它用这些名字表示"这一组没有值"），换一个主题名`);
   return t;
 }
 
 /** 主题名是不是过长（读路径用它出告警，不抛）。 */
 export const TOPIC_MAX = 40;
+
+/**
+ * **保留主题名**：面板内部用它们当"这一组没有值"的哨兵 key，客户端那份定义在
+ * `client/client.js` 的 `NO_TOPIC / NO_TAG / NO_DATE` —— 两边必须逐字符一致。
+ *
+ * 用 `\u0000` 前缀的理由：它**不可能出现在 frontmatter 的标量里**（YAML 不允许裸控制字符，
+ * 写侧也会引号化/拒收），所以"用户真把主题起成哨兵名"这件事从根上不存在；
+ * 万一真被塞进来（手改文件），这层拒绝是第二道闸。以前是字面量 `__untopic__`，
+ * 那是**正常可写**的主题名 —— 库里出现同名主题就会和「未归类」并成一组，而且查不出来。
+ */
+export const RESERVED_TOPICS = ['\u0000untopic', '\u0000untagged', '\u0000nodate'];
 
 /**
  * 创建一个候选条目（落在 inbox）—— CLI 的 `new` 与插件的 `memory_write` 工具共用这一份逻辑，
@@ -846,13 +858,17 @@ export function renameEntry(L, oldId, newId) {
  * 与 `mem set --topic` 共用同一套归一化（`normalizeTopic`），面板按钮与 CLI 不会分叉。
  *
  * @param {string|null} topic 空串 / null = 清除（回到「未归类」）
+ * @param {{index?: boolean}} [opts] `index:false` 时**不重建 index.md**（批量调用方自己收尾重建一次，省 N 次全库扫描）
  * @returns {{id: string, topic: string|null, file: string}}
  */
-export function setTopicEntry(L, id, topic) {
+export function setTopicEntry(L, id, topic, { index = true } = {}) {
   const e = requireOneOrThrow(L, id);
   const next = normalizeTopic(topic, { strict: true });
   e.data.topic = next;
   fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
+  // index.md 是**派生视图**，而且现在也带主题 —— 不重建的话，改完主题它显示的还是旧名字
+  // （validate 只查"active 条目的 id 在不在"，查不出主题漂移）。
+  if (index) writeIndex(L);
   return { id: e.id, topic: next, file: e.file };
 }
 
@@ -901,9 +917,10 @@ export function renameTopic(L, from, to) {
   }
   let changed = 0;
   for (const e of hit) {
-    setTopicEntry(L, e.id, dst);
+    setTopicEntry(L, e.id, dst, { index: false });
     changed += 1;
   }
+  writeIndex(L); // 逐条重建会白扫 N 遍全库，这里收尾一次
   return { from: src, to: dst, changed };
 }
 
@@ -932,15 +949,21 @@ export function applyBatch(L, ids, action, opts = {}) {
       else if (action === 'archive') archiveEntry(L, id, { status: opts.status });
       else if (action === 'restore') restoreEntry(L, id);
       else if (action === 'remove') removeEntry(L, id);
-      else if (action === 'topic') setTopicEntry(L, id, opts.topic);
+      else if (action === 'topic') setTopicEntry(L, id, opts.topic, { index: false });
       else throw new Error(`不支持批量执行：${action}（只支持 promote / demote / archive / restore / remove / topic）`);
       succeeded.push(id);
     } catch (error) {
       failed.push({ id, error: error?.message ?? String(error) });
     }
   }
-  writeIndex(L);
-  return { action, total: list.length, succeeded, failed };
+  // index 重建失败**不该**把"已经改成功的条目"变成整体失败 —— 单独接住，作为 warning 交给调用方显示。
+  let indexWarning;
+  try {
+    writeIndex(L);
+  } catch (error) {
+    indexWarning = `index.md 重建失败：${error?.message ?? error}（条目本身已写入）`;
+  }
+  return { action, total: list.length, succeeded, failed, ...(indexWarning ? { indexWarning } : {}) };
 }
 
 /**
@@ -1227,6 +1250,8 @@ function cmdSet(opts) {
   }
   const e = requireOne(L, id);
   const changed = [];
+  /** `--topic` 的值先算出来，**写入收尾时统一走 `setTopicEntry`**（见文件末尾的说明）。 */
+  let topicNext;
 
   if (opts.key !== undefined) {
     const k = opts.key === true ? '' : String(opts.key).trim();
@@ -1241,7 +1266,7 @@ function cmdSet(opts) {
   if (opts.topic !== undefined) {
     // 与面板的「归类」按钮共用 normalizeTopic：`--topic ""` 清除（回到「未归类」）
     try {
-      e.data.topic = normalizeTopic(opts.topic === true ? '' : opts.topic, { strict: true });
+      topicNext = normalizeTopic(opts.topic === true ? '' : opts.topic, { strict: true });
     } catch (error) {
       fail(error.message);
     }
@@ -1282,6 +1307,11 @@ function cmdSet(opts) {
   if (!changed.length) fail('没有任何改动。跑 mem set 看用法。');
 
   fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
+  // ⚠️ `--topic` 必须**走 setTopicEntry**（而不是在这里再写一遍 frontmatter）：
+  // index.md 是派生视图、而且现在也带主题 —— 不重建的话，改完主题界面显示的是新名字、
+  // index.md 里还是旧名字，而 `validate` 查不出来（它只查"active 条目的 id 在不在索引里"）。
+  // 复用同一个函数还保证"面板归类"与"CLI 归类"不会有第二条写入路径（历史上分叉过一次）。
+  if (topicNext !== undefined) setTopicEntry(L, id, topicNext);
   ok(`已更新 ${c(1, id)}（${e.where}/）：${changed.join('、')}`);
   if (changed.includes('结论') || changed.includes('key')) {
     console.log(dim('  提示：内容变了，注入给模型的 hash 也会变（这正是差分注入的依据）。'));
@@ -1498,16 +1528,18 @@ function collectDocs(L, { where = 'all' } = {}) {
  * @param {{query: string, where?: string, limit?: number, maxLen?: number, topic?: string|null}} opts
  *   `where`：all | facts | decisions | inbox | archive | journal | sessions | index
  *   `topic`：只在这个主题的条目里搜（流水/会话索引没有主题，因此会被排除）
- * @returns {{query: string, where: string, total: number, truncated: boolean, matches: Array<object>}}
+ * @returns {{query: string, where: string, total: number, truncated: boolean, lineDropped: number, matches: Array<object>}}
  *   `total` = **实际返回**的条数（受 limit 限制，不等于命中总数）；
  *   `truncated` = 还有命中被 limit 截掉了 —— 没有它的话，调用方（尤其是模型）看到"正好 20 条"
  *   会以为那就是全部。CLI 与面板据此提示"还有更多"。
+ *   `lineDropped` = 被**行级层封顶**折叠掉的流水/会话索引命中数（见 `MAX_LINE_HITS`）——
+ *   有它在，模型才知道"过程记录还有 N 条没展开、要看得用 where=journal"。
  */
 export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 240, topic = null } = {}) {
   const q = String(query ?? '').trim();
   const want = typeof where === 'string' && where ? where : 'all';
   const wantTopic = normalizeTopic(topic);
-  if (!q) return { query: '', where: want, topic: wantTopic, total: 0, truncated: false, matches: [] };
+  if (!q) return { query: '', where: want, topic: wantTopic, total: 0, truncated: false, lineDropped: 0, matches: [] };
 
   const n = Number(limit) || 20;
   // 按主题检索 = 先按主题筛掉别的条目，再排名（流水/会话索引没有主题，因此被筛掉 ——
@@ -1516,7 +1548,20 @@ export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 24
   const scoped = wantTopic ? docs.filter((d) => normalizeTopic(d.topic) === wantTopic) : docs;
   // 先全量打分再切片：这样才知道"有没有被截掉"。打分是纯内存计算，成本可忽略。
   const ranked = rankDocs(scoped, q);
-  const hits = Number.isFinite(n) && n >= 0 ? ranked.slice(0, n) : ranked;
+
+  // 行级层封顶：**有条目命中时**最多展开 MAX_LINE_HITS 行流水/会话索引。
+  // 它们已经降过权（LAYER_WEIGHT），这里再限个数 —— 否则一个宽泛的词能靠"行数"把预算吃光。
+  const isLine = (h) => LAYER_WEIGHT[h.where] !== undefined;
+  const lineHits = ranked.filter(isLine);
+  let capped = ranked;
+  let lineDropped = 0;
+  if (ranked.length > lineHits.length && lineHits.length > MAX_LINE_HITS) {
+    const keep = new Set(lineHits.slice(0, MAX_LINE_HITS).map((h) => h.id));
+    capped = ranked.filter((h) => !isLine(h) || keep.has(h.id));
+    lineDropped = lineHits.length - MAX_LINE_HITS;
+  }
+
+  const hits = Number.isFinite(n) && n >= 0 ? capped.slice(0, n) : capped;
   const clip = (s) => {
     const t = String(s ?? '').replace(/\s+/g, ' ').trim();
     if (t.length <= maxLen) return t;
@@ -1544,7 +1589,7 @@ export function searchLibrary(L, { query, where = 'all', limit = 20, maxLen = 24
     ),
   );
 
-  return { query: q, where: want, topic: wantTopic, total: matches.length, truncated: ranked.length > matches.length, matches };
+  return { query: q, where: want, topic: wantTopic, total: matches.length, truncated: capped.length > matches.length || lineDropped > 0, lineDropped, matches };
 }
 
 /** 把片段里的关键词标色 —— 扫结果时这一步最省事。 */
@@ -1591,6 +1636,7 @@ function cmdRecall(opts) {
   }
   console.log(dim(`\n命中 ${hits.length} 条（按相关度排序；--json 可机器读）`));
   if (found.truncated) console.log(dim(`  还有更多命中被 --limit ${opts.limit ? Number(opts.limit) : 20} 截掉了：调大 --limit 或把关键词写具体些`));
+  if (found.lineDropped) console.log(dim(`  另有 ${found.lineDropped} 条流水/会话索引命中被折叠（它们被降权了）：mem recall "${query}" --where journal 看全量`));
 }
 
 /* ---------------------------------------------------------------- due */

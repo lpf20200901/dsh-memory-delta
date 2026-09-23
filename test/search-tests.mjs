@@ -171,6 +171,21 @@ section('rankDocs：排序、阈值过滤、稳定');
   check('排序可复现（跑两次一致）', eq(rankDocs(tie, '管道').map((h) => h.id), first));
 }
 
+/* --------------------------------------------------------- 层级权重（行级层降权） */
+
+section('层级权重：流水/会话索引降权，不再把结论条目挤下去');
+{
+  const entry = doc({ id: 'e', where: 'facts', conclusion: '沙箱禁止命名管道', text: '沙箱禁止命名管道' });
+  const line = doc({ id: 'j', where: 'journal', conclusion: '沙箱禁止命名管道', text: '沙箱禁止命名管道' });
+  const hits = rankDocs([line, entry], '沙箱禁管道');
+  check('同样内容：条目排在流水前面', hits[0].id === 'e', hits.map((h) => `${h.id}:${h.score}`).join(' '));
+  check('流水正好降一半', Math.abs(hits.find((h) => h.id === 'j').score * 2 - hits.find((h) => h.id === 'e').score) < 1e-9, hits.map((h) => `${h.id}:${h.score}`).join(' '));
+  const sessions = rankDocs([doc({ id: 's', where: 'sessions', text: '沙箱禁止命名管道' })], '沙箱禁管道');
+  check('会话索引同样降权（3 分 → 1.5 分）', sessions[0].score === 1.5, String(sessions[0].score));
+  const facts = rankDocs([doc({ id: 'f', where: 'facts', text: '沙箱禁止命名管道' })], '沙箱禁管道');
+  check('条目层不受影响（权重 1，3 分）', facts[0].score === 3, String(facts[0].score));
+}
+
 /* --------------------------------------------------------- 真实中文场景 */
 
 section('真实场景：老问题在新实现下能搜到');

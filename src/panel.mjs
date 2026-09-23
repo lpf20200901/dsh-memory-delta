@@ -694,13 +694,20 @@ export function registerMemoryRoute(webServer, stateOf, effect) {
  *      那两个函数是"抛异常"版（CLI 侧负责把异常翻译成 exit 1），这里翻译成 400 + 原因，
  *      所以宿主进程永远不会因为用户点一下按钮就退出。
  *
- * @param {{configRoot?: string, allow?: boolean}} [opts]
+ * @param {{configRoot?: string, allow?: boolean, logger?: {warn?: Function}}} [opts] `logger` 用来记内部故障的细节
  */
 export function createActionRoute(opts = {}) {
   return {
     kind: 'exact',
     path: MEMORY_ACTION_PATH,
     async handler(req, res) {
+      /**
+       * ⚠️ `op` 必须声明在 `try` **外面**：catch 里要把它写进日志，而 `const` 在 try 块里
+       * 对 catch 是不可见的（`ReferenceError: op is not defined`）—— 于是"把内部故障记进日志"
+       * 这件事本身又会抛一次，500 那条路径彻底走不通（2026-09-23 测试现场抓到）。
+       * 而且 try 里可能**在赋值前就抛**（读 body 失败），所以初值要用空串。
+       */
+      let op = '';
       try {
         if (opts.allow === false) {
           writeJson(res, 403, { ok: false, error: '配置里关掉了「面板写记忆库」（allowWrite=false）' });
@@ -709,7 +716,7 @@ export function createActionRoute(opts = {}) {
         const body = await readAllowedBody(req, res);
         if (body === null) return;
 
-        const op = typeof body?.op === 'string' ? body.op : '';
+        op = typeof body?.op === 'string' ? body.op : '';
         if (!ACTION_OPS.includes(op)) {
           writeJson(res, 400, { ok: false, error: `不认识的 op：${op || '（空）'}（只支持 ${ACTION_OPS.join(' / ')}）` });
           return;
@@ -794,9 +801,19 @@ export function createActionRoute(opts = {}) {
         const r = renameEntry(L, id, to);
         writeJson(res, 200, { ok: true, op, from: r.from, to: r.to, refs: r.refs });
       } catch (error) {
-        // 拒绝的理由（key 撞车 / 目标 id 占用 / 非法字符 / 找不到条目）原样交给界面显示 ——
-        // "点了没反应"是最难查的体验。
-        writeJson(res, 400, { ok: false, error: error?.message ?? String(error) });
+        // 两类错误要分开（审计 2026-09-23）：
+        //  · **预期内的拒绝**（key 撞车 / 找不到条目 / 非法字符 / 目标已存在…）—— 都是我们自己 `throw` 的
+        //    中文 Error，**没有 `code`**：原样交给界面显示，"点了没反应"是最难查的体验；
+        //  · **宿主侧 I/O 故障**（EISDIR / EACCES / ENOENT…，Node 的错误都带 `code`）——
+        //    报成 400 会把排查方向带偏（看着像"你的请求不合法"），而且原始错误串里常带**本机绝对路径**。
+        //    这类统一 500 + 一句人话，细节进日志。
+        const isNodeError = typeof error?.code === 'string' && error.code !== '';
+        if (!isNodeError) {
+          writeJson(res, 400, { ok: false, error: error?.message ?? String(error) });
+        } else {
+          opts.logger?.warn?.(`memory: 动作 ${op} 失败：%o`, error);
+          writeJson(res, 500, { ok: false, error: `记忆库操作失败（磁盘或权限问题，细节见 DSH 日志）：${error.code}` });
+        }
       }
     },
   };

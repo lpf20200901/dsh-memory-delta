@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react');
     const h = React.createElement;
-    const { useState, useEffect, useCallback } = React;
+    const { useState, useEffect, useCallback, useRef } = React;
     // createRoot 备而不用：宿主给的是"把元素交给它渲染"的约定，我们只交出元素树。
     // 留这一行是为了说明**渲染权在宿主**，页签组件不该自己去 appendChild。
     require('react-dom');
@@ -269,7 +269,7 @@ window.__ModuleLoader__.load({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;      /* 文件名太长时从**左边**截断，保留结尾的标识部分 */
+  /* 截断在 JS 里做（tailOf）：CSS 的 direction: rtl 会在 RTL 段落里按 bidi 规则重排数字开头的名字 */
   text-align: left;
 }
 .dsh-memory-delta-due {
@@ -290,6 +290,8 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary, #6b6b6b);
 }
 .dsh-memory-delta-ok { border-color: var(--dsw-alias-state-success-secondary, rgba(46,125,50,.35)); }
+/* 检索被截断的说明：和普通提示同一块风格（顶部留一点间距，接在命中列表后面） */
+.dsh-memory-delta-trunc { margin-top: 3px; }
 /* 搜索框：一行占满，和分组头同一层的视觉重量 */
 /* 超预算告警：不是一行红字，而是一块"说人话"的告警（超了什么 / 为什么 / 怎么办）
    ⚠️ 底色**不铺**：主题里 state-warn-secondary 是实心琥珀，铺上去后正文（浅色）几乎看不清
@@ -530,6 +532,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「未归类 / 未加标签 / 没有日期」这三个**哨兵值**。
+     *
+     * 分组用的是"拿一个字符串当 Map 键"，取值函数没拿到就退回哨兵。哨兵必须**不可能撞上真实取值**：
+     * 以前直接写字面量 `'__untopic__'`，那样库里只要真有一条主题叫这个名字就会被并进"未归类"。
+     * 用 `\u0000` 前缀（frontmatter 里不可能出现）从根上排除，宿主侧 `normalizeTopic` 也拒收。
+     */
+    const NO_TOPIC = '\u0000untopic';
+    const NO_TAG = '\u0000untagged';
+    const NO_DATE = '\u0000nodate';
+
+    /**
+     * 长路径从**开头**截断，保留尾部（`D:\…\memory\archive\a-very-long-id.md`）。
+     *
+     * 为什么不用 CSS 的 `direction: rtl` 那套技巧：在 RTL 段落里，bidi 规则会把
+     * `2026-09-23-xxx` 这种数字开头的名字**重排**（行首的日期被搬到行尾），显示出来是错的名字。
+     * 所以在 JS 里按字符数截，`…` 手动补 —— 显示长度可控，也不受 bidi 影响。
+     */
+    const tailOf = (s, max = 46) => {
+      const str = String(s == null ? '' : s);
+      if (str.length <= max) return str;
+      return `…${str.slice(str.length - (max - 1))}`;
+    };
+
+    /**
      * 分节：一行「分组头」（**可点**，带自绘箭头）+ 缩进的条目体。
      *
      * 折叠状态由父组件的 `collapsed` 管（不受控的 `<details>` 在 React 里
@@ -634,7 +660,9 @@ window.__ModuleLoader__.load({
         opts.showSnippet && e.snippet && e.snippet !== e.line
           ? h('div', { className: 'dsh-memory-delta-snippet', title: typeof e.score === 'number' ? `score ${e.score}` : undefined }, e.snippet)
           : null,
-        file ? h('div', { className: 'dsh-memory-delta-file', title: file }, baseNameOf(file)) : null,
+        // 路径长时截**开头**（tailOf）而不是靠 CSS 的 ellipsis：尾部才是可辨识的 id/文件名。
+        // title 永远给完整路径 —— 截断只是显示层的事，别让人为了看全路径去翻文件树。
+        file ? h('div', { className: 'dsh-memory-delta-file', title: file }, tailOf(file)) : null,
         opts.extraRow || null,
       );
     }
@@ -727,6 +755,13 @@ window.__ModuleLoader__.load({
       const [searchTopic, setSearchTopic] = useState(null);
       /** 上一次请求实际用的主题（`runSearch` 用它去重；不然切主题后同词会被当成重复请求跳过）。 */
       const [searchedTopic, setSearchedTopic] = useState(null);
+      /**
+       * 检索的去重键与请求序号。
+       * ⚠️ 必须放 ref：用 state 会被**渲染闭包**卡住（防抖定时器持有旧闭包 → 同词发两次），
+       * 而且去重键要能"失败后重置"（state 在 catch 里改要等下一次渲染才生效）。
+       */
+      const lastSearchKey = useRef(null);
+      const searchSeq = useRef(0);
       const [actionError, setActionError] = useState(null);
       const [notice, setNotice] = useState(null);
       // 搜索：query 是输入框内容，results 是宿主回的命中（null = 还没搜/已清空）
@@ -746,6 +781,12 @@ window.__ModuleLoader__.load({
        * 而且**无头截图会卡在那里**（我们靠截图出产品图）。行内确认既好测也好看。
        */
       const [confirming, setConfirming] = useState(null);
+      /**
+       * 收尾清 `pendingId`。**每个动作的最后一步都要走它**，包括 catch 那一支 ——
+       * 以前是 `.then(() => setPendingId(null))` 逐处手写，漏一处那个按钮就永远停在"保存中…"
+       * （而且 `pendingId` 只有一个槽位，`batch`/`topic` 互相同住一个变量，更容易串）。
+       */
+      const clearPending = () => setPendingId(null);
       const toggleSection = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
       const isOpen = (key) => !collapsed[key];
 
@@ -777,8 +818,14 @@ window.__ModuleLoader__.load({
         state && typeof state.workspace === 'string' && state.workspace ? state.workspace : workspace;
 
       /**
-       * 跑一次检索。同一个词不重复请求（回车会立刻调它，而防抖那一路稍后也会到）。
-       * 清空输入框时不发请求，只把结果丢掉 —— 回到分组视图。
+       * 跑一次检索。
+       *
+       * 三条时序纪律（审计 2026-09-23 实测出的三个毛病）：
+       *   1. **去重键放 ref、且只在"真的发出去"时写**：以前读的是渲染闭包里的 `searchedQuery`，
+       *      而防抖定时器持有旧闭包 → 输入后立刻回车会**同词发两次**；而且失败后仍算"搜过"，
+       *      按回车再也发不出去（界面永远停在错误上，只能改字）。
+       *   2. **请求带序号**：乱序返回时旧响应会把新结果覆盖掉（输入框写着 A、结果区是 B）。
+       *   3. 主题筛选参与去重键：切主题要能重搜。
        */
       const runSearch = (raw, topicOverride) => {
         const q = String(raw ?? '').trim();
@@ -786,24 +833,42 @@ window.__ModuleLoader__.load({
           setResults(null);
           setSearchedQuery(null);
           setSearchError(null);
+          lastSearchKey.current = null;
           return;
         }
         // 主题筛选：`topicOverride` 是"刚点了搜这组"那一路传进来的新主题（状态还没生效，不能用闭包里的）
         const topic = topicOverride !== undefined ? topicOverride : searchTopic;
-        if (q === searchedQuery && topic === searchedTopic) return;
+        const key = `${q}\u0000${topic ?? ''}`;
+        if (key === lastSearchKey.current) return;
+        const seq = searchSeq.current + 1;
+        searchSeq.current = seq;
+        lastSearchKey.current = key;
         setSearchedQuery(q);
         setSearchedTopic(topic);
         setSearching(true);
         requestSearch(q, actionWorkspace(), topic)
           .then((data) => {
-            setResults({ total: data.total || 0, matches: Array.isArray(data.matches) ? data.matches : [], query: q, topic: data.topic ?? null });
+            if (seq !== searchSeq.current) return; // 过期响应：更新的请求已经在路上，别覆盖
+            setResults({
+              total: data.total || 0,
+              matches: Array.isArray(data.matches) ? data.matches : [],
+              query: q,
+              topic: data.topic ?? null,
+              // 宿主早就在报这两个信号，以前客户端**直接丢掉** —— 于是"搜索结果 20"看起来就是全部
+              truncated: data.truncated === true,
+              lineDropped: Number(data.lineDropped) || 0,
+            });
             setSearchError(null);
           })
           .catch((err) => {
+            if (seq !== searchSeq.current) return;
+            lastSearchKey.current = null; // 失败不算"搜过" → 再按回车能重试
             setResults(null);
             setSearchError(err && err.message ? err.message : String(err));
           })
-          .then(() => setSearching(false));
+          .then(() => {
+            if (seq === searchSeq.current) setSearching(false);
+          });
       };
 
       // 输入停顿 200ms 自动搜（回车立即搜）：不轮询、不每次按键都砸一遍磁盘。
@@ -885,7 +950,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`提升失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /**
@@ -905,7 +970,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`撤回失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** 删除候选：不可恢复，所以必须过确认条。 */
@@ -922,7 +987,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`删除失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** **归档**：不再适用又没有替代 → archive/（区别于"取代"）。 */
@@ -939,7 +1004,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`归档失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** **取回**：archive/ → 待你确认（再确认一次才会重新生效）。 */
@@ -956,7 +1021,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`取回失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       const startRename = (e) => {
@@ -982,7 +1047,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`改名失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /**
@@ -1233,7 +1298,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`归类失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** 条目行上的「归类」按钮（三种阶段都有 —— 归档层恰恰是最需要归纳的那一层）。 */
@@ -1288,7 +1353,54 @@ window.__ModuleLoader__.load({
 
       /* ------------------------------------------------------------ 勾选与批量 */
 
+      /** 原始勾选（可能含已经不存在的 id —— 见 `activeSelection`）。 */
+      /**
+       * 这条在哪个阶段（批量按钮据此判断"这个动作对整批都成立吗"）。
+       *
+       * ⚠️ 找不到时必须回 `null`，**不能兜底成 `standing`**：勾选是"跨阶段"的（可以勾一部分候选
+       * 再勾一部分常驻），而列表随时会变（刷新后条目可能已经被别处提升/归档）。旧代码兜底成
+       * `standing`，于是"只在常驻条目上成立"的动作对一个其实已经不在列表里的 id 也判定可用 ——
+       * 点了整批失败、原因还看不懂。现在认不出来就一律不可用。
+       */
+      const layerOfId = (id) => {
+        if ((Array.isArray(state && state.inbox) ? state.inbox : []).some((e) => e && e.id === id)) return 'inbox';
+        if ((Array.isArray(state && state.archive) ? state.archive : []).some((e) => e && e.id === id)) return 'archive';
+        if ((Array.isArray(state && state.entries) ? state.entries : []).some((e) => e && e.id === id)) return 'standing';
+        return null;
+      };
+
+      /**
+       * 当前界面上真实存在的条目 id 集合（三个阶段合起来）。
+       *
+       * 勾选状态是**跨视图存活**的（切维度、切阶段、刷新都不清），所以它会残留：
+       * 勾了 A 与 B，刷新后 B 已经被别处提升走了 —— 这时候批量工具条还写着"已选 2 条"，
+       * 而实际只有 1 条可执行。改成"只把还看得见的算进选中"。
+       *
+       * ⚠️ 必须在**声明处就能读**：`selectedIds` / `activeSelection` / `layerOfId` 都是
+       * 渲染期直接求值的 `const`，放到文件后面会踩 TDZ（`Cannot access before initialization`）。
+       */
+      const visibleIds = new Set(
+        (state
+          ? [
+              ...(Array.isArray(state.entries) ? state.entries : []),
+              ...(Array.isArray(state.inbox) ? state.inbox : []),
+              ...(Array.isArray(state.archive) ? state.archive : []),
+            ]
+          : []
+        )
+          .map((e) => (e && typeof e.id === 'string' ? e.id : null))
+          .filter(Boolean),
+      );
+
       const selectedIds = Object.keys(selected).filter((id) => selected[id]);
+      /**
+       * **真正参与批量**的选中项：剔除界面上已经没有的 id。
+       *
+       * 勾选状态跨视图存活（切维度、切阶段、刷新都不清），所以它会残留：勾了 A 与 B，
+       * 刷新后 B 已被别处提升走 —— 只报"已选 2 条"、拿 2 条去提交，就会出现
+       * "成功 1 条、失败 1 条：找不到条目"这种用户没做错什么的失败。
+       */
+      const activeSelection = selectedIds.filter((id) => visibleIds.has(id));
       const isSelected = (id) => Boolean(selected[id]);
       const toggleSelected = (id) =>
         setSelected((prev) => {
@@ -1342,12 +1454,15 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`批量${BATCH_VERB[action] || action}失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** 批量工具条上的按钮：`stage` 限定只在选中的条目都属于该阶段时可用。 */
       const batchButton = (action, label, stage, extra) => {
-        const ids = selectedIds;
+        // ⚠️ 用 `activeSelection`（已剔除界面上不存在的 id）而不是 `selectedIds`：
+        // 残留的 id 会让"整批都属于某阶段"的判断失败，于是**所有**按钮都灰着，
+        // 而界面上明明显示"已选 1 条"（2026-09-23 测试现场抓到）。
+        const ids = activeSelection;
         const ok = ids.length > 0 && (!stage || ids.every((id) => layerOfId(id) === stage));
         const danger = action === 'remove' || action === 'archive';
         return h(
@@ -1392,7 +1507,7 @@ window.__ModuleLoader__.load({
             setNotice(null);
             setActionError(`改主题名失败：${err && err.message ? err.message : String(err)}`);
           })
-          .then(() => setPendingId(null));
+          .then(() => clearPending());
       };
 
       /** 在某个主题里搜：切到搜索视图并带上主题筛选（输入框里的词保留）。 */
@@ -1400,13 +1515,6 @@ window.__ModuleLoader__.load({
         setSearchTopic(topic);
         const q = query.trim();
         if (q) runSearch(q, topic);
-      };
-
-      /** 这条在哪个阶段（批量按钮据此判断"这个动作对整批都成立吗"）。 */
-      const layerOfId = (id) => {
-        if ((Array.isArray(state.inbox) ? state.inbox : []).some((e) => e.id === id)) return 'inbox';
-        if ((Array.isArray(state.archive) ? state.archive : []).some((e) => e.id === id)) return 'archive';
-        return 'standing';
       };
 
       const head = h(
@@ -1641,7 +1749,7 @@ window.__ModuleLoader__.load({
        */
       const TODAY = typeof state.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.today) ? state.today : null;
       const dayLabel = (day) => {
-        if (day === '__nodate__') return '没有日期';
+        if (day === NO_DATE) return '没有日期';
         if (!TODAY) return day;
         const diff = (Date.parse(`${TODAY}T00:00:00Z`) - Date.parse(`${day}T00:00:00Z`)) / 86400000;
         if (diff === 0) return `${day}（今天）`;
@@ -1677,7 +1785,7 @@ window.__ModuleLoader__.load({
       const subGroups = (list, dimension, layer) => {
         if (dimension === 'topic') {
           return bucket(list, (e) => (typeof e.topic === 'string' && e.topic ? e.topic : ''), {
-            missingKey: '__untopic__',
+            missingKey: NO_TOPIC,
             missingTitle: '未归类',
             missingHint: '还没归纳 · 在条目上点「归类」填一个主题名',
             namedHint: '按主题（你指定的归纳）',
@@ -1685,7 +1793,7 @@ window.__ModuleLoader__.load({
         }
         if (dimension === 'tag') {
           return bucket(list, (e) => (Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : ''), {
-            missingKey: '__untagged__',
+            missingKey: NO_TAG,
             missingTitle: '未加标签',
             missingHint: '这条没有 tags',
             namedHint: '按第一个标签',
@@ -1693,12 +1801,12 @@ window.__ModuleLoader__.load({
         }
         if (dimension === 'date') {
           return bucket(list, (e) => (typeof e.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(e.date) ? e.date : ''), {
-            missingKey: '__nodate__',
+            missingKey: NO_DATE,
             missingTitle: '没有日期',
             missingHint: '条目没写 date',
             namedHint: '按记录日期',
           }).map((g) => ({ ...g, title: dayLabel(g.key) }))
-            .sort((a, b) => (a.key === '__nodate__' ? 1 : b.key === '__nodate__' ? -1 : b.key.localeCompare(a.key)));
+            .sort((a, b) => (a.key === NO_DATE ? 1 : b.key === NO_DATE ? -1 : b.key.localeCompare(a.key)));
         }
         // 类型：事实 / 决策 / 其它。目录名（slug）与说明都按层给 —— 见函数头的注释
         const real = layer === 'standing';
@@ -1747,7 +1855,7 @@ window.__ModuleLoader__.load({
             allOn ? `取消本组 ${ids.length} 条` : `选本组 ${ids.length} 条`,
           ),
         ];
-        const isNamedTopic = dimension === 'topic' && g.key !== '__untopic__';
+        const isNamedTopic = dimension === 'topic' && g.key !== NO_TOPIC;
         if (isNamedTopic) {
           buttons.push(
             h(
@@ -2100,7 +2208,7 @@ window.__ModuleLoader__.load({
        * 混选时按钮禁用并在 title 里说明原因 —— 比"点了报错"友好，也比"静默只处理一部分"诚实。
        * 危险动作（撤回/归档/取回/删除）走**行内确认条**（和单条一样，不用 window.confirm）。
        */
-      const batchBar = selectedIds.length
+      const batchBar = activeSelection.length
         ? (() => {
             const batch = confirming && confirming.batch ? confirming.batch : null;
             const inner = batch
@@ -2156,7 +2264,7 @@ window.__ModuleLoader__.load({
             return h(
               'div',
               { className: 'dsh-memory-delta-batch' },
-              h('span', { className: 'dsh-memory-delta-batch-count' }, `已选 ${selectedIds.length} 条`),
+              h('span', { className: 'dsh-memory-delta-batch-count' }, `已选 ${activeSelection.length} 条`),
               ...inner,
               batchTopic
                 ? h(
@@ -2170,7 +2278,7 @@ window.__ModuleLoader__.load({
                       onChange: (ev) => setBatchTopic({ value: ev && ev.target ? ev.target.value : '' }),
                       onKeyDown: (ev) => {
                         halt(ev);
-                        if (ev && ev.key === 'Enter') runBatch('topic', selectedIds, { topic: batchTopic.value });
+                        if (ev && ev.key === 'Enter') runBatch('topic', activeSelection, { topic: batchTopic.value });
                       },
                     }),
                     h(
@@ -2181,7 +2289,7 @@ window.__ModuleLoader__.load({
                         disabled: pendingId === '__batch__',
                         onClick: (ev) => {
                           stop(ev);
-                          runBatch('topic', selectedIds, { topic: batchTopic.value });
+                          runBatch('topic', activeSelection, { topic: batchTopic.value });
                         },
                       },
                       '保存归类',
@@ -2195,6 +2303,26 @@ window.__ModuleLoader__.load({
       /* ------------------------------------------------------------ 搜索块 */
       const searching_ = query.trim().length > 0;
       const hits = results && Array.isArray(results.matches) ? results.matches : [];
+      /**
+       * 被截断的说明。
+       *
+       * 宿主一直在回 `truncated`（条数封顶）与 `lineDropped`（流水/会话索引被行级降权折叠），
+       * 客户端以前**把它们全丢了** —— 于是"搜索结果 20"看起来就是全部，用户会以为"就这些"
+       * （尤其流水层：命中被刻意封顶过，缺的往往正是最相关的那几条）。
+       * 没有这个说明时，界面在"结果不全"这件事上是在撒谎。
+       */
+      const truncationNotice = () => {
+        if (!results) return null;
+        const parts = [];
+        if (results.truncated && !results.lineDropped) parts.push(`命中太多，这里只列了相关度最高的 ${hits.length} 条（共 ${results.total} 条）`);
+        if (results.lineDropped) parts.push(`另有 ${results.lineDropped} 条流水/会话索引命中被降权折叠`);
+        if (!parts.length) return null;
+        return h(
+          'div',
+          { className: 'dsh-memory-delta-note dsh-memory-delta-trunc', key: 'trunc' },
+          `${parts.join('；')} —— 换个更具体的词、或按主题搜（分组头的「搜这组」）能收窄；流水全量用 \`mem recall --where journal\`。`,
+        );
+      };
       const searchBlock = searching_
         ? section(
             {
@@ -2246,6 +2374,8 @@ window.__ModuleLoader__.load({
                   : hits.map((hit) =>
                       item(hit, { onOpen: openMemoryFile, showType: true, showWhere: true, showSnippet: true, actions: [] }),
                     ),
+              // 截断说明放在命中列表**之后**：先给结果，再说"还有没列出来的"
+              truncationNotice(),
             ],
           )
         : null;

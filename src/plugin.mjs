@@ -171,7 +171,8 @@ export function apply(ctx, config = {}) {
           additionalProperties: false,
           properties: {
             total: { type: 'integer', required: true, description: 'Number of matches actually returned (bounded by `limit`, so it is not the total number of hits).' },
-            truncated: { type: 'boolean', description: 'True when more entries matched than `limit` allowed: raise `limit` or narrow the query to see the rest.' },
+            truncated: { type: 'boolean', description: 'True when more matched than `limit` allowed (or when journal lines were folded): narrow the query, or search `where: journal` for process records.' },
+            lineDropped: { type: 'integer', description: 'How many journal / session-index lines matched but were **folded away** — those layers are down-weighted and capped so a broad query does not spend the context on process records. Use `where: "journal"` to see them.' },
             matches: {
               type: 'array',
               required: true,
@@ -229,6 +230,12 @@ export function apply(ctx, config = {}) {
             if (m.file && ENTRY_WHERE.has(m.where)) lines.push(`   file: ${m.file}`);
           });
           lines.push('Snippets are clipped — read the file for the full conclusion and reason.');
+          if (value.lineDropped > 0) {
+            lines.push(
+              `(${value.lineDropped} more journal/session lines matched and were folded away — ` +
+                'they are down-weighted on purpose; call again with where="journal" if you need the process record.)',
+            );
+          }
           return [{ type: 'text', text: lines.join('\n') }];
         },
       },
@@ -248,7 +255,7 @@ export function apply(ctx, config = {}) {
         // `src/search.mjs` 的分词/打分/片段）。返回的是无损 JSON（`searchLibrary` 已经
         // 把值为 undefined 的字段整条省掉了，见那里的注释）。
         const found = searchLibrary(store.L, { query: args.query, where: args.where ?? 'all', limit, maxLen: 240 });
-        return Promise.resolve({ total: found.total, truncated: found.truncated, matches: found.matches });
+        return Promise.resolve({ total: found.total, truncated: found.truncated, lineDropped: found.lineDropped, matches: found.matches });
       },
       presentCall: (args) => ({ card: 'generic', title: `Search memory: ${truncated(args.query, 60)}`, kind: 'other', rawInput: args }),
     }),
@@ -360,7 +367,7 @@ export function apply(ctx, config = {}) {
     );
     registerActionRoute(
       target,
-      { configRoot: config.root || undefined, allow: config.allowWrite !== false },
+      { configRoot: config.root || undefined, allow: config.allowWrite !== false, logger: ctx.logger },
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );
   };

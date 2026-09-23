@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
@@ -574,6 +575,10 @@ section('工具 render：命中必须渲染成文本（模型只看得到 render
 
   const cut = searchTool.output.render({}, { total: 2, truncated: true, matches: [] })[0].text;
   check('被 limit 截断时 render 说明"封顶了、请收窄查询"', /capped at \d+/.test(cut), cut.slice(0, 120));
+  // 行级层折叠：模型得知道"过程记录还有 N 条没展开"，否则它会以为库里只有这些
+  const folded = searchTool.output.render({}, { total: 1, truncated: true, lineDropped: 7, matches: [] })[0].text;
+  check('流水被折叠时 render 报出条数与怎么看', /7 more journal\/session lines/.test(folded) && /where="journal"/.test(folded), folded.slice(0, 200));
+  check('工具返回值带 lineDropped 且合契约', undeclaredKeys(searchTool.output.schema, { total: 1, truncated: true, lineDropped: 0, matches: [] }).length === 0, 'contract');
   const none = await searchTool.execute({ query: '绝对搜不到的词xyzzy' }, { agent: toolAgent });
   check('零命中的 render 不是空话（给出下一步该怎么说）', /No memory entries matched/.test(searchTool.output.render({}, none)[0].text));
 }
@@ -1365,6 +1370,63 @@ section('「动作」路由（promote / rename / topic）');
   const registered = [];
   const returned = registerActionRoute({ register: (r) => registered.push(r) }, { configRoot: actionRoot });
   check('没传 effect 时直接注册并返回路由对象', returned?.path === MEMORY_ACTION_PATH && registered.length === 1, String(returned?.path));
+}
+
+/* ------------------------------- 动作路由：错误码分类与派生视图（2026-09-23 审计 P3） */
+
+section('「动作」路由：400 vs 500、index 同步、保留话题名');
+{
+  const errRoot = path.join(SANDBOX, 'action-err', 'memory');
+  const L = ensureLayout(errRoot);
+
+  // ① 保留主题名（面板的三个哨兵）在路由层也要 400
+  const target = createEntry(L, { type: 'fact', conclusion: '保留名不该写得进去', key: 'reserved-topic', tags: [] });
+  promoteEntry(L, target.id);
+  const reserved = await callRoute(createActionRoute({ configRoot: errRoot }), {
+    body: JSON.stringify({ op: 'topic', id: target.id, topic: '\u0000untopic' }),
+  });
+  check('把条目归到保留主题名上 → 400（不是 500）', reserved.status === 400 && /保留名/.test(String(reserved.json.error)), JSON.stringify(reserved.json));
+  check('被拒之后条目没被改（还是未归类）', readAll(L).find((e) => e.id === target.id)?.data.topic == null, JSON.stringify(readAll(L).find((e) => e.id === target.id)?.data.topic));
+
+  // ② index.md 是派生视图：`op: topic` 必须让它跟着重建（否则界面新、索引旧，validate 也查不出）
+  const memBin = path.join(HERE, '..', 'bin', 'mem.mjs');
+  const runMem = (...args) => {
+    // 输出重定向到文件而不是管道（沙箱禁止命名管道 → EPERM）
+    const outFile = path.join(SANDBOX, '.mem-out.txt');
+    const fd = fs.openSync(outFile, 'w');
+    spawnSync(process.execPath, [memBin, ...args], { stdio: ['ignore', fd, fd], env: { ...process.env, NO_COLOR: '1' } });
+    fs.closeSync(fd);
+    return fs.readFileSync(outFile, 'utf8');
+  };
+  runMem('set', '--root', errRoot, target.id, '--topic', '索引 旧名');
+  runMem('index', '--root', errRoot);
+  const indexFile = path.join(L.root, 'index.md');
+  check('（前置）index.md 里是旧主题名', fs.readFileSync(indexFile, 'utf8').includes('索引 旧名'), 'index');
+  const topicIndexed = await callRoute(createActionRoute({ configRoot: errRoot }), { body: JSON.stringify({ op: 'topic', id: target.id, topic: '索引 新名' }) });
+  check('op=topic → 200', topicIndexed.status === 200 && topicIndexed.json.topic === '索引 新名', JSON.stringify(topicIndexed.json));
+  const idxText = fs.readFileSync(indexFile, 'utf8');
+  check('面板归类也会重建 index.md（派生视图不漂移）', idxText.includes('索引 新名') && !idxText.includes('索引 旧名'), idxText.split('\n').find((l) => l.includes(target.id)) ?? '(没有这一行)');
+
+  // ③ 宿主侧 I/O 故障 → 500 + 不带本机路径，细节进日志
+  //    制造方式：把 index.md 变成一个**目录** → 写索引时 EISDIR。
+  //    ⚠️ 必须挑"条目已经写成功、索引写失败"的那个时刻，否则测的是别的分支
+  //    （setTopicEntry 先写条目再重建索引，批量层还会把索引失败降级成 indexWarning）。
+  const warnings = [];
+  const ioRoute = createActionRoute({ configRoot: errRoot, logger: { warn: (...args) => warnings.push(args.map(String).join(' ')) } });
+  if (fs.existsSync(indexFile)) fs.unlinkSync(indexFile);
+  fs.mkdirSync(indexFile);
+  const ioFail = await callRoute(ioRoute, { body: JSON.stringify({ op: 'topic', id: target.id, topic: '磁盘坏掉时的主题' }) });
+  check('磁盘故障 → 500（而不是把 I/O 故障说成"请求不合法"）', ioFail.status === 500, JSON.stringify(ioFail.json));
+  check('500 的响应里带错误码，方便对照日志', /EISDIR|EPERM|EACCES|ENOTDIR/.test(String(ioFail.json.error)), String(ioFail.json.error));
+  check('500 的响应里**不带**本机绝对路径（出错的串往往含用户名）', !String(ioFail.json.error).includes(SANDBOX), String(ioFail.json.error));
+  check('细节进了 logger.warn（排查有据可查）', warnings.length === 1 && /EISDIR|EPERM|EACCES|ENOTDIR/.test(warnings[0]), JSON.stringify(warnings).slice(0, 200));
+  check('条目本身已经写进去了（I/O 故障发生在索引那一步）', readAll(L).find((e) => e.id === target.id)?.data.topic === '磁盘坏掉时的主题', JSON.stringify(readAll(L).find((e) => e.id === target.id)?.data.topic));
+  fs.rmdirSync(indexFile);
+
+  // ④ 预期的拒绝（key 撞车）仍然是 400 且**原样**带出我们自己写的中文理由
+  const clash = createEntry(L, { type: 'fact', conclusion: '撞 key 的第二条', key: 'reserved-topic', tags: [] });
+  const refused = await callRoute(ioRoute, { body: JSON.stringify({ op: 'promote', id: clash.id }) });
+  check('预期内的拒绝仍是 400 + 自己的中文理由', refused.status === 400 && /一个 key 只能有一个真相/.test(String(refused.json.error)), JSON.stringify(refused.json));
 }
 
 /* ------------------------------------------------------------ 配置与容错 */
