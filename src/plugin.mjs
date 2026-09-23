@@ -184,6 +184,7 @@ export function apply(ctx, config = {}) {
                   type: { type: 'string' },
                   status: { type: 'string' },
                   key: { type: 'string' },
+                  topic: { type: 'string', description: 'The human-assigned topic this entry is filed under (absent when unclassified).' },
                   tags: { type: 'array', items: { type: 'string' } },
                   date: { type: 'string', description: 'Date the entry was recorded (YYYY-MM-DD); use it to judge how fresh the conclusion is.' },
                   file: { type: 'string', description: 'Absolute path of the entry (or journal/sessions) file — read it for the full conclusion and reason, since the snippet is clipped.' },
@@ -219,6 +220,7 @@ export function apply(ctx, config = {}) {
           value.matches.forEach((m, i) => {
             const head = [`${i + 1}. [${m.where}] ${m.id}`];
             if (m.key && m.key !== m.id) head.push(`key=${m.key}`);
+            if (m.topic) head.push(`topic=${m.topic}`);
             if (m.date) head.push(String(m.date));
             head.push(`score=${m.score}`);
             lines.push(head.join('  '));

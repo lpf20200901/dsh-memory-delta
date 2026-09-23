@@ -527,10 +527,23 @@ section('工具输出契约：返回值只能出现 output.schema 声明过的�
   // 注意：只查**条目级**字段（顶层多出的 query/where 不会进工具返回值，工具自己投影了）。
   const cutRoot = path.join(SANDBOX, 'truncation');
   const CL = ensureLayout(cutRoot);
-  for (const n of [1, 2, 3]) createEntry(CL, { type: 'fact', conclusion: `沙箱管道第 ${n} 条结论`, tags: ['截断'], scope: 'workspace:cut' });
+  // ⚠️ 夹具**必须带 topic**：`topic: undefined` 会被无损 JSON 过滤掉，那种"字段漏声明"的 bug
+  // 就会从下面那条检查底下溜过去 —— 2026-09-23 真的又踩了一次（给 searchLibrary 加 topic 时
+  // 忘了同步 schema，真机上整个 memory_search 报 invalid output）。
+  for (const n of [1, 2, 3]) createEntry(CL, { type: 'fact', conclusion: `沙箱管道第 ${n} 条结论`, tags: ['截断'], topic: '夹具主题', scope: 'workspace:cut' });
   const sample = searchLibrary(CL, { query: '沙箱管道', limit: 1 }).matches[0] ?? {};
   const itemKeys = Object.keys(searchTool.output.schema.properties.matches.items.properties);
   check('searchLibrary 每条命中的字段都在 matches.items 里声明过', Object.keys(sample).every((k) => itemKeys.includes(k)), `命中=[${Object.keys(sample).join(',')}] schema=[${itemKeys.join(',')}]`);
+
+  // 上面那条依赖"夹具恰好命中了哪些字段" —— 这里再做一次**静态**检查：
+  // 把 searchLibrary 里那份字段映射表的键全抠出来，逐个要求 schema 声明。夹具骗不过它。
+  {
+    const memSrc = fs.readFileSync(path.join(HERE, '..', 'bin', 'mem.mjs'), 'utf8');
+    const block = /const matches = hits\.map\([\s\S]*?Object\.entries\(\{([\s\S]*?)\n\s*\}\)/.exec(memSrc)?.[1] ?? '';
+    const emitted = [...block.matchAll(/^\s*([A-Za-z_][\w]*)\s*:/gm)].map((m) => m[1]);
+    const missing = emitted.filter((k) => !itemKeys.includes(k));
+    check('静态检查：searchLibrary 映射里的每个键都在 schema 里声明', emitted.length >= 8 && missing.length === 0, `映射=[${emitted.join(',')}] 缺=[${missing.join(',')}]`);
+  }
 
   // truncated：命中被 limit 截掉时要能看出来（否则"正好 20 条"会被当成全部）
   const cutTwo = searchLibrary(CL, { query: '沙箱管道', limit: 2 });
