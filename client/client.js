@@ -829,6 +829,18 @@ window.__ModuleLoader__.load({
       };
 
       /**
+       * 只挡冒泡、**绝不动默认行为** —— 包着输入框的容器与输入框自己的按键事件必须用这个。
+       *
+       * ⚠️ 真机踩到（用户 2026-09-22："改主题名只能追加、数字加不进去"）：
+       * 这里原来用的是 `stop()`（它顺手 `preventDefault()`），而 keydown 的**默认行为就是"把字符插进输入框"**——
+       * 于是直接键入的数字/退格全被吃掉；中文反而能进去（输入法上屏走的是合成事件，不是 keydown 的默认行为）。
+       * 表现就是"能追加中文、打不了数字、也删不掉预填的旧名字"。**输入框上的按键处理器只能用 halt。**
+       */
+      const halt = (ev) => {
+        if (ev && typeof ev.stopPropagation === 'function') ev.stopPropagation();
+      };
+
+      /**
        * 写记忆库的动作（宿主侧复用 CLI 的 `promoteEntry` / `renameEntry`）。
        * 成功后**重新拉一次状态** —— 面板显示的内容必须立刻和磁盘一致。
        */
@@ -1161,14 +1173,14 @@ window.__ModuleLoader__.load({
         renaming && renaming.id === e.id
           ? h(
               'div',
-              { className: 'dsh-memory-delta-rename', key: `${e.id}:rename`, onClick: stop },
+              { className: 'dsh-memory-delta-rename', key: `${e.id}:rename`, onClick: halt },
               h('input', {
                 value: renaming.value,
                 placeholder: '新文件名（字母/数字/._-，建议用语义键）',
                 'aria-label': '新文件名',
                 onChange: (ev) => setRenaming({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
                 onKeyDown: (ev) => {
-                  stop(ev);
+                  halt(ev);
                   if (ev && ev.key === 'Enter') doRename(e.id, renaming.value);
                 },
               }),
@@ -1235,7 +1247,7 @@ window.__ModuleLoader__.load({
         topicing && topicing.id === e.id
           ? h(
               'div',
-              { className: 'dsh-memory-delta-topic', key: `${e.id}:topic`, onClick: stop },
+              { className: 'dsh-memory-delta-topic', key: `${e.id}:topic`, onClick: halt },
               h('input', {
                 value: topicing.value,
                 list: 'dsh-memory-delta-topic-options',
@@ -1243,7 +1255,7 @@ window.__ModuleLoader__.load({
                 'aria-label': '主题',
                 onChange: (ev) => setTopicing({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
                 onKeyDown: (ev) => {
-                  stop(ev);
+                  halt(ev);
                   if (ev && ev.key === 'Enter') doTopic(e.id, topicing.value);
                 },
               }),
@@ -1763,7 +1775,7 @@ window.__ModuleLoader__.load({
           renaming
             ? h(
                 'div',
-                { className: 'dsh-memory-delta-topic', onClick: stop },
+                { className: 'dsh-memory-delta-topic', onClick: halt },
                 h('input', {
                   value: renamingTopic.value,
                   list: 'dsh-memory-delta-topic-options',
@@ -1771,7 +1783,7 @@ window.__ModuleLoader__.load({
                   'aria-label': '新主题名',
                   onChange: (ev) => setRenamingTopic({ from: g.key, value: ev && ev.target ? ev.target.value : '' }),
                   onKeyDown: (ev) => {
-                    stop(ev);
+                    halt(ev);
                     if (ev && ev.key === 'Enter') doRenameTopic(g.key, renamingTopic.value);
                   },
                 }),
@@ -2116,7 +2128,7 @@ window.__ModuleLoader__.load({
               batchTopic
                 ? h(
                     'div',
-                    { className: 'dsh-memory-delta-topic', onClick: stop },
+                    { className: 'dsh-memory-delta-topic', onClick: halt },
                     h('input', {
                       value: batchTopic.value,
                       list: 'dsh-memory-delta-topic-options',
@@ -2124,7 +2136,7 @@ window.__ModuleLoader__.load({
                       'aria-label': '批量主题',
                       onChange: (ev) => setBatchTopic({ value: ev && ev.target ? ev.target.value : '' }),
                       onKeyDown: (ev) => {
-                        stop(ev);
+                        halt(ev);
                         if (ev && ev.key === 'Enter') runBatch('topic', selectedIds, { topic: batchTopic.value });
                       },
                     }),

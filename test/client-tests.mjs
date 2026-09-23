@@ -679,6 +679,16 @@ section('组件：收件箱提升与整理文件名');
   check('点开后出现内联输入框', Boolean(input), JSON.stringify(findByClass(mounted.tree(), 'dsh-memory-delta-rename')));
   check('输入框预填已有的 key', input?.props?.value === 'old-key', String(input?.props?.value));
 
+  // ⚠️ 真机踩到（用户 2026-09-22："只能追加、数字加不进去"）：输入框的 keydown 处理器里
+  // 顺手 preventDefault() 会**吃掉浏览器的默认插入**（数字/退格全没反应，中文靠输入法上屏反而能进）。
+  // 假 React 只调 onChange 是测不出来的，所以这里直接盯住 handler 的行为。
+  {
+    const ev = { key: '5', stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+    input.props.onKeyDown(ev);
+    check('输入框的 keydown 不阻止默认行为（否则数字/退格打不进去）', ev.prevented !== true, JSON.stringify(ev));
+    check('但仍挡住冒泡（不然会连带触发整行的"打开文件"）', ev.stopped === true, JSON.stringify(ev));
+  }
+
   input.props.onChange({ target: { value: 'renamed-entry' } });
   const okBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-rename'), 'dsh-memory-delta-mini')[0];
   okBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
@@ -1169,6 +1179,12 @@ section('组件：按主题归纳与「归类」按钮');
   check('点「归类」展开行内输入', Boolean(input), row ? collectStrings(row.kids, []).join('|') : 'no-row');
   check('输入框带已有主题候选（datalist）', input?.props?.list === 'dsh-memory-delta-topic-options', String(input?.props?.list));
   {
+    // 同样的坑：输入框上的按键处理器不能 preventDefault（见「整理文件名」那一节的说明）
+    const ev = { key: '7', stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+    input.props.onKeyDown(ev);
+    check('归类输入框的 keydown 不阻止默认行为', ev.prevented !== true && ev.stopped === true, JSON.stringify(ev));
+  }
+  {
     const options = findByProp(mounted.tree(), 'id', 'dsh-memory-delta-topic-options');
     // 假 React 是 `h(type, props, ...kids)`，所以传进去的数组会变成 kids[0] —— 摊平一层再取
     const values = options ? options.kids.flat().filter(Boolean).map((o) => o.props?.value) : [];
@@ -1282,6 +1298,11 @@ section('组件：勾选与批量操作');
   const topicBtn = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-batch'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('归类'));
   topicBtn.props.onClick({ stopPropagation() {} });
   const topicInput = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
+  {
+    const ev = { key: '9', stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+    topicInput.props.onKeyDown(ev);
+    check('批量归类输入框的 keydown 不阻止默认行为', ev.prevented !== true && ev.stopped === true, JSON.stringify(ev));
+  }
   topicInput.props.onChange({ target: { value: 'DSH 技能' } });
   const saveTopic = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('保存归类'));
   saveTopic.props.onClick({ stopPropagation() {} });
@@ -1351,6 +1372,12 @@ section('组件：主题改名与按主题搜');
   renameBtn.props.onClick({ stopPropagation() {} });
   const input = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
   check('改名输入框预填当前主题名', input?.props?.value === '环境与沙箱', String(input?.props?.value));
+  {
+    // 用户实际踩到的就是这个输入框：数字/退格打不进去（keydown 里 preventDefault 吃了默认插入）
+    const ev = { key: '2', stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+    input.props.onKeyDown(ev);
+    check('改主题名输入框的 keydown 不阻止默认行为', ev.prevented !== true && ev.stopped === true, JSON.stringify(ev));
+  }
   input.props.onChange({ target: { value: '沙箱与环境' } });
   const goRename = findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini').find((n) => allText(n).includes('改名'));
   goRename.props.onClick({ stopPropagation() {} });
