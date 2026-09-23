@@ -5,6 +5,7 @@
  */
 
 import {
+  KEY_CAP,
   LINE_CAP,
   MEMORY_SOURCE_KIND,
   escapeFraming,
@@ -98,7 +99,16 @@ section('渲染与框架转义');
 
   const b = renderBaseline([entry('f', 'h1', { type: 'fact' }), entry('d', 'h2', { type: 'decision' })]);
   check('baseline 分节事实/决策', b.includes('### 事实') && b.includes('### 决策'), b.slice(0, 200));
-  check('baseline 带 key 标记', renderBaseline([entry('k', 'h', { key: 'my-key' })]).includes('[my-key]'));
+  // key 只在**与 id 不同**时写进正文（2026-09-23 瘦身）：id 已经随 source.entries 给到模型，
+  // 而"有 key 就用 key 当文件名"让真实库里 30/31 条的 key 与 id 一字不差 —— 正文里那个
+  // `[key]` 是第二遍，实测占 912 字节 / 注入总量的 15%（879 是纯重复）。
+  const keyed = renderBaseline([entry('my-key', 'h', { key: 'my-key' })]);
+  check('key 与 id 相同时不写进正文（去重）', !keyed.includes('[my-key]'), keyed);
+  check('（对照）key 与 id 不同时照常写', renderBaseline([entry('some-id', 'h', { key: 'my-key' })]).includes('[my-key]'), 'n/a');
+  check('（对照）没有 key 的条目不受影响', renderBaseline([entry('no-key', 'h')]).includes('- 结论 no-key'), 'n/a');
+  const longKey = renderBaseline([entry('short-id', 'h', { key: 'k'.repeat(60) })]);
+  const keyLine = longKey.split('\n').find((l) => l.startsWith('- '));
+  check(`超长 key 被截到 ${KEY_CAP} 字（正文里别白占预算）`, keyLine.includes(`[${'k'.repeat(KEY_CAP - 1)}…]`), keyLine.slice(-40));
   check('空集合 → 空文本', renderBaseline([]) === '');
 
   // 回归：id 是差分元数据，走 source.entries；写进正文只会白占注入预算（实测占 40%）

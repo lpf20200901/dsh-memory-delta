@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the later improvements are covered by 1076 assertions
+> verified inside a real DSH session, and the later improvements are covered by 1096 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 
 ## Why
@@ -68,10 +68,12 @@ say **why it was decided** — with the reason, the agent can judge by itself in
 Seven rules:
 
 - **The pushed part must be tiny.** Everything in the injected layer is paid for on every session, so the
-  journal and design docs stay out of it. Measured on a real store (6 entries): **953 bytes** total, 68% of
-  it the entry lines themselves, ~300 bytes of framing — about **159 bytes per entry**, so the 3 KB default
-  budget holds ~19 entries. Entry ids are deliberately **not** written into the text (they ride along in the
-  message's structured `source.entries`); inlining them used to eat 34% of the budget.
+  journal and design docs stay out of it. Measured on a real store (31 standing entries): **4369 bytes** total
+  for 31 entries — about **141 bytes per entry**, so a 5 KB budget holds a store of this size. Two things are
+  deliberately left out of the text: entry **ids** (they ride along in the message's structured
+  `source.entries`; inlining them used to eat 34% of the budget) and keys that are **identical to the id**
+  (`createEntry` names the file after the key, so on a real store 30 of 31 keys were byte-identical to the id —
+  repeating them cost 15% of the budget for nothing). Each line is also clipped at 90 characters.
 - **Only the delta is pushed.** Every entry carries a 12-char content hash; the plugin remembers the
   previous round's state and next round pushes only *added / updated / removed*. When nothing changed it
   injects **nothing at all**. (The upstream `dsh-agent-instructions` plugin has no diffing: any file
@@ -227,14 +229,14 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 1076 assertions, zero dependencies
+npm test        # 1096 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 258 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, reserved topic names, and reference cleanup on `restore`) |
-| `test/planner-tests.mjs` | 43 | the diff algorithm (pure logic) |
-| `test/search-tests.mjs` | 55 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
+| `test/run-tests.mjs` | 274 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, reserved topic names, injection-text slimming, hand-written frontmatter fidelity, and reference cleanup on `restore`) |
+| `test/planner-tests.mjs` | 46 | the diff algorithm and the injected-text rendering (pure logic) |
+| `test/search-tests.mjs` | 56 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
 | `test/plugin-tests.mjs` | 300 | plugin integration (stubbed DSH modules, real `apply()` + both tools + all three panel routes + promote/rename/topic/batch actually writing the store + 400-vs-500 error classification + whitelist/origin checks + tool-output contract and render text) |

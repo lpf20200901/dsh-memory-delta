@@ -28,11 +28,34 @@ export function escapeFraming(text) {
 }
 
 /** 防止单条超长结论独占预算的展示上限（正文才是给人看的）。 */
-export const LINE_CAP = 140;
+export const LINE_CAP = 90;
+
+/**
+ * key 在**正文里**显示的上限。
+ *
+ * ⚠️ 只影响正文 —— 完整 key 依然随消息的 `source.entries` 结构化带给模型（那是差分的依据，
+ * 也是它 `memory_search` 的检索词）。截短只是别让一个 43 字的 key 白占预算。
+ */
+export const KEY_CAP = 24;
 
 const clip = (text, cap = LINE_CAP) => {
   const t = String(text ?? '').trim();
   return t.length > cap ? `${t.slice(0, cap - 1)}…` : t;
+};
+
+/**
+ * 一条记忆的 key 要不要写进正文。
+ *
+ * 判据：**key 只在它不等于 id 时才写**。这是实测出来的 —— `createEntry` 的规则是
+ * "给了 key 就用 key 当文件名"，于是真实库里 31 条常驻有 **30 条的 key 与 id 一字不差**，
+ * 而 id 已经通过 `source.entries` 给到模型：正文里那个 `[key]` 是**第二遍**，
+ * 实测占 912 字节 / 注入总量的 15%（其中 879 字节是纯重复）。
+ * 只有 key 与 id 不同时（既有语义键、文件名又是另起的）它才携带新信息。
+ */
+const renderKey = (e) => {
+  const k = e.key ? String(e.key) : '';
+  if (!k || k === String(e.id)) return '';
+  return ` [${clip(k, KEY_CAP)}]`;
 };
 
 /**
@@ -42,10 +65,10 @@ const clip = (text, cap = LINE_CAP) => {
  * 结构化携带（见 sourceEntries），把它再写进正文只会白占注入预算 ——
  * 实测它曾占掉**全部注入字节的 40%**（1066 字节里 431 是 id）。
  * 去掉后 3 KB 预算能装的条目从约 17 条升到约 29 条。
+ * （同一条道理现在也用在 key 上 —— 见 renderKey。）
  */
 const label = (e) => {
-  const key = e.key ? ` [${e.key}]` : '';
-  return `- ${escapeFraming(clip(e.line))}${key}`;
+  return `- ${escapeFraming(clip(e.line))}${renderKey(e)}`;
 };
 
 function groupByType(entries) {

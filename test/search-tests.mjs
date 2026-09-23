@@ -87,6 +87,15 @@ section('scoreDoc：结构字段 > 结论 > 正文');
   const byBody = scoreDoc(doc({ text: 'sandbox 只是正文里提了一次' }), tokens);
   check('key 命中比正文命中值钱', byKey.score > byBody.score, `${byKey.score} vs ${byBody.score}`);
   check('tags 命中也在结构层', scoreDoc(doc({ tags: ['sandbox'] }), tokens).score >= FIELD_WEIGHTS.tags * 1.5);
+  // ⚠️ searchLibrary / scoreDoc 是给外部用的：调用方自己拼的 doc 里 tags 可能是标量。
+  //    读边界（coerceField）只管从磁盘读出来的，传进来的得在这里兜住 —— 一个标量就会整条 TypeError
+  let scalarTags = null;
+  try {
+    scalarTags = scoreDoc(doc({ tags: 'sandbox' }), tokens);
+  } catch (error) {
+    scalarTags = { score: NaN, boom: `${error.name}: ${error.message}` };
+  }
+  check('（对照）直接传标量 tags 的 doc 也不崩（外部调用方的兜底）', !Number.isNaN(scalarTags.score) && scalarTags.score >= FIELD_WEIGHTS.tags * 1.5, JSON.stringify(scalarTags));
 
   const t2 = tokenizeQuery('管道');
   const inConclusion = scoreDoc(doc({ conclusion: '沙箱禁管道', text: '沙箱禁管道\n\n## 理由\n别的' }), t2);

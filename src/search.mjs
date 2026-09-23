@@ -157,7 +157,10 @@ const countOccurrences = (hay, token) => {
 export function scoreDoc(doc, tokens, opts = {}) {
   const key = String(doc.key ?? '').toLowerCase();
   const id = String(doc.id ?? '').toLowerCase();
-  const tags = (doc.tags ?? []).join(' ').toLowerCase();
+  // ⚠️ 这里**故意再兜一次**：`searchLibrary` 是给外部用的，调用方可能自己拼 doc
+  // （测试夹具、别处的集成）。读边界（`coerceField`）已经保证从磁盘读出来的 tags 是数组，
+  // 但直接传进来的不是 —— 一个标量就会让整条检索 TypeError（2026-09-23 实测）。
+  const tags = (Array.isArray(doc.tags) ? doc.tags : doc.tags ? [doc.tags] : []).join(' ').toLowerCase();
   const conclusion = String(doc.conclusion ?? '').toLowerCase();
   // 正文里挖掉结论行 —— 否则结论里的命中会被算两遍（结论权重更高，语义就糊了）
   let body = String(doc.text ?? '').toLowerCase();

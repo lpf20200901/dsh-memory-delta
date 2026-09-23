@@ -206,21 +206,55 @@ function parseFrontmatter(text) {
   const data = {};
   // 工具不认识的键**原样留着**（连值的原文一起）：它们不该因为"点了一次归类"就消失。
   const extra = [];
-  for (const rawLine of m[1].split(/\r?\n/)) {
-    const line = rawLine.trim();
+  const lines = m[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
     if (!line || line.startsWith('#')) continue;
     const idx = line.indexOf(':');
     if (idx < 0) continue;
     const key = line.slice(0, idx).trim();
+    const rawValue = line.slice(idx + 1).trim();
+
+    // **块序列**（YAML 标准的多行写法）：`tags:` 后面跟缩进的 `- a` 行。
+    // 以前这些行既没有冒号也没被认领 → 直接跳过，`tags` 读成 null；而**写回一次就变成
+    // `tags: null`，两个标签永久消失**（2026-09-23 实测）。这里把它们收成一个数组。
+    if (rawValue === '') {
+      const items = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1]) && lines[i + 1].trim().startsWith('-')) {
+        items.push(lines[i + 1].trim().slice(1).trim());
+        i += 1;
+      }
+      if (items.length) {
+        if (FM_KEYS.includes(key)) data[key] = coerceField(key, items.map((s) => (isQuoted(s) ? unquote(s) : s)));
+        else extra.push({ key, raw: items.join(', ') });
+        continue;
+      }
+    }
+
     if (!FM_KEYS.includes(key)) {
-      extra.push({ key, raw: line.slice(idx + 1).trim() });
+      extra.push({ key, raw: rawValue });
       continue;
     }
-    data[key] = parseFrontmatterValue(line.slice(idx + 1).trim());
+    data[key] = coerceField(key, parseFieldValue(rawValue));
   }
   // body 从原文里切（BOM 只可能出现在最前面，偏移量 = 被剥掉的字节数）
   const bom = text.length - clean.length;
   return { data, extra, body: text.slice(bom + m[0].length), hasFrontmatter: true };
+}
+
+/**
+ * 解析一个**整值**（可能是 `--- key: value ---` 里 value 的那一段）。
+ *
+ * 多了一步"剥行内注释"：`tags: [a] # 备注` 这种写法以前会把整段当字符串 → 数组没了
+ * （实测：`mem list --tag a` 匹配不到、检索也少了一路命中分）。
+ * 只剥**没被引号/方括号包住**的值里的注释 —— YAML 里 `#` 之前的空白是注释的判据，
+ * 而引号内的 `#` 是值本身（别把合法的标签吃掉）。
+ */
+function parseFieldValue(raw) {
+  const val = String(raw ?? '').trim();
+  const wrapped = (isQuoted(val) && val.length > 1) || (val.startsWith('[') && val.endsWith(']'));
+  if (wrapped) return parseFrontmatterValue(val);
+  return parseFrontmatterValue(stripInlineComment(val));
 }
 
 /** 解析一个 frontmatter 标量/行内数组；**带引号的一律当字符串**（不强转）。 */
@@ -233,6 +267,48 @@ function parseFrontmatterValue(val) {
   if (/^-?\d+$/.test(val)) return Number(val);
   if (val.startsWith('[') && val.endsWith(']')) return splitInlineArray(val.slice(1, -1));
   return val;
+}
+
+/** 值里以 `#` 开头的注释（YAML 行内注释）要剥掉，但**引号里的 `#` 不算**。 */
+function stripInlineComment(val) {
+  let quote = null;
+  for (let i = 0; i < val.length; i += 1) {
+    const ch = val[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    // ⚠️ 注释必须由**空白**引出。YAML 里 `#` 要成为注释，前面必须是空白（或整行以它开头）——
+    // `a#b` 与 `#hash` 都是值本身。第一版写成"位置 0 也算注释"，直接把标签 `#hash` 吃成了空值
+    // （往返保真测试当场抓住）：写侧不必给它加引号的话，就得靠这里认它。
+    if (ch === '#' && i > 0 && /\s/.test(val[i - 1])) return val.slice(0, i).trim();
+  }
+  return val;
+}
+
+/**
+ * **把数组型字段归一成数组** —— 读边界的类型保真。
+ *
+ * 为什么必须在读边界做：`tags` / `supersedes` 下游被 `join / includes / map` 直接当数组用，
+ * 而人手的写法千奇百怪。2026-09-23 实测（临时库，10 种形态）：
+ *   `tags: dsh-memory`（标量）   → 以前读回**字符串** → `mem recall` 与模型的 `memory_search`
+ *                                直接 TypeError（`(doc.tags ?? []).join is not a function`），
+ *                                而 `mem list --tag` 是**静默匹配不到**（更坏：不报错）
+ *   `tags:` + 块序列             → 以前读回 null，**再写一次就把两个标签永久丢掉**
+ * 只归一"类型"，不猜值：标量 `a,b` 仍然是一个元素（切不切是用户的写法问题，不是我们的）。
+ */
+function coerceField(key, value) {
+  if (key !== 'tags' && key !== 'supersedes' && key !== 'superseded_by') return value;
+  if (key === 'superseded_by') {
+    // 约定是"一个 id 或 null"；写成数组多半手滑，取第一个，validate 会把它当问题报出来
+    return Array.isArray(value) ? (value.length ? String(value[0]) : null) : value;
+  }
+  if (value === null || value === undefined || value === '') return [];
+  return Array.isArray(value) ? value : [value];
 }
 
 const isQuoted = (v) => v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")));
@@ -1356,7 +1432,9 @@ function writeIndex(L) {
     // 注意：这里生成的是**文件内容**，不能带 ANSI 颜色转义
     if (!list.length) lines.push('（空）', '');
     for (const e of list.sort((a, b) => a.id.localeCompare(b.id))) {
-      const tags = (e.data.tags || []).length ? `  #${(e.data.tags || []).join(' #')}` : '';
+      // 读边界（coerceField）已经保证是数组；这里再兜一次是因为 index.md 会被人手改过的库反复重建
+      const tagList = Array.isArray(e.data.tags) ? e.data.tags : e.data.tags ? [e.data.tags] : [];
+      const tags = tagList.length ? `  #${tagList.join(' #')}` : '';
       const key = e.data.key ? `  [key: ${e.data.key}]` : '';
       const topic = e.data.topic ? `  「${e.data.topic}」` : '';
       lines.push(`- \`${e.id}\` — ${firstLine(e.body)}${key}${topic}${tags}`);

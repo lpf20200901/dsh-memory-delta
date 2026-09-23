@@ -302,6 +302,35 @@ section('M2：id 派生 / inject --json 差分载荷 / validate --fix');
   check('--fix 不做语义修改（双向不一致仍报问题）', fx.code === 1, `code=${fx.code}`);
 }
 
+/* ------------------------------------ 注入正文瘦身（2026-09-23，用户拍板） */
+
+section('注入正文瘦身：key 去重 + 首行 90 字');
+{
+  const root = freshRoot('slim');
+  run(['init', '--root', root, '--scope', 'workspace:x']);
+  // ① "有 key 就用 key 当文件名" → key 与 id 一字不差，正文里不该再写一遍
+  run(['new', '--root', root, '--type', 'fact', '--key', 'slim-key', '--conclusion', '这条的 key 与 id 相同', '--source', 's']);
+  run(['promote', '--root', root, 'slim-key']);
+  // ② 结论超长 → 首行按 cap 截断
+  run(['new', '--root', root, '--type', 'fact', '--id', 'slim-long', '--key', 'slim-long', '--conclusion', '很长的结论'.repeat(30), '--source', 's']);
+  run(['promote', '--root', root, 'slim-long']);
+  // ③ key 与 id **不同** → 那时它携带新信息，必须照常写出来
+  run(['new', '--root', root, '--type', 'fact', '--id', 'slim-other', '--key', 'a-different-key', '--conclusion', '文件名与 key 不同的那条', '--source', 's']);
+  run(['promote', '--root', root, 'slim-other']);
+
+  const text = run(['inject', '--root', root]).out;
+  const lines = text.split('\n').filter((l) => l.startsWith('- '));
+  check('注入正文不写与 id 相同的 key（实测真实库 30/31 条都是这种纯重复）', !text.includes('[slim-key]') && !text.includes('[slim-long]'), text.split('\n').slice(4, 8).join(' | '));
+  check('（对照）key 与 id 不同时照常写进正文', text.includes('[a-different-key]'), text.split('\n').slice(4, 8).join(' | '));
+  const longLine = lines.find((l) => l.includes('很长的结论')) ?? '';
+  check('超长结论首行被截到 90 字 + 省略号', longLine.endsWith('…') && longLine.length <= 92, `${longLine.length} 字：${longLine.slice(-12)}`);
+  check('（对照）三条都进了注入', lines.length === 3, String(lines.length));
+
+  // ② 幂等：渲染两次字节数一致（差分注入的前提）
+  const again = run(['inject', '--root', root]).out;
+  check('注入文本稳定（同内容两次渲染一致）', again === text, `${Buffer.byteLength(text, 'utf8')} vs ${Buffer.byteLength(again, 'utf8')}`);
+}
+
 /* --------------------------------------------------------- M2：mem set */
 section('M2：mem set 修改已有条目');
 {
@@ -897,6 +926,56 @@ section('frontmatter 往返保真：字符串不会被静默改类型');
   check('行内数组往返保真（含逗号/空格的元素）', JSON.stringify(arr.tags) === JSON.stringify(['a', 'b,c', '带 空格']), JSON.stringify(arr.tags));
   check('手写的带引号值不被强转', parseFrontmatter('---\nkey: "123"\n---\n').data.key === '123' && typeof parseFrontmatter('---\nkey: "123"\n---\n').data.key === 'string');
   check('工具不认识的键进 extra（不进 data，但也没丢）', parseFrontmatter('---\ncustom: 1\n---\n').data.custom === undefined && parseFrontmatter('---\ncustom: 1\n---\n').extra[0]?.key === 'custom');
+}
+
+section('数组型字段的类型保真：人手的写法不能让检索崩 / 不能静默丢标签');
+{
+  const root = freshRoot('tags-fidelity');
+  run(['init', '--root', root]);
+  const { ensureLayout, parseFrontmatter, readAll } = await import(new URL('../bin/mem.mjs', import.meta.url).href);
+  const L = ensureLayout(root, { create: false });
+
+  /** 手写一个条目（模拟人改文件）。 */
+  const handWrite = (file, fmLines, conclusion = '手写的条目') => {
+    fs.writeFileSync(
+      path.join(root, 'inbox', file),
+      ['---', `id: ${file.replace(/\.md$/, '')}`, 'type: fact', 'status: active', 'date: 2026-01-01', ...fmLines, '---', '', '## 结论', conclusion, ''].join('\n'),
+      'utf8',
+    );
+  };
+  const tagsOf = (id) => readAll(L).find((e) => e.id === id)?.data?.tags;
+
+  handWrite('scalar-tags.md', ['tags: dsh-memory']);
+  handWrite('comma-tags.md', ['tags: a,b']);
+  handWrite('block-tags.md', ['tags:', '  - a', '  - b']);
+  handWrite('comment-tags.md', ['tags: [a] # 备注']);
+  handWrite('quoted-hash.md', ['tags: ["#hash", "b"]']);
+  handWrite('null-tags.md', ['tags: null']);
+
+  const cases = [
+    ['scalar-tags', ['dsh-memory'], '标量 tags: a 读回来是数组（以前是字符串 → 检索直接 TypeError）'],
+    ['comma-tags', ['a,b'], '标量带逗号原样保留成一个元素（不猜用户想不想切）'],
+    ['block-tags', ['a', 'b'], '块序列（YAML 标准多行）读回来是数组（以前读成 null，写一次就永久丢标签）'],
+    ['comment-tags', ['a'], '行内注释被剥掉、数组还在（以前整段变字符串）'],
+    ['quoted-hash', ['#hash', 'b'], '引号里的 # 不当注释（合法标签不该被吃掉）'],
+    ['null-tags', [], 'tags: null → 空数组（不是 null）'],
+  ];
+  for (const [id, want, name] of cases) {
+    const got = tagsOf(id);
+    check(name, Array.isArray(got) && JSON.stringify(got) === JSON.stringify(want), `读到 ${JSON.stringify(got)}（期望 ${JSON.stringify(want)}）`);
+  }
+
+  // 端到端：以前这两条命令在"标量 tags"的库上直接 TypeError
+  const recall = run(['recall', '--root', root, '手写']);
+  check('mem recall 在标量 tags 的库上不再崩', recall.code === 0 && !/TypeError/.test(recall.out + recall.err), flat(recall.err).slice(0, 120));
+  const idx = run(['index', '--root', root]);
+  check('mem index 在标量 tags 的库上不再崩', idx.code === 0 && !/TypeError/.test(idx.out + idx.err), flat(idx.err).slice(0, 120));
+  const byTag = run(['list', '--root', root, '--tag', 'dsh-memory']);
+  check('mem list --tag 能匹配到标量写法的那条（以前静默匹配不到）', /scalar-tags/.test(byTag.out), flat(byTag.out));
+  // supersedes 也是数组型字段：标量写法同样要归一，否则引用逻辑遍历不到
+  handWrite('sup-a.md', ['key: sup-a', 'supersedes: other-id'], '取代关系的目标');
+  check('supersedes 标量写法也归一成数组', JSON.stringify(readAll(L).find((e) => e.id === 'sup-a')?.data?.supersedes) === JSON.stringify(['other-id']), 'supersedes');
+  check('（对照）不受影响的普通标量字段仍是标量', parseFrontmatter('---\nkey: abc\n---\n').data.key === 'abc', 'key');
 }
 
 section('工具不认识的 frontmatter 键不会被静默删掉');
