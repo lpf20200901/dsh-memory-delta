@@ -218,6 +218,14 @@ window.__ModuleLoader__.load({
   color: inherit;
   font-weight: 600;
 }
+/* 行内小按钮的**选中态** —— 别省：归档确认条里选「已过期 / 已蒸馏」时，
+   没有这条规则就是"点了没反应"（is-on 的样式原先只写给头部维度按钮，实测被用户抓到）。
+   用边框 + 底色 + 加粗三重表达（主题里色差小，只靠底色会看不出来）。 */
+.dsh-memory-delta-mini.is-on {
+  border-color: var(--dsw-alias-label-primary, currentColor);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.18));
+  font-weight: 600;
+}
 
 /* 条目：整行可点 = 打开这个 .md；缩进 + 右侧竖线已经把它和分组头分层 */
 .dsh-memory-delta-item {
@@ -1332,14 +1340,21 @@ window.__ModuleLoader__.load({
                           type: 'button',
                           key: `cat:${cat}`,
                           className: archiveCategoryInput === cat ? 'dsh-memory-delta-mini is-on' : 'dsh-memory-delta-mini',
+                          // `aria-pressed` 是给读屏/自动化用的"当前选中"信号（视觉上靠 is-on + ✓）
+                          'aria-pressed': archiveCategoryInput === cat ? 'true' : 'false',
+                          title: `归档分类选「${cat}」`,
                           onClick: (ev) => {
                             stop(ev);
                             setArchiveCategoryInput(cat);
                           },
                         },
-                        cat,
+                        // ⚠️ 选中要**看得见**：光加 is-on 不够（那条样式原先只写给头部维度按钮，
+                        // 用户实测"选了看不出哪个"）—— 所以再加一个 ✓，颜色/字重之外还有符号表达。
+                        archiveCategoryInput === cat ? `✓ ${cat}` : cat,
                       ),
                     ),
+                    // 行内说清"现在会归到哪一类"，自己写的分类也能立刻确认
+                    h('span', { className: 'dsh-memory-delta-dim', key: 'now' }, `→ 归到「${archiveCategoryInput || ARCHIVE_PRESET_CATEGORIES[0]}」`),
                     h('input', {
                       value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
                       placeholder: '或自己写一个分类',

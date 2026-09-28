@@ -1149,10 +1149,17 @@ section('组件：归档分类（归档时选 + 事后改）');
   const btns = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini');
   btns.find((b) => allText(b).trim() === '归档').props.onClick({ stopPropagation() {}, preventDefault() {} });
   const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
-  const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^已过期$|^已蒸馏$/.test(allText(b).trim()));
+  // 选中的那个带 ✓ 前缀 —— 用户实测"选了看不出哪个"，所以除了 is-on 还要有符号表达
+  const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^✓?\s*(已过期|已蒸馏)$/.test(allText(b).trim()));
   check('归档确认条里能选分类（预设两个）', presets.length === 2, allText(bar));
-  check('默认选中「已过期」（不再适用是归档最常见的理由）', String(presets[0].props.className).includes('is-on') && allText(presets[0]).trim() === '已过期', `${allText(presets[0])} / ${presets[0].props.className}`);
-  presets.find((b) => allText(b).trim() === '已蒸馏').props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('默认选中「已过期」（不再适用是归档最常见的理由）', String(presets[0].props.className).includes('is-on') && allText(presets[0]).trim().endsWith('已过期'), `${allText(presets[0])} / ${presets[0].props.className}`);
+  check('选中的那个**看得出被选中**（✓ + is-on + aria-pressed）', allText(presets[0]).trim().startsWith('✓') && presets[0].props['aria-pressed'] === 'true' && presets[1].props['aria-pressed'] === 'false', `${allText(presets[0])} / ${JSON.stringify(presets.map((p) => p.props['aria-pressed']))}`);
+  check('行内说明"现在会归到哪一类"', allText(bar).includes('→ 归到「已过期」'), allText(bar));
+  presets.find((b) => allText(b).trim().endsWith('已蒸馏')).props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const bar2 = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  const after = findAllByClass(bar2, 'dsh-memory-delta-mini').filter((b) => /已过期|已蒸馏/.test(allText(b).trim()));
+  check('点了「已蒸馏」后勾跑到它上面', allText(after.find((b) => allText(b).includes('已蒸馏'))).trim().startsWith('✓') && !allText(after.find((b) => allText(b).includes('已过期'))).trim().startsWith('✓'), after.map((b) => allText(b).trim()).join(' | '));
+  check('行内说明跟着变', allText(bar2).includes('→ 归到「已蒸馏」'), allText(bar2));
   findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-confirm'), 'dsh-memory-delta-mini')
     .find((b) => allText(b).includes('确认归档'))
     .props.onClick({ stopPropagation() {}, preventDefault() {} });
