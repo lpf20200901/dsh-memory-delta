@@ -109,6 +109,10 @@ window.__ModuleLoader__.load({
    之前用原生 <details> 又隐藏了 ::-webkit-details-marker，结果**没有任何可展开的标志**
    —— 用户根本不知道能点。现在自绘箭头（CSS 三角），展开时旋转 90°。 */
 .dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 6px; }
+/* 子主题：缩进一格 + 左侧竖线，一眼看出它是挂在上面那个父主题下面的（两级主题用）
+   ⚠️ 只改**缩进与描边**，不改字号/颜色 —— 层级靠位置表达，别再靠小字注释 */
+.dsh-memory-delta-section.is-child { margin-left: 12px; padding-left: 8px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28)); }
+.dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-weight: 500; }
 .dsh-memory-delta-section-head {
   display: flex;
   align-items: center;
@@ -541,6 +545,24 @@ window.__ModuleLoader__.load({
     const NO_TOPIC = '\u0000untopic';
     const NO_TAG = '\u0000untagged';
     const NO_DATE = '\u0000nodate';
+    /** 归档层按"退场原因"分组时，不属于已知原因的兜底键（同样用不可撞名的前缀）。 */
+    const NO_REASON = '\u0000noreason';
+
+    /**
+     * **子主题**：主题名里带分隔符就是两级（`DSH 插件开发/面板` → 父 `DSH 插件开发` + 子 `面板`）。
+     *
+     * 为什么用"约定分隔符"而不是加一个字段：主题是**人**手填的字符串（CLI `--topic` / 面板归类），
+     * 加字段就要同时改存储、CLI、面板、迁移脚本四处；而分隔符只影响**显示**，
+     * 旧数据（不带分隔符）自动就是"只有一级" —— 零迁移、零兼容负担。
+     */
+    const TOPIC_SEP = /[\/／›]/;
+    const splitTopic = (topic) => {
+      const t = typeof topic === 'string' ? topic.trim() : '';
+      if (!t) return { parent: null, child: null };
+      const parts = t.split(TOPIC_SEP).map((s) => s.trim()).filter(Boolean);
+      if (parts.length <= 1) return { parent: parts[0] ?? t, child: null };
+      return { parent: parts[0], child: parts.slice(1).join(' / ') };
+    };
 
     /**
      * 长路径从**开头**截断，保留尾部（`D:\…\memory\archive\a-very-long-id.md`）。
@@ -727,9 +749,10 @@ window.__ModuleLoader__.load({
        * 把用户刚收起来的分组重新弹开，而且原生 marker 又被样式藏了 ——
        * 结果是"看不出能点、点了也记不住"。
        */
-      // 「全局规范」默认**折叠**：它是工作区外的整篇指令文件，展开会把面板淹掉
-      //（也避免截图时把里面的个人信息带出去）。
-      const [collapsed, setCollapsed] = useState({ 'stage:global': true });
+      // 「全局规范」与「已归档」默认**折叠**：前者是工作区外的整篇指令文件（展开会把面板淹掉、
+      // 也可能把里面的个人信息带进截图）；后者是已经退场的旧结论 —— 它们不再发给模型，
+      // 界面上只需要"知道有多少、需要时点开"，默认摊开会把真正在用的 15 条挤到看不见。
+      const [collapsed, setCollapsed] = useState({ 'stage:global': true, 'stage:archive': true });
       /**
        * 归纳维度：**三个阶段共用**（待你确认 / 已在用 / 已归档 都跟随它）。
        *
@@ -1784,12 +1807,58 @@ window.__ModuleLoader__.load({
        */
       const subGroups = (list, dimension, layer) => {
         if (dimension === 'topic') {
-          return bucket(list, (e) => (typeof e.topic === 'string' && e.topic ? e.topic : ''), {
-            missingKey: NO_TOPIC,
-            missingTitle: '未归类',
-            missingHint: '还没归纳 · 在条目上点「归类」填一个主题名',
-            namedHint: '按主题（你指定的归纳）',
-          });
+          // **两级主题**：父主题（`DSH 插件开发`）下面挂子主题（`面板`）。
+          // 没写分隔符的主题直接就是"只有一级"，不额外包一层（避免给老数据加噪音层级）。
+          const byParent = new Map();
+          for (const e of list) {
+            const { parent, child } = splitTopic(e.topic);
+            const p = parent || NO_TOPIC;
+            if (!byParent.has(p)) byParent.set(p, []);
+            byParent.get(p).push({ e, child });
+          }
+          const named = [...byParent.entries()].filter(([k]) => k !== NO_TOPIC);
+          named.sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
+          const out = [];
+          for (const [p, items] of named) {
+            const children = [...new Set(items.map((i) => i.child).filter(Boolean))].sort();
+            if (children.length === 0) {
+              // 父主题自身没有子主题 → 就是一条普通分组（老数据走这条）
+              out.push({ key: p, title: p, hint: '按主题（你指定的归纳）', list: items.map((i) => i.e) });
+              continue;
+            }
+            // 有子主题：父主题**始终**出一条分组（装"没再分小主题"的那部分），
+            // 子主题再跟在后面 —— 这样"父主题"这一层的条数（含子）在分组头上看得出来，
+            // 而点父主题能拿到它自己那几条。父组没有自己的条目时不占位置。
+            const noChild = items.filter((i) => !i.child).map((i) => i.e);
+            if (noChild.length) out.push({ key: p, title: p, hint: '这个主题下没再分小主题的条目', list: noChild });
+            for (const c of children) {
+              const sub = items.filter((i) => i.child === c).map((i) => i.e);
+              out.push({ key: `${p}/${c}`, title: c, parent: p, hint: '子主题', list: sub });
+            }
+          }
+          const missing = byParent.get(NO_TOPIC);
+          if (missing) {
+            out.push({
+              key: NO_TOPIC,
+              title: '未归类',
+              hint: '还没归纳 · 在条目上点「归类」填一个主题名；想要两级就写 `父主题/子主题`',
+              list: missing.map((i) => i.e),
+            });
+          }
+          return out;
+        }
+        if (dimension === 'exit') {
+          // 归档层专用（`exit` 维度只在这一层出现）：按**退场原因**分组。
+          // 为什么按原因而不是按类型/主题：归档条目已经不再影响模型，这里的用途是
+          // "我知道它为什么退场、还能不能取回"，而不是"它属于哪一类"。
+          const superseded = list.filter((e) => e.status === 'superseded');
+          const expired = list.filter((e) => e.status === 'expired');
+          const other = list.filter((e) => e.status !== 'superseded' && e.status !== 'expired');
+          return [
+            { key: 'superseded', title: '已蒸馏 / 已被取代', hint: '结论已经搬进文档或被新版本取代 —— 保留它只为留个出处（mem restore <id> 可取回）', list: superseded },
+            { key: 'expired', title: '已过期', hint: '不再适用又没有替代 —— 结论作废，原因写在条目正文里', list: expired },
+            { key: NO_REASON, title: '其它退场', hint: 'status 不是 superseded / expired（多半是手改过）', list: other },
+          ].filter((g) => g.list.length);
         }
         if (dimension === 'tag') {
           return bucket(list, (e) => (Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : ''), {
@@ -1947,7 +2016,9 @@ window.__ModuleLoader__.load({
         // 于是界面上"只有类型看得出分组"（用户 2026-09-22 反馈的就是这个）。
         // 现在**每个阶段都照维度分组**，一致性优先；单组时那个头也顺带说明"这一组是什么"。
         return groups.map((g) => {
-          const key = `${layer}:${dimension}:${g.key}`;
+          // 子主题的 key 要带父主题前缀（不然 `面板` 这种子主题名会在别的父主题下撞 key，
+          // 折叠状态是**按 key 存的**，撞了就会一起开合）
+          const key = g.parent ? `${layer}:${dimension}:${g.parent}/${g.title}` : `${layer}:${dimension}:${g.key}`;
           const note = dimension === 'type' && layer === 'standing' && g.key === 'facts'
             ? '换个环境或换个版本，它可能就不成立了 —— 所以写清"什么情况下适用"最有价值。'
             : dimension === 'type' && layer === 'standing' && g.key === 'decisions'
@@ -1956,10 +2027,12 @@ window.__ModuleLoader__.load({
           return section(
             {
               key,
-              title: g.title,
+              title: g.parent ? `${g.parent} › ${g.title}` : g.title,
               slug: g.slug ?? null,
               count: g.list.length,
               hint: g.hint,
+              // 子主题缩进一格，一眼看出层级
+              className: g.parent ? 'is-child' : undefined,
               open: isOpen(key),
               onToggle: () => toggleSection(key),
             },
@@ -2163,7 +2236,8 @@ window.__ModuleLoader__.load({
           title: '已归档',
           slug: 'archive',
           count: archiveCount,
-          hint: '不再适用 / 被取代 · 不再发给模型，但搜得到、也能取回',
+          // 默认**折叠**：退场的旧结论不再发给模型，界面上只需"知道多少条、需要时点开"
+          hint: '已退场 · 不再发给模型，但搜得到、也能取回（点开看退场原因）',
           open: isOpen('stage:archive'),
           onToggle: () => toggleSection('stage:archive'),
         },
@@ -2175,7 +2249,7 @@ window.__ModuleLoader__.load({
               ? '还没有归档 —— 结论被取代（supersede）或不再适用（归档）时会搬到这里，不再发给模型'
               : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。',
           ),
-          ...(archived.length ? groupedBody(archived, groupBy, 'archive') : []),
+          ...(archived.length ? groupedBody(archived, 'exit', 'archive') : []),
           archiveCount > archived.length
             ? h(
                 'div',

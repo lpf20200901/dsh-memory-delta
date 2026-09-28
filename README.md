@@ -171,7 +171,12 @@ due-for-review section, the inbox candidates, and how many bytes the current sto
 **Clicking an entry opens it in the editor**; the panel's own writes all go through one
 whitelisted `POST /dsh-memory-delta/action` route (promote / withdraw / archive / restore / delete
 candidate / safe rename / assign topic / rename topic / batch) — there is no generic edit back door,
-and `allowWrite: false` turns the whole route off.</sub>
+and `allowWrite: false` turns the whole route off.
+Two defaults that keep the tab calm: **the archived stage is collapsed by default** (retired conclusions
+should not push the live entries out of view) and **the archive is grouped by *why* it left** (distilled /
+superseded vs expired — that layer answers "why is it gone", not "what kind is it"). Topics support **two
+levels**: write `parent/child` in the topic name (e.g. `DSH 插件开发/面板`) and the child nests under the
+parent; no separator means one level, so existing entries need no migration.</sub>
 
 ## CLI usage
 

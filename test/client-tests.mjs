@@ -160,6 +160,20 @@ function selectDimension(mounted, label) {
   btn.props.onClick({});
 }
 
+/**
+ * 展开「已归档」阶段。
+ *
+ * ⚠️ 2026-09-23 起它**默认折叠**（退场的旧结论不该把在用的条目挤出视野），
+ * 所以任何要验"归档里有什么"的用例都得先点开 —— 否则断言会在一个空区块上静默失败。
+ */
+function openArchive(mounted) {
+  const s = findByProp(mounted.tree(), 'key', 'stage:archive');
+  if (!s) throw new Error('找不到「已归档」阶段');
+  const toggle = findAllByClass(s, 'dsh-memory-delta-toggle')[0];
+  if (toggle && toggle.props['aria-expanded'] === 'false') toggle.props.onClick({});
+  return s;
+}
+
 const CLIENT_SOURCE = fs.readFileSync(CLIENT_FILE, 'utf8');
 
 /** 在假 window 里执行 client.js，拿回它注册的 factory 与调用记录。 */
@@ -550,7 +564,20 @@ section('组件：正常数据');
   // ④ 层级：箭头（可展开的标志）+ 条目上的标签/日期/文件名
   const carets = findAllByClass(mounted.tree(), 'dsh-memory-delta-caret');
   check('每个分组头都有自绘箭头（能看出可以展开）', carets.length >= 4, String(carets.length));
-  check('默认展开 → 箭头带 is-open', carets.every((c) => c.props.className.includes('is-open')), carets.map((c) => c.props.className).join('|'));
+  // ⚠️ 2026-09-23 起「已归档」默认**折叠**（退场的旧结论不该把在用的条目挤下去），
+  //    所以不再是"每个箭头都 is-open" —— 改成"绝大多数展开、归档那个是收起的"。
+  check(
+    '默认：在用的分组都展开，只有「已归档」是收起的',
+    carets.filter((c) => c.props.className.includes('is-open')).length === carets.length - 1,
+    carets.map((c) => c.props.className).join('|'),
+  );
+  const archiveSection = findByProp(mounted.tree(), 'key', 'stage:archive');
+  const archiveHeadToggle = archiveSection ? findAllByClass(archiveSection, 'dsh-memory-delta-toggle')[0] : null;
+  check(
+    '收起的那个是「已归档」（退场的旧结论不该占着版面）',
+    Boolean(archiveHeadToggle) && archiveHeadToggle.props['aria-expanded'] === 'false',
+    String(archiveHeadToggle ? archiveHeadToggle.props['aria-expanded'] : 'no archive section'),
+  );
   check('条目显示标签', text.includes('sandbox'), text.slice(0, 400));
   check('条目显示日期', text.includes('2026-09-17'), text.slice(0, 400));
   check('条目显示文件名（暴露难看的自动命名）', text.includes('node-rm-nonascii.md'), text.slice(0, 400));
@@ -1070,8 +1097,15 @@ section('组件：已归档列出条目 + 取回');
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' }, hostCtx: { betterSidebar: sidebar.service } });
   await flush();
 
+  // 「已归档」默认折叠（2026-09-23）→ 先点开它，再验里面列了条目
+  const archiveHead = findByProp(mounted.tree(), 'key', 'stage:archive');
+  const archiveToggle = findAllByClass(archiveHead, 'dsh-memory-delta-toggle')[0];
+  check('（前置）「已归档」默认是收起的 —— 退场的旧结论不该挤占在用的条目', archiveToggle.props['aria-expanded'] === 'false', String(archiveToggle.props['aria-expanded']));
+  archiveToggle.props.onClick({});
+
   const text = allText(mounted.tree());
   check('已归档组里列出了归档条目本身（不只是条数）', text.includes('这条不再适用了') && text.includes('retired-fact.md'), text.slice(-500));
+  check('归档分组头按**退场原因**分（不再是类型/主题）：已过期 / 已蒸馏', headerTexts(mounted.tree()).some((hd) => hd.includes('已过期')) || headerTexts(mounted.tree()).some((hd) => hd.includes('已蒸馏')), headerTexts(mounted.tree()).join(' | '));
 
   const restoreBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '取回');
   check('归档条目上有「取回」按钮', Boolean(restoreBtn));
@@ -1242,11 +1276,16 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
 
   check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
   check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
-  check('已归档里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:topic:\u0000untopic')), headerTexts(mounted.tree()).join(' | '));
 
-  // 换维度：三个阶段一起跟着变
+  // 归档层现在**不跟 groupBy**：它按"退场原因"分（已蒸馏 / 已过期）—— 见 client.js 的 exit 维度。
+  // 理由：归档条目已经不影响模型，这时"它为什么退场、还能不能取回"比"它属于哪一类"有用。
+  openArchive(mounted);
+  check('已归档按退场原因分组（superseded / expired），不跟类型主题走', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
+
+  // 换维度：前两个阶段一起跟着变
   selectDimension(mounted, '类型');
-  check('切到类型：三个阶段都改按类型分组', Boolean(findByProp(mounted.tree(), 'key', 'inbox:type:facts')) && Boolean(findByProp(mounted.tree(), 'key', 'archive:type:facts')), headerTexts(mounted.tree()).join(' | '));
+  check('切到类型：待你确认与已在用都改按类型分组', Boolean(findByProp(mounted.tree(), 'key', 'inbox:type:facts')) && Boolean(findByProp(mounted.tree(), 'key', 'standing:type:facts')), headerTexts(mounted.tree()).join(' | '));
+  check('（对照）归档层仍然是退场原因分组，不受维度切换影响', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
 
   globalThis.fetch = originalFetch;
 }
@@ -1442,6 +1481,7 @@ section('组件：条数被截断时必须说出来（不能让"库里就这么�
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(TRUNCATED) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
+  openArchive(mounted); // 归档默认折叠（2026-09-23）
   const text = allText(mounted.tree());
   check('常驻条目被截断时给出条数与去向', /还有 2 条常驻条目没列出来/.test(text), text.slice(0, 200));
   check('候选被截断时也说出来', /还有 3 条候选没列出来/.test(text), text.slice(0, 200));
@@ -1576,6 +1616,46 @@ section('组件：检索被截断时必须说出来（宿主早就在报，客�
   mode = '完整';
   const full = await search('完整的那个');
   check('结果完整时不给截断提示（不能变成常驻噪音）', findByClass(mounted.tree(), 'dsh-memory-delta-trunc') === null, full.slice(0, 200));
+  globalThis.fetch = originalFetch;
+}
+
+section('组件：两级主题（父主题 / 子主题）+ 归档按退场原因分组');
+{
+  const originalFetch = globalThis.fetch;
+  const NESTED = {
+    ...SAMPLE,
+    entries: [
+      { id: 'p1', type: 'fact', key: 'p1', status: 'active', topic: 'DSH 插件开发', tags: ['dsh'], date: '2026-09-17', file: 'D:\\proj\\memory\\facts\\p1.md', line: '父主题下的条目' },
+      { id: 'c1', type: 'fact', key: 'c1', status: 'active', topic: 'DSH 插件开发/面板', tags: ['dsh'], date: '2026-09-17', file: 'D:\\proj\\memory\\facts\\c1.md', line: '子主题：面板那条' },
+      { id: 'c2', type: 'fact', key: 'c2', status: 'active', topic: 'DSH 插件开发/宿主', tags: ['dsh'], date: '2026-09-17', file: 'D:\\proj\\memory\\facts\\c2.md', line: '子主题：宿主那条' },
+    ],
+    inbox: [],
+    archive: [
+      { id: 'a-sup', type: 'fact', key: 'a-sup', status: 'superseded', topic: '旧主题', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a-sup.md', line: '被取代的那条' },
+      { id: 'a-exp', type: 'fact', key: 'a-exp', status: 'expired', topic: '旧主题', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\a-exp.md', line: '过期的那条' },
+    ],
+    counts: { ...SAMPLE.counts, active: 3, inbox: 0, archive: 2 },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(NESTED) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+
+  const headers = headerTexts(mounted.tree()).join(' | ');
+  check('父主题（不带分隔符）就是一条普通分组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发')), headers);
+  check('带 `/` 的主题分成两级的子分组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/面板')) && Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/宿主')), headers);
+  check('子分组标题写成「父 › 子」（位置表达层级，不靠注释）', headers.includes('DSH 插件开发 › 面板'), headers);
+  const childSection = findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/面板');
+  check('子分组带 is-child（缩进 + 左侧竖线，CSS 里定）', String(childSection.props.className).includes('is-child'), String(childSection.props.className));
+  check('子分组只装自己的条目（父主题那条不在里面）', allText(childSection).includes('面板那条') && !allText(childSection).includes('父主题下的条目'), allText(childSection).slice(0, 120));
+
+  // 归档层：按退场原因分组（不跟 groupBy / 不看主题）
+  openArchive(mounted);
+  const ah = headerTexts(mounted.tree()).join(' | ');
+  check('归档按「已蒸馏 / 已被取代」与「已过期」分组', ah.includes('已蒸馏') && ah.includes('已过期'), ah);
+  const sup = findByProp(mounted.tree(), 'key', 'archive:exit:superseded');
+  const exp = findByProp(mounted.tree(), 'key', 'archive:exit:expired');
+  check('两条归档各归各的组（不是都堆在一起）', Boolean(sup) && Boolean(exp) && allText(sup).includes('被取代的那条') && allText(exp).includes('过期的那条'), `${allText(sup).slice(0, 40)} / ${allText(exp).slice(0, 40)}`);
+  check('归档分组说明了"为什么留着它"（保留出处 / 可取回）', allText(sup).includes('出处') || allText(sup).includes('取回'), allText(sup).slice(0, 140));
   globalThis.fetch = originalFetch;
 }
 
@@ -1771,7 +1851,8 @@ section('组件：状态行标出归档条数');
   await flush();
   const cleanText = allText(clean.tree());
   check('没有归档时仍然显示「已归档」这一层', cleanText.includes('已归档') && cleanText.includes('（archive）'), cleanText.slice(0, 300));
-  check('没有归档时说清什么时候才会有', cleanText.includes('还没有归档') && cleanText.includes('不再发给模型'), cleanText.slice(0, 400));
+  openArchive(clean);
+  check('没有归档时说清什么时候才会有', allText(clean.tree()).includes('还没有归档') && allText(clean.tree()).includes('不再发给模型'), allText(clean.tree()).slice(0, 400));
   globalThis.fetch = originalFetch;
 }
 
