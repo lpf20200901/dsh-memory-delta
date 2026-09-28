@@ -1265,10 +1265,12 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
       { id: 'i2', type: 'decision', topic: 'DSH 技能', tags: [], line: '候选二', date: '2026-09-17', file: 'D:\\proj\\memory\\inbox\\i2.md' },
     ],
     archive: [
-      { id: 'a1', type: 'fact', topic: 'DSH 插件开发', status: 'expired', tags: ['dsh'], line: '老的坑一', date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a1.md' },
+      // 三条覆盖三种情况：两条**不写 topic**（应落到归档默认主题「已过期」/「已蒸馏」），一条自己归过类
+      { id: 'a1', type: 'fact', status: 'expired', tags: ['dsh'], line: '老的坑一', date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a1.md' },
       { id: 'a2', type: 'decision', status: 'superseded', tags: [], line: '老的坑二', date: '2026-09-09', file: 'D:\\proj\\memory\\archive\\a2.md' },
+      { id: 'a3', type: 'fact', status: 'superseded', topic: '我自己建的主题', tags: ['dsh'], line: '老的坑三', date: '2026-09-08', file: 'D:\\proj\\memory\\archive\\a3.md' },
     ],
-    counts: { ...SAMPLE.counts, inbox: 2, archive: 2 },
+    counts: { ...SAMPLE.counts, inbox: 2, archive: 3 },
   };
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(THREE) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
@@ -1277,27 +1279,19 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
   check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
 
-  // 归档层**跟随用户选的维度**（2026-09-23 第二轮反馈），另外有自己专属的「退场原因」档位：
-  // 默认（主题视角）归档按退场原因分组；一旦用户主动选了别的维度，归档也跟着换。
+  // 归档层的"主题"这一档 = **默认主题 + 你自建的主题**（2026-09-23 第三轮反馈）：
+  // 没写主题的归档条目按退场原因落进「已蒸馏」/「已过期」，写了的用你自己的主题。
   openArchive(mounted);
-  check('默认视角下：归档按退场原因分组（superseded / expired）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
-  check('归档里有东西时，头部多一个「退场原因」档位', allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]).includes('退场原因'), allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]));
+  check('归档层默认主题：没写 topic 的过期条目落「已过期」', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:已过期')), headerTexts(mounted.tree()).join(' | '));
+  check('归档层默认主题：没写 topic 的取代条目落「已蒸馏」', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:已蒸馏')), headerTexts(mounted.tree()).join(' | '));
+  check('（对照）自己设过主题的归档条目用自己的主题（不被默认覆盖）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:我自己建的主题')), headerTexts(mounted.tree()).join(' | '));
+  check('头部**不再**有「退场原因」档位（用户反馈不需要）', !allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]).includes('退场原因'), allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]));
 
-  // 换维度：前两个阶段一起跟着变
+  // 换维度：三个阶段一起跟着变
   selectDimension(mounted, '类型');
   check('切到类型：待你确认与已在用都改按类型分组', Boolean(findByProp(mounted.tree(), 'key', 'inbox:type:facts')) && Boolean(findByProp(mounted.tree(), 'key', 'standing:type:facts')), headerTexts(mounted.tree()).join(' | '));
-  check('切到类型：**归档层也跟着**按类型分组（不再是固定视角）', Boolean(findByProp(mounted.tree(), 'key', 'archive:type:facts')), headerTexts(mounted.tree()).join(' | '));
-  check('切走之后归档里不再有"退场原因"的分组头（那个视角已经让位）', !findByProp(mounted.tree(), 'key', 'archive:exit:superseded'), headerTexts(mounted.tree()).join(' | '));
-
-  // 点回「主题」：归档层回到退场原因视角（那是它的默认视角，不是固定视角）
-  selectDimension(mounted, '主题');
-  check('点回「主题」：归档层回到退场原因视角（已蒸馏 / 已过期）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
-
-  // 点「退场原因」：切到那个档位，头部要标出来
-  selectDimension(mounted, '退场原因');
-  const segNow = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
-  const exitBtn = segNow.kids.find((n) => allText(n).trim() === '退场原因');
-  check('「退场原因」档位可点，且点完变高亮（is-on）', Boolean(exitBtn) && String(exitBtn.props.className).includes('is-on'), String(exitBtn && exitBtn.props.className));
+  check('切到类型：归档层也跟着（不再是固定视角）', Boolean(findByProp(mounted.tree(), 'key', 'archive:type:facts')), headerTexts(mounted.tree()).join(' | '));
+  check('切到类型后归档里不再有主题分组头（视角已让位）', !findByProp(mounted.tree(), 'key', 'archive:exit:已蒸馏'), headerTexts(mounted.tree()).join(' | '));
 
   globalThis.fetch = originalFetch;
 }
@@ -1643,10 +1637,12 @@ section('组件：两级主题（父主题 / 子主题）+ 归档按退场原因
     ],
     inbox: [],
     archive: [
-      { id: 'a-sup', type: 'fact', key: 'a-sup', status: 'superseded', topic: '旧主题', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a-sup.md', line: '被取代的那条' },
-      { id: 'a-exp', type: 'fact', key: 'a-exp', status: 'expired', topic: '旧主题', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\a-exp.md', line: '过期的那条' },
+      // 三条覆盖三种情况：没主题的按退场原因落默认主题、有主题的用你自己的
+      { id: 'a-sup', type: 'fact', key: 'a-sup', status: 'superseded', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a-sup.md', line: '被取代的那条' },
+      { id: 'a-exp', type: 'fact', key: 'a-exp', status: 'expired', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\a-exp.md', line: '过期的那条' },
+      { id: 'a-own', type: 'fact', key: 'a-own', status: 'superseded', topic: '我自己建的主题', tags: ['dsh'], date: '2026-09-12', file: 'D:\\proj\\memory\\archive\\a-own.md', line: '我自己归过类的那条' },
     ],
-    counts: { ...SAMPLE.counts, active: 3, inbox: 0, archive: 2 },
+    counts: { ...SAMPLE.counts, active: 3, inbox: 0, archive: 3 },
   };
   globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(NESTED) });
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
@@ -1660,14 +1656,17 @@ section('组件：两级主题（父主题 / 子主题）+ 归档按退场原因
   check('子分组带 is-child（缩进 + 左侧竖线，CSS 里定）', String(childSection.props.className).includes('is-child'), String(childSection.props.className));
   check('子分组只装自己的条目（父主题那条不在里面）', allText(childSection).includes('面板那条') && !allText(childSection).includes('父主题下的条目'), allText(childSection).slice(0, 120));
 
-  // 归档层：按退场原因分组（不跟 groupBy / 不看主题）
+  // 归档层：主题= 你设的 或 默认（按退场原因）—— 这就是"已蒸馏/已过期 作为归档默认主题"的实现
   openArchive(mounted);
   const ah = headerTexts(mounted.tree()).join(' | ');
-  check('归档按「已蒸馏 / 已被取代」与「已过期」分组', ah.includes('已蒸馏') && ah.includes('已过期'), ah);
-  const sup = findByProp(mounted.tree(), 'key', 'archive:exit:superseded');
-  const exp = findByProp(mounted.tree(), 'key', 'archive:exit:expired');
-  check('两条归档各归各的组（不是都堆在一起）', Boolean(sup) && Boolean(exp) && allText(sup).includes('被取代的那条') && allText(exp).includes('过期的那条'), `${allText(sup).slice(0, 40)} / ${allText(exp).slice(0, 40)}`);
-  check('归档分组说明了"为什么留着它"（保留出处 / 可取回）', allText(sup).includes('出处') || allText(sup).includes('取回'), allText(sup).slice(0, 140));
+  check('没写主题的归档按退场原因落「已蒸馏」/「已过期」', ah.includes('已蒸馏') && ah.includes('已过期'), ah);
+  const sup = findByProp(mounted.tree(), 'key', 'archive:exit:已蒸馏');
+  const exp = findByProp(mounted.tree(), 'key', 'archive:exit:已过期');
+  const own = findByProp(mounted.tree(), 'key', 'archive:exit:我自己建的主题');
+  check('三条归档各归各的组（默认两条 + 自建一条）', Boolean(sup) && Boolean(exp) && Boolean(own), ah);
+  check('默认组只装没归类的（被取代那条在「已蒸馏」里）', allText(sup).includes('被取代的那条') && allText(exp).includes('过期的那条'), `${allText(sup).slice(0, 40)} / ${allText(exp).slice(0, 40)}`);
+  check('**自建的大主题和默认主题并列**（归档下可以有自己的主题）', allText(own).includes('我自己归过类的那条') && !allText(own).includes('被取代的那条'), allText(own).slice(0, 120));
+  check('默认组说明了它是默认（不是硬编码的一层）', allText(sup).includes('默认') || allText(sup).includes('主题'), allText(sup).slice(0, 140));
   globalThis.fetch = originalFetch;
 }
 

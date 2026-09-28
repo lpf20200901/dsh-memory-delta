@@ -545,8 +545,25 @@ window.__ModuleLoader__.load({
     const NO_TOPIC = '\u0000untopic';
     const NO_TAG = '\u0000untagged';
     const NO_DATE = '\u0000nodate';
-    /** 归档层按"退场原因"分组时，不属于已知原因的兜底键（同样用不可撞名的前缀）。 */
-    const NO_REASON = '\u0000noreason';
+
+    /**
+     * 归档层的**默认主题**：没写 topic 的归档条目，按"为什么退场"落进这两个主题之一。
+     *
+     * 这是**显示层的兜底**（不写进 frontmatter）：
+     *   · 你给某条归档设了主题 → 用你的（面板「归类」/ `mem set --topic`）；
+     *   · 没设 → 被取代/蒸馏的落 `已蒸馏`，不再适用的落 `已过期`。
+     *
+     * 为什么不写进数据：为了面板好看去改写 24 条归档的 frontmatter 不值当，而且"没设主题"与
+     * "设成了这一组"在数据上本来就是两件事。反过来这也意味着**你可以在「已归档」下自由建主题**
+     * （给条目归类即可），默认只是兜底。
+     */
+    const ARCHIVE_DEFAULT_TOPICS = { superseded: '已蒸馏', expired: '已过期' };
+    const archiveTopicOf = (e) => {
+      const t = e && typeof e.topic === 'string' ? e.topic.trim() : '';
+      if (t) return t;
+      const byStatus = ARCHIVE_DEFAULT_TOPICS[e && e.status];
+      return byStatus || '其它退场';
+    };
 
     /**
      * **子主题**：主题名里带分隔符就是两级（`DSH 插件开发/面板` → 父 `DSH 插件开发` + 子 `面板`）。
@@ -762,15 +779,13 @@ window.__ModuleLoader__.load({
        */
       const [groupBy, setGroupBy] = useState('topic');
       /**
-       * 「退场原因」这个维度**只对归档层有意义**（在用的条目没有"退场"这回事）。
+       * 归档层的分组维度。
        *
-       * 默认它**不出现在头部**（省一个按钮），而归档层默认就按退场原因分组 ——
-       * 但一旦你主动选了别的维度（主题/类型/标签/日期），归档层就**跟着走**
-       * （见 `archiveDimension()`），也就是说这个维度是"归档的默认视角"，不是"归档的固定视角"。
+       * 归档层**也跟随头部的 主题/类型/标签/日期**（用户要求"选主题时归档也按主题分"），
+       * 而"主题"这一档在归档层用的是 `archiveTopicOf`：没写主题的按退场原因落到
+       * 「已蒸馏」/「已过期」，写了的用你给的主题 —— 所以**你可以在「已归档」下自建大主题**。
        */
-      const [exitOnly, setExitOnly] = useState(false);
-      const groupByEff = exitOnly ? 'exit' : groupBy;
-      const archiveDimension = () => (groupBy === 'topic' && !exitOnly ? 'exit' : groupByEff);
+      const archiveDimension = () => (groupBy === 'topic' ? 'exit' : groupBy);
       const [topicing, setTopicing] = useState(null);
       /**
        * **勾选**（批量操作的入口）：`{ [id]: true }`。
@@ -1558,49 +1573,34 @@ window.__ModuleLoader__.load({
           'span',
           { className: 'dsh-memory-delta-seg' },
           // 顺序即推荐顺序：主题（真正把条目归纳到一起）→ 类型 → 标签 → 日期。
-          // 四个维度都**作用于三个阶段**（待你确认 / 已在用 / 已归档）。
+          // 四档都**作用于三个阶段**（待你确认 / 已在用 / 已归档）。
+          // 不再有"退场原因"档位（用户 2026-09-23 反馈：不需要）：归档层的主题视角本来就
+          // 是「已蒸馏」/「已过期」+ 你自建的主题，见 `archiveTopicOf`。
           h(
             'button',
-            { type: 'button', className: groupByEff === 'topic' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('topic'); }, title: '按主题分组（你指定的归纳：没归类的落在「未归类」，在条目上点「归类」即可；主题名里写 `父/子` 就是两级）' },
+            { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳：没归类的落在「未归类」；主题名里写 `父/子` 就是两级。归档层默认落在「已蒸馏」/「已过期」，也可以自己归类到别的主题）' },
             '主题',
           ),
           h(
             'button',
-            { type: 'button', className: groupByEff === 'type' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('type'); }, title: '按类型分组：事实（facts）/ 决策（decisions）' },
+            { type: 'button', className: groupBy === 'type' ? 'is-on' : undefined, onClick: () => setGroupBy('type'), title: '按类型分组：事实（facts）/ 决策（decisions）' },
             '类型',
           ),
           h(
             'button',
-            { type: 'button', className: groupByEff === 'tag' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('tag'); }, title: '按标签分组（取每条的第一个标签）' },
+            { type: 'button', className: groupBy === 'tag' ? 'is-on' : undefined, onClick: () => setGroupBy('tag'), title: '按标签分组（取每条的第一个标签）' },
             '标签',
           ),
           h(
             'button',
             {
               type: 'button',
-              className: groupByEff === 'date' ? 'is-on' : undefined,
-              onClick: () => { setExitOnly(false); setGroupBy('date'); },
+              className: groupBy === 'date' ? 'is-on' : undefined,
+              onClick: () => setGroupBy('date'),
               title: '按记录日期分组（同一天的归一组，新的在前）',
             },
             '日期',
           ),
-          // 「退场原因」：归档层专属。默认不占位置（归档层自己就用这个视角），
-          // 只有归档里真有东西时才给你一个切回来的入口。
-          // ⚠️ 这里**不能引用 `counts` / `archiveCount`**：`head` 在组件里更早求值，
-          // 而且会被"读取中…"那个早退分支渲染（那时 state 还是 null）→ TDZ 直接抛。
-          // 就地用 state 的可选链判断，跟渲染顺序无关。
-          (state && state.counts && state.counts.archive > 0)
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: groupByEff === 'exit' ? 'is-on' : undefined,
-                  onClick: () => setExitOnly(true),
-                  title: '只对「已归档」有意义：按退场原因分组（已蒸馏/已被取代 vs 已过期）—— 它回答"为什么退场、还能不能取回"',
-                },
-                '退场原因',
-              )
-            : null,
         ),
         h(
           'button',
@@ -1881,20 +1881,16 @@ window.__ModuleLoader__.load({
           return out;
         }
         if (dimension === 'exit') {
-          // **归档层专属**维度：按"退场原因"分组。
-          //
-          // 为什么它存在、而不是让归档层固定用这个维度：归档层和上面两层一样**跟随用户选的维度**
-          // （点「主题」就看它每条归在哪个主题），但归档还有一件别处没有的信息 ——
-          // **它为什么退场**（被取代/蒸馏 vs 过期）。那件事决定"还能不能取回、值不值得看"。
-          // 所以给它一个自己的档位，需要时切过去；切回主题/类型也随时可以。
-          const superseded = list.filter((e) => e.status === 'superseded');
-          const expired = list.filter((e) => e.status === 'expired');
-          const other = list.filter((e) => e.status !== 'superseded' && e.status !== 'expired');
-          return [
-            { key: 'superseded', title: '已蒸馏 / 已被取代', hint: '结论已经搬进文档或被新版本取代 —— 保留它只为留个出处（mem restore <id> 可取回）', list: superseded },
-            { key: 'expired', title: '已过期', hint: '不再适用又没有替代 —— 结论作废，原因写在条目正文里', list: expired },
-            { key: NO_REASON, title: '其它退场', hint: 'status 不是 superseded / expired（多半是手改过）', list: other },
-          ].filter((g) => g.list.length);
+          // **归档层**的默认主题视角（`archiveTopicOf`）：没写主题的归档条目按"为什么退场"落进
+          // `已蒸馏` / `已过期`，写了的用用户自己的主题 —— 所以它同时是"默认分组"和"允许自建主题"。
+          // ⚠️ 这个维度**不在头部给按钮**（用户 2026-09-23 反馈：不需要一个额外的档位），
+          // 归档层在主题视角下就用它；保留这个分支是为了让渲染与测试都能直接按名字取到它。
+          return bucket(list, (e) => archiveTopicOf(e), {
+            missingKey: NO_TOPIC,
+            missingTitle: '其它退场',
+            missingHint: 'status 不是 superseded / expired（多半是手改过）',
+            namedHint: '按主题（归档层默认落在「已蒸馏」/「已过期」）',
+          });
         }
         if (dimension === 'tag') {
           return bucket(list, (e) => (Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : ''), {
@@ -2105,7 +2101,7 @@ window.__ModuleLoader__.load({
         return null;
       };
 
-      const standingBody = groupedBody(entries, groupByEff, 'standing');
+      const standingBody = groupedBody(entries, groupBy, 'standing');
 
       /* -------------------------------------------------- 全局规范（工作区外）
          这份是 **DSH 自己**注入的用户级指令文件（`$DSH_HOME/AGENTS.md`），每个工作区都生效 ——
@@ -2258,7 +2254,7 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : [groupedBody(inbox, groupByEff, 'inbox'), omissionFor('inbox')].filter(Boolean),
+            : [groupedBody(inbox, groupBy, 'inbox'), omissionFor('inbox')].filter(Boolean),
         ],
       );
 
