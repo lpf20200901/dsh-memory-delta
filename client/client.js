@@ -761,6 +761,16 @@ window.__ModuleLoader__.load({
        * 是 dsh / dsh-memory / dsh-memory-delta 三个几乎同义的桶），只有主题真的把条目**归纳到一起**。
        */
       const [groupBy, setGroupBy] = useState('topic');
+      /**
+       * 「退场原因」这个维度**只对归档层有意义**（在用的条目没有"退场"这回事）。
+       *
+       * 默认它**不出现在头部**（省一个按钮），而归档层默认就按退场原因分组 ——
+       * 但一旦你主动选了别的维度（主题/类型/标签/日期），归档层就**跟着走**
+       * （见 `archiveDimension()`），也就是说这个维度是"归档的默认视角"，不是"归档的固定视角"。
+       */
+      const [exitOnly, setExitOnly] = useState(false);
+      const groupByEff = exitOnly ? 'exit' : groupBy;
+      const archiveDimension = () => (groupBy === 'topic' && !exitOnly ? 'exit' : groupByEff);
       const [topicing, setTopicing] = useState(null);
       /**
        * **勾选**（批量操作的入口）：`{ [id]: true }`。
@@ -1551,29 +1561,46 @@ window.__ModuleLoader__.load({
           // 四个维度都**作用于三个阶段**（待你确认 / 已在用 / 已归档）。
           h(
             'button',
-            { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳；没归类的落在「未归类」，在条目上点「归类」即可）' },
+            { type: 'button', className: groupByEff === 'topic' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('topic'); }, title: '按主题分组（你指定的归纳：没归类的落在「未归类」，在条目上点「归类」即可；主题名里写 `父/子` 就是两级）' },
             '主题',
           ),
           h(
             'button',
-            { type: 'button', className: groupBy === 'type' ? 'is-on' : undefined, onClick: () => setGroupBy('type'), title: '按类型分组：事实（facts）/ 决策（decisions）' },
+            { type: 'button', className: groupByEff === 'type' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('type'); }, title: '按类型分组：事实（facts）/ 决策（decisions）' },
             '类型',
           ),
           h(
             'button',
-            { type: 'button', className: groupBy === 'tag' ? 'is-on' : undefined, onClick: () => setGroupBy('tag'), title: '按标签分组（取每条的第一个标签）' },
+            { type: 'button', className: groupByEff === 'tag' ? 'is-on' : undefined, onClick: () => { setExitOnly(false); setGroupBy('tag'); }, title: '按标签分组（取每条的第一个标签）' },
             '标签',
           ),
           h(
             'button',
             {
               type: 'button',
-              className: groupBy === 'date' ? 'is-on' : undefined,
-              onClick: () => setGroupBy('date'),
+              className: groupByEff === 'date' ? 'is-on' : undefined,
+              onClick: () => { setExitOnly(false); setGroupBy('date'); },
               title: '按记录日期分组（同一天的归一组，新的在前）',
             },
             '日期',
           ),
+          // 「退场原因」：归档层专属。默认不占位置（归档层自己就用这个视角），
+          // 只有归档里真有东西时才给你一个切回来的入口。
+          // ⚠️ 这里**不能引用 `counts` / `archiveCount`**：`head` 在组件里更早求值，
+          // 而且会被"读取中…"那个早退分支渲染（那时 state 还是 null）→ TDZ 直接抛。
+          // 就地用 state 的可选链判断，跟渲染顺序无关。
+          (state && state.counts && state.counts.archive > 0)
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: groupByEff === 'exit' ? 'is-on' : undefined,
+                  onClick: () => setExitOnly(true),
+                  title: '只对「已归档」有意义：按退场原因分组（已蒸馏/已被取代 vs 已过期）—— 它回答"为什么退场、还能不能取回"',
+                },
+                '退场原因',
+              )
+            : null,
         ),
         h(
           'button',
@@ -1634,7 +1661,13 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'dsh-memory-delta-tab' }, head, h('div', { className: 'dsh-memory-delta-muted' }, '读取中…'));
       }
 
+      // ⚠️ 这几个"计数"必须在 `head` **之前**求值：头部要用 archiveCount 决定"退场原因"按钮出不出
+      //（放后面会踩 TDZ：`Cannot access 'archiveCount' before initialization` —— 渲染顺序就是求值顺序）。
+      // 纯计算、无副作用。
       const counts = state.counts || {};
+      const archiveCount = typeof counts.archive === 'number' ? counts.archive : 0;
+      const archived = Array.isArray(state.archive) ? state.archive : [];
+
       const budget = typeof state.budget === 'number' ? state.budget : 0;
       const bytes = typeof state.bytes === 'number' ? state.bytes : 0;
       const over = budget > 0 && bytes > budget;
@@ -1848,9 +1881,12 @@ window.__ModuleLoader__.load({
           return out;
         }
         if (dimension === 'exit') {
-          // 归档层专用（`exit` 维度只在这一层出现）：按**退场原因**分组。
-          // 为什么按原因而不是按类型/主题：归档条目已经不再影响模型，这里的用途是
-          // "我知道它为什么退场、还能不能取回"，而不是"它属于哪一类"。
+          // **归档层专属**维度：按"退场原因"分组。
+          //
+          // 为什么它存在、而不是让归档层固定用这个维度：归档层和上面两层一样**跟随用户选的维度**
+          // （点「主题」就看它每条归在哪个主题），但归档还有一件别处没有的信息 ——
+          // **它为什么退场**（被取代/蒸馏 vs 过期）。那件事决定"还能不能取回、值不值得看"。
+          // 所以给它一个自己的档位，需要时切过去；切回主题/类型也随时可以。
           const superseded = list.filter((e) => e.status === 'superseded');
           const expired = list.filter((e) => e.status === 'expired');
           const other = list.filter((e) => e.status !== 'superseded' && e.status !== 'expired');
@@ -2069,7 +2105,7 @@ window.__ModuleLoader__.load({
         return null;
       };
 
-      const standingBody = groupedBody(entries, groupBy, 'standing');
+      const standingBody = groupedBody(entries, groupByEff, 'standing');
 
       /* -------------------------------------------------- 全局规范（工作区外）
          这份是 **DSH 自己**注入的用户级指令文件（`$DSH_HOME/AGENTS.md`），每个工作区都生效 ——
@@ -2222,14 +2258,13 @@ window.__ModuleLoader__.load({
                 { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
                 '没有待确认的候选 —— 模型用 memory_write 写了结论才会出现在这里，空着是正常的',
               )
-            : [groupedBody(inbox, groupBy, 'inbox'), omissionFor('inbox')].filter(Boolean),
+            : [groupedBody(inbox, groupByEff, 'inbox'), omissionFor('inbox')].filter(Boolean),
         ],
       );
 
       /* 归档层：以前只显示一个条数，现在**把条目列出来** —— 否则「取回」没有入口，
-         用户会以为"记过、后来被取代了"的东西丢了（其实它还在，也能搜到）。 */
-      const archiveCount = typeof counts.archive === 'number' ? counts.archive : 0;
-      const archived = Array.isArray(state.archive) ? state.archive : [];
+         用户会以为"记过、后来被取代了"的东西丢了（其实它还在，也能搜到）。
+         `archiveCount` / `archived` 在上面统一定义（头部按钮要用，见 TDZ 注释）。 */
       const archiveBlock = section(
         {
           key: 'stage:archive',
@@ -2247,9 +2282,10 @@ window.__ModuleLoader__.load({
             { className: 'dsh-memory-delta-dim', key: 'note' },
             archiveCount === 0
               ? '还没有归档 —— 结论被取代（supersede）或不再适用（归档）时会搬到这里，不再发给模型'
-              : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。',
+              : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。' +
+                '默认按**退场原因**分组（顶部点「主题/类型/标签/日期」它就跟着换，点「退场原因」切回来）。',
           ),
-          ...(archived.length ? groupedBody(archived, 'exit', 'archive') : []),
+          ...(archived.length ? groupedBody(archived, archiveDimension(), 'archive') : []),
           archiveCount > archived.length
             ? h(
                 'div',

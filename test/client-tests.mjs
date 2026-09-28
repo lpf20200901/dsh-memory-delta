@@ -1277,15 +1277,27 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
   check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
 
-  // 归档层现在**不跟 groupBy**：它按"退场原因"分（已蒸馏 / 已过期）—— 见 client.js 的 exit 维度。
-  // 理由：归档条目已经不影响模型，这时"它为什么退场、还能不能取回"比"它属于哪一类"有用。
+  // 归档层**跟随用户选的维度**（2026-09-23 第二轮反馈），另外有自己专属的「退场原因」档位：
+  // 默认（主题视角）归档按退场原因分组；一旦用户主动选了别的维度，归档也跟着换。
   openArchive(mounted);
-  check('已归档按退场原因分组（superseded / expired），不跟类型主题走', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
+  check('默认视角下：归档按退场原因分组（superseded / expired）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
+  check('归档里有东西时，头部多一个「退场原因」档位', allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]).includes('退场原因'), allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]));
 
   // 换维度：前两个阶段一起跟着变
   selectDimension(mounted, '类型');
   check('切到类型：待你确认与已在用都改按类型分组', Boolean(findByProp(mounted.tree(), 'key', 'inbox:type:facts')) && Boolean(findByProp(mounted.tree(), 'key', 'standing:type:facts')), headerTexts(mounted.tree()).join(' | '));
-  check('（对照）归档层仍然是退场原因分组，不受维度切换影响', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
+  check('切到类型：**归档层也跟着**按类型分组（不再是固定视角）', Boolean(findByProp(mounted.tree(), 'key', 'archive:type:facts')), headerTexts(mounted.tree()).join(' | '));
+  check('切走之后归档里不再有"退场原因"的分组头（那个视角已经让位）', !findByProp(mounted.tree(), 'key', 'archive:exit:superseded'), headerTexts(mounted.tree()).join(' | '));
+
+  // 点回「主题」：归档层回到退场原因视角（那是它的默认视角，不是固定视角）
+  selectDimension(mounted, '主题');
+  check('点回「主题」：归档层回到退场原因视角（已蒸馏 / 已过期）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:superseded')) || Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:expired')), headerTexts(mounted.tree()).join(' | '));
+
+  // 点「退场原因」：切到那个档位，头部要标出来
+  selectDimension(mounted, '退场原因');
+  const segNow = findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0];
+  const exitBtn = segNow.kids.find((n) => allText(n).trim() === '退场原因');
+  check('「退场原因」档位可点，且点完变高亮（is-on）', Boolean(exitBtn) && String(exitBtn.props.className).includes('is-on'), String(exitBtn && exitBtn.props.className));
 
   globalThis.fetch = originalFetch;
 }
