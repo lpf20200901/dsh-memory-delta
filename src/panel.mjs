@@ -27,7 +27,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, applyBatch, archiveEntry, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, renameTopic, restoreEntry, searchLibrary, setTopicEntry, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, applyBatch, archiveEntry, categoryOf, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, renameTopic, restoreEntry, searchLibrary, setArchiveCategory, setTopicEntry, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -41,7 +41,7 @@ export const MEMORY_ACTION_PATH = '/dsh-memory-delta/action';
  *
  * `promote` 与 `demote` 是**双向**的：候选 ⇄ 常驻。`remove` 只删候选（见 `removeEntry` 的理由）。
  */
-export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename', 'topic', 'topic-rename', 'batch'];
+export const ACTION_OPS = ['promote', 'demote', 'archive', 'restore', 'remove', 'rename', 'topic', 'category', 'topic-rename', 'batch'];
 
 /**
  * 批量动作的白名单 —— 与 `applyBatch` 支持的一致。
@@ -360,6 +360,9 @@ export function buildMemoryState(L, opts = {}) {
           type: e.data?.type,
           key: e.data?.key || undefined,
           topic: e.data?.topic ?? undefined,
+          // 归档分类（「已归档」下的第一层）：人写过的优先，没写就按 status 推（categoryOf）。
+          // 客户端不做推断 —— 推断规则只有一份，放在 bin/mem.mjs 里。
+          category: categoryOf(e) || undefined,
           tags: Array.isArray(e.data?.tags) ? e.data.tags : [],
           status: e.data?.status,
           date: e.data?.date,
@@ -747,8 +750,8 @@ export function createActionRoute(opts = {}) {
         }
         if (op === 'archive') {
           // 手动归档：不再适用、又没有新版本顶上（区别于取代）
-          const r = archiveEntry(L, id, { supersededBy: body?.supersededBy });
-          writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, status: r.status });
+          const r = archiveEntry(L, id, { supersededBy: body?.supersededBy, category: body?.category });
+          writeJson(res, 200, { ok: true, op, id: r.id, from: r.from, status: r.status, category: r.category });
           return;
         }
         if (op === 'restore') {
@@ -768,6 +771,13 @@ export function createActionRoute(opts = {}) {
           // 它只是给这条加一个显示用的分组标签，所以三个阶段都能点。
           const r = setTopicEntry(L, id, body?.topic);
           writeJson(res, 200, { ok: true, op, id: r.id, topic: r.topic });
+          return;
+        }
+        if (op === 'category') {
+          // 改**归档分类**（「已归档」下的第一层：已蒸馏 / 已过期 / 其它）。
+          // 只对归档里的条目有效 —— 常驻条目还没退场，不该有"为什么退场"的分类（见 setArchiveCategory）。
+          const r = setArchiveCategory(L, id, body?.category);
+          writeJson(res, 200, { ok: true, op, id: r.id, category: r.category });
           return;
         }
         if (op === 'topic-rename') {

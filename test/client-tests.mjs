@@ -1105,7 +1105,7 @@ section('组件：已归档列出条目 + 取回');
 
   const text = allText(mounted.tree());
   check('已归档组里列出了归档条目本身（不只是条数）', text.includes('这条不再适用了') && text.includes('retired-fact.md'), text.slice(-500));
-  check('归档分组头按**退场原因**分（不再是类型/主题）：已过期 / 已蒸馏', headerTexts(mounted.tree()).some((hd) => hd.includes('已过期')) || headerTexts(mounted.tree()).some((hd) => hd.includes('已蒸馏')), headerTexts(mounted.tree()).join(' | '));
+  check('归档分组头按**分类**分（第一层）：已过期 / 已蒸馏', headerTexts(mounted.tree()).some((hd) => hd.includes('已过期')) || headerTexts(mounted.tree()).some((hd) => hd.includes('已蒸馏')), headerTexts(mounted.tree()).join(' | '));
 
   const restoreBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((n) => allText(n).trim() === '取回');
   check('归档条目上有「取回」按钮', Boolean(restoreBtn));
@@ -1120,6 +1120,66 @@ section('组件：已归档列出条目 + 取回');
   check('确认后发 op=restore', calls[0]?.op === 'restore' && calls[0]?.id === 'retired-fact', JSON.stringify(calls[0]));
   check('取回成功后给出提示', allText(mounted.tree()).includes('已取回 retired-fact'), allText(mounted.tree()).slice(0, 300));
 
+  globalThis.fetch = originalFetch;
+}
+
+/* --------------------- 组件：归档时选分类 + 改归档分类（2026-09-23） */
+
+section('组件：归档分类（归档时选 + 事后改）');
+{
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const withArchive = {
+    ...SAMPLE,
+    archive: [{ id: 'a9', type: 'fact', status: 'superseded', topic: '某个主题', category: '已蒸馏', tags: ['dsh'], line: '一条归档', date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\a9.md' }],
+    counts: { ...SAMPLE.counts, archive: 1 },
+  };
+  globalThis.fetch = (url, options) => {
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    if (url === '/dsh-memory-delta/action') {
+      calls.push(body);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, op: body.op, id: body.id, status: 'expired', category: body.category ?? '已蒸馏', from: 'facts', target: 'archive' }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withArchive) });
+  };
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+
+  // ① 归档时选分类：确认条里给预设（默认「已过期」）+ 可自己写
+  const btns = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini');
+  btns.find((b) => allText(b).trim() === '归档').props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+  const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^已过期$|^已蒸馏$/.test(allText(b).trim()));
+  check('归档确认条里能选分类（预设两个）', presets.length === 2, allText(bar));
+  check('默认选中「已过期」（不再适用是归档最常见的理由）', String(presets[0].props.className).includes('is-on') && allText(presets[0]).trim() === '已过期', `${allText(presets[0])} / ${presets[0].props.className}`);
+  presets.find((b) => allText(b).trim() === '已蒸馏').props.onClick({ stopPropagation() {}, preventDefault() {} });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-confirm'), 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('确认归档'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  check('确认归档时把**选中的分类**一起发出去', calls[0]?.op === 'archive' && calls[0]?.category === '已蒸馏', JSON.stringify(calls[0]));
+  check('回执里说明归到哪一类', allText(mounted.tree()).includes('分类「已蒸馏」'), allText(mounted.tree()).slice(0, 200));
+
+  // ② 归档条目行上有「分类」按钮 → 行内输入 → op=category
+  openArchive(mounted);
+  const catBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((b) => allText(b).trim() === '分类');
+  check('归档条目上有「分类」按钮（常驻条目没有 —— 它还没退场）', Boolean(catBtn), '分类');
+  check('常驻条目的按钮里没有「分类」', !findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').some((b) => allText(b).trim() === '分类'), 'standing');
+  catBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  const input = findByClass(mounted.tree(), 'dsh-memory-delta-topic').kids.find((k) => k.type === 'input');
+  check('行内输入预填当前分类', input?.props?.value === '已蒸馏', String(input?.props?.value));
+  {
+    const ev = { key: '2', stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+    input.props.onKeyDown(ev);
+    check('分类输入框的 keydown 不阻止默认行为（否则打不进字）', ev.prevented !== true && ev.stopped === true, JSON.stringify(ev));
+  }
+  input.props.onChange({ target: { value: '已过期' } });
+  findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-topic'), 'dsh-memory-delta-mini')
+    .find((b) => allText(b).includes('保存'))
+    .props.onClick({ stopPropagation() {}, preventDefault() {} });
+  await flush();
+  const catCall = calls.find((c) => c.op === 'category');
+  check('改分类发 op=category + 新分类', catCall?.id === 'a9' && catCall?.category === '已过期', JSON.stringify(catCall));
   globalThis.fetch = originalFetch;
 }
 
@@ -1279,12 +1339,17 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   check('已在用里按主题分了组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:环境与沙箱')), headerTexts(mounted.tree()).join(' | '));
   check('待你确认里也按主题分了组（不再平铺）', Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 插件开发')) && Boolean(findByProp(mounted.tree(), 'key', 'inbox:topic:DSH 技能')), headerTexts(mounted.tree()).join(' | '));
 
-  // 归档层的"主题"这一档 = **默认主题 + 你自建的主题**（2026-09-23 第三轮反馈）：
-  // 没写主题的归档条目按退场原因落进「已蒸馏」/「已过期」，写了的用你自己的主题。
+  // 归档层 = **分类 → 小主题 → 条目** 三层（用户 2026-09-23 定的结构）：
+  // 分类 = category（人写）或按 status 推的默认；小主题 = 这条记忆原本的 topic
   openArchive(mounted);
-  check('归档层默认主题：没写 topic 的过期条目落「已过期」', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:已过期')), headerTexts(mounted.tree()).join(' | '));
-  check('归档层默认主题：没写 topic 的取代条目落「已蒸馏」', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:已蒸馏')), headerTexts(mounted.tree()).join(' | '));
-  check('（对照）自己设过主题的归档条目用自己的主题（不被默认覆盖）', Boolean(findByProp(mounted.tree(), 'key', 'archive:exit:我自己建的主题')), headerTexts(mounted.tree()).join(' | '));
+  const headers2 = headerTexts(mounted.tree()).join(' | ');
+  check('第一层是分类：没写 category 的过期条目落「已过期」', Boolean(findByProp(mounted.tree(), 'key', 'archive:archive:已过期')), headers2);
+  check('第一层是分类：没写 category 的取代条目落「已蒸馏」', Boolean(findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏')), headers2);
+  const catSup = findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏');
+  check('第二层是小主题：带 topic 的归档缩进显示在分类下面', headers2.includes('已蒸馏 › 我自己建的主题'), headers2);
+  console.log('DBG catSup=', Boolean(catSup), JSON.stringify(allText(catSup || { kids: [] }).slice(0, 80)));
+  console.log('DBG children=', findAllByClass(catSup, 'dsh-memory-delta-section').map((s) => [String(s.props.className), allText(s).slice(0, 20)]));
+  check('分类头上说明了这一类为什么退场', allText(catSup).includes('搬进文档') || allText(catSup).includes('出处'), allText(catSup).slice(0, 140));
   check('头部**不再**有「退场原因」档位（用户反馈不需要）', !allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]).includes('退场原因'), allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]));
 
   // 换维度：三个阶段一起跟着变
@@ -1660,13 +1725,13 @@ section('组件：两级主题（父主题 / 子主题）+ 归档按退场原因
   openArchive(mounted);
   const ah = headerTexts(mounted.tree()).join(' | ');
   check('没写主题的归档按退场原因落「已蒸馏」/「已过期」', ah.includes('已蒸馏') && ah.includes('已过期'), ah);
-  const sup = findByProp(mounted.tree(), 'key', 'archive:exit:已蒸馏');
-  const exp = findByProp(mounted.tree(), 'key', 'archive:exit:已过期');
-  const own = findByProp(mounted.tree(), 'key', 'archive:exit:我自己建的主题');
-  check('三条归档各归各的组（默认两条 + 自建一条）', Boolean(sup) && Boolean(exp) && Boolean(own), ah);
-  check('默认组只装没归类的（被取代那条在「已蒸馏」里）', allText(sup).includes('被取代的那条') && allText(exp).includes('过期的那条'), `${allText(sup).slice(0, 40)} / ${allText(exp).slice(0, 40)}`);
-  check('**自建的大主题和默认主题并列**（归档下可以有自己的主题）', allText(own).includes('我自己归过类的那条') && !allText(own).includes('被取代的那条'), allText(own).slice(0, 120));
-  check('默认组说明了它是默认（不是硬编码的一层）', allText(sup).includes('默认') || allText(sup).includes('主题'), allText(sup).slice(0, 140));
+  const sup = findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏');
+  const exp = findByProp(mounted.tree(), 'key', 'archive:archive:已过期');
+  const own = findAllByClass(mounted.tree(), 'dsh-memory-delta-section').find((s) => String(s.props.className).includes('is-child') && allText(s).includes('我自己归过类的那条'));
+  check('三层结构：两个默认分类 + 一条自建小主题（挂在分类下面）', Boolean(sup) && Boolean(exp) && Boolean(own), ah);
+  check('默认分类里是没归类的那些', allText(sup).includes('被取代的那条') && allText(exp).includes('过期的那条'), `${allText(sup).slice(0, 40)} / ${allText(exp).slice(0, 40)}`);
+  check('**自建的小主题缩进在分类下面**，且只装它自己那条', Boolean(own) && allText(own).includes('我自己归过类的那条') && !allText(own).includes('被取代的那条'), allText(own || { kids: [] }).slice(0, 120));
+  check('分类头说清了"这一类为什么退场"', allText(sup).includes('搬进文档') || allText(sup).includes('出处'), allText(sup).slice(0, 140));
   globalThis.fetch = originalFetch;
 }
 

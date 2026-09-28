@@ -755,8 +755,35 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   check('再 promote 就能重新生效', run(['promote', '--root', root, 'retire-me']).code === 0 && JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
   check('取回的边界：对非归档条目 restore → 报错', run(['restore', '--root', root, 'retire-me']).code !== 0);
   check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
-}
 
+  /* 归档分类（`category`）：面板「已归档」下的第一层（2026-09-23 用户定的三层结构） */
+  const arCat = run(['archive', '--root', root, 'retire-me', '--category', '已过期']);
+  check('带 --category 的归档成功', arCat.code === 0, flat(arCat.out + arCat.err));
+  const catRaw = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
+  check('--category 写进 frontmatter', /^category: 已过期$/m.test(catRaw), catRaw.split(/\r?\n/).slice(0, 10).join(' | '));
+  const catLong = run(['archive', '--root', root, 'retire-me', '--category', 'x'.repeat(41)]);
+  check('对已归档的条目再 archive → 报错（顺便确认这条闸门还在）', catLong.code !== 0 && /已经在 archive/.test(catLong.out + catLong.err), flat(catLong.out + catLong.err));
+  const longCat = run(['set', '--root', root, 'retire-me', '--category', 'x'.repeat(41)]);
+  check('过长的分类被拒（读路径降级、写路径严格）', longCat.code !== 0 && /太长/.test(longCat.out + longCat.err), flat(longCat.out + longCat.err));
+
+  // 取回再归档 → 不给 --category 时按退场方式推默认
+  // ⚠️ restore 是回到**候选层**（不绕过"人确认"），所以要再 promote 一次才能归档（候选不能归档）
+  run(['restore', '--root', root, 'retire-me']);
+  run(['promote', '--root', root, 'retire-me']);
+  const arAgain = run(['archive', '--root', root, 'retire-me']);
+  check('取回并重新确认后能再归档', arAgain.code === 0, flat(arAgain.out + arAgain.err));
+  const catDefault = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
+  check('不给 --category 时按退场方式推默认（expired → 已过期）', /^category: 已过期$/m.test(catDefault), catDefault.split(/\r?\n/).slice(0, 10).join(' | '));
+  const setCat = run(['set', '--root', root, 'retire-me', '--category', '另外一类']);
+  check('mem set --category 改归档分类', setCat.code === 0 && /^category: 另外一类$/m.test(fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8')), flat(setCat.out));
+  check('带 category 的归档条目**不参与注入**（分类只影响归档层的显示）', !JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
+  // ⚠️ 常驻条目**不该**有"为什么退场"的分类（否则它就是第二个 topic 字段）
+  run(['restore', '--root', root, 'retire-me']);
+  run(['promote', '--root', root, 'retire-me']);
+  const catStanding = run(['set', '--root', root, 'retire-me', '--category', '已过期']);
+  check('对常驻条目设分类 → 拒绝（分类只回答"为什么退场"）', catStanding.code !== 0 && /只对归档里的条目有意义/.test(catStanding.out + catStanding.err), flat(catStanding.out + catStanding.err));
+  check('加了 category 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+}
 section('取回会清掉对方的悬挂引用（取代的**反向**操作必须双向）');
 {
   // 真机踩到（2026-09-22，用户库里真实出现）：只置空自己的 superseded_by，

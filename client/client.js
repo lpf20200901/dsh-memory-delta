@@ -547,22 +547,30 @@ window.__ModuleLoader__.load({
     const NO_DATE = '\u0000nodate';
 
     /**
-     * 归档层的**默认主题**：没写 topic 的归档条目，按"为什么退场"落进这两个主题之一。
+     * 归档层的**默认分类**：条目没写 `category` 时按"为什么退场"落进哪一类。
      *
-     * 这是**显示层的兜底**（不写进 frontmatter）：
-     *   · 你给某条归档设了主题 → 用你的（面板「归类」/ `mem set --topic`）；
-     *   · 没设 → 被取代/蒸馏的落 `已蒸馏`，不再适用的落 `已过期`。
-     *
-     * 为什么不写进数据：为了面板好看去改写 24 条归档的 frontmatter 不值当，而且"没设主题"与
-     * "设成了这一组"在数据上本来就是两件事。反过来这也意味着**你可以在「已归档」下自由建主题**
-     * （给条目归类即可），默认只是兜底。
+     * 与宿主的 `ARCHIVE_CATEGORY_DEFAULT` 必须一致（真正会用到的值由宿主在 payload 里算好 ——
+     * 客户端这份只是渲染兜底：万一字段缺失也不至于显示成空白）。
      */
-    const ARCHIVE_DEFAULT_TOPICS = { superseded: '已蒸馏', expired: '已过期' };
-    const archiveTopicOf = (e) => {
-      const t = e && typeof e.topic === 'string' ? e.topic.trim() : '';
-      if (t) return t;
-      const byStatus = ARCHIVE_DEFAULT_TOPICS[e && e.status];
-      return byStatus || '其它退场';
+    const ARCHIVE_CATEGORY_DEFAULT = { superseded: '已蒸馏', expired: '已过期' };
+    const ARCHIVE_CATEGORY_OTHER = '其它退场';
+    /** 归档确认里给的**快捷分类**：默认第一项（已过期）—— "不再适用"是归档最常见的理由。 */
+    const ARCHIVE_PRESET_CATEGORIES = ['已过期', '已蒸馏'];
+
+    /**
+     * 归档层的**分类 → 小主题 → 条目**三层（用户 2026-09-23 定的结构）：
+     *
+     *   已归档 → 「已过期 / 已蒸馏 / 你自建的」→ 小主题（这条记忆原本的 topic，可无）→ 条目
+     *
+     * 为什么分两层而不是像别的阶段那样只按一个维度分：归档条目已经不影响模型了，
+     * 这时最有用的两个问题依次是"它为什么退场"（决定还能不能取回、值不值得看）
+     * 和"它讲的是什么话题"（在那堆里找具体一条）。挤成一层就只能回答其中一个。
+     */
+    const archiveCategoryOf = (e) => {
+      const own = e && typeof e.category === 'string' ? e.category.trim() : '';
+      if (own) return own;
+      const byStatus = ARCHIVE_CATEGORY_DEFAULT[e && e.status];
+      return byStatus || ARCHIVE_CATEGORY_OTHER;
     };
 
     /**
@@ -785,7 +793,7 @@ window.__ModuleLoader__.load({
        * 而"主题"这一档在归档层用的是 `archiveTopicOf`：没写主题的按退场原因落到
        * 「已蒸馏」/「已过期」，写了的用你给的主题 —— 所以**你可以在「已归档」下自建大主题**。
        */
-      const archiveDimension = () => (groupBy === 'topic' ? 'exit' : groupBy);
+      const archiveDimension = () => (groupBy === 'topic' ? 'archive' : groupBy);
       const [topicing, setTopicing] = useState(null);
       /**
        * **勾选**（批量操作的入口）：`{ [id]: true }`。
@@ -797,7 +805,11 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState({});
       /** 批量归类的行内输入（`{ value }`，null = 没打开）。 */
       const [batchTopic, setBatchTopic] = useState(null);
-      /** 主题改名（分组头「改主题名」）：`{ from, value }`。 */
+      /** 归档确认里选的分类（默认「已过期」，可改成预设里的另一个或自己写）。 */
+      const [archiveCategoryInput, setArchiveCategoryInput] = useState(ARCHIVE_PRESET_CATEGORIES[0]);
+      /** 「改归档分类」的行内输入：`{ id, value }`。 */
+      const [categorizing, setCategorizing] = useState(null);
+      /** 主题归类（分组头「改主题名」）：`{ from, value }`。 */
       const [renamingTopic, setRenamingTopic] = useState(null);
       /** 按主题搜：`null` = 不限主题。 */
       const [searchTopic, setSearchTopic] = useState(null);
@@ -940,7 +952,7 @@ window.__ModuleLoader__.load({
       const runConfirmed = (op, id) => {
         if (op === 'remove') return removeCandidate(id);
         if (op === 'demote') return demote(id);
-        if (op === 'archive') return archive(id);
+        if (op === 'archive') return archive(id, archiveCategoryInput);
         if (op === 'restore') return restore(id);
         setConfirming(null);
         return undefined;
@@ -1039,18 +1051,35 @@ window.__ModuleLoader__.load({
       };
 
       /** **归档**：不再适用又没有替代 → archive/（区别于"取代"）。 */
-      const archive = (id) => {
+      const archive = (id, category) => {
         setConfirming(null);
         setPendingId(id);
-        return callAction({ op: 'archive', id })
+        return callAction(category ? { op: 'archive', id, category } : { op: 'archive', id })
           .then((r) => {
             setActionError(null);
-            setNotice(`已归档 ${r.id}（${r.status}）：不再发给模型，但搜得到、也能取回`);
+            setNotice(`已归档 ${r.id}（${r.status}｜分类「${r.category || archiveCategoryOf(r)}」）：不再发给模型，但搜得到、也能取回`);
             load(workspace);
           })
           .catch((err) => {
             setNotice(null);
             setActionError(`归档失败：${err && err.message ? err.message : String(err)}`);
+          })
+          .then(() => clearPending());
+      };
+
+      /** 改**归档分类**（「已归档 → 已蒸馏/已过期/其它」那一层）。只对归档里的条目有效。 */
+      const setCategory = (id, category) => {
+        setPendingId(id);
+        return callAction({ op: 'category', id, category })
+          .then((r) => {
+            setCategorizing(null);
+            setActionError(null);
+            setNotice(`已把 ${r.id} 归到「${r.category}」`);
+            load(workspace);
+          })
+          .catch((err) => {
+            setNotice(null);
+            setActionError(`改归档分类失败：${err && err.message ? err.message : String(err)}`);
           })
           .then(() => clearPending());
       };
@@ -1191,6 +1220,8 @@ window.__ModuleLoader__.load({
             title: '归档：不再适用又没有替代 → 进 archive/（不再发给模型，仍能搜到，也能取回）',
             onClick: (ev) => {
               stop(ev);
+              // 每次打开确认条都把分类**重置回默认**（上次给别人选过「已蒸馏」不该带到这一条）
+              setArchiveCategoryInput(ARCHIVE_PRESET_CATEGORIES[0]);
               setConfirming(
                 confirming && confirming.id === e.id
                   ? null
@@ -1289,6 +1320,35 @@ window.__ModuleLoader__.load({
                 },
                 '取消',
               ),
+              // 归档时**选分类**（「已归档」下的第一层）—— 用户在确认条里就定好，不用事后补
+              confirming.op === 'archive'
+                ? h(
+                    'div',
+                    { className: 'dsh-memory-delta-topic', key: 'cat' },
+                    ...ARCHIVE_PRESET_CATEGORIES.map((cat) =>
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          key: `cat:${cat}`,
+                          className: archiveCategoryInput === cat ? 'dsh-memory-delta-mini is-on' : 'dsh-memory-delta-mini',
+                          onClick: (ev) => {
+                            stop(ev);
+                            setArchiveCategoryInput(cat);
+                          },
+                        },
+                        cat,
+                      ),
+                    ),
+                    h('input', {
+                      value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
+                      placeholder: '或自己写一个分类',
+                      'aria-label': '归档分类',
+                      onChange: (ev) => setArchiveCategoryInput(ev && ev.target ? ev.target.value : ''),
+                      onKeyDown: (ev) => halt(ev),
+                    }),
+                  )
+                : null,
             )
           : null;
 
@@ -1320,6 +1380,69 @@ window.__ModuleLoader__.load({
                   },
                 },
                 pendingId === e.id ? '改名中…' : '改',
+              ),
+            )
+          : null;
+
+      /* ------------------------------------------------------- 归档分类 */
+      /**
+       * 归档条目上的「分类」按钮 + 行内输入。
+       *
+       * 作用范围**只有归档层**（`setArchiveCategory` 在宿主侧也会拒绝非归档条目）：
+       * 分类回答的是"它为什么退场"，常驻条目还没退场，不该被问这个问题 ——
+       * 否则它就会变成第二个 topic 字段。
+       */
+      const startCategory = (e) => {
+        setConfirming(null);
+        setRenaming(null);
+        setTopicing(null);
+        setCategorizing((prev) => (prev && prev.id === e.id ? null : { id: e.id, value: archiveCategoryOf(e) }));
+      };
+
+      const categoryButton = (e) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-memory-delta-mini',
+            disabled: pendingId === e.id,
+            title: `改归档分类（现在是「${archiveCategoryOf(e)}」）—— 它决定这条排在「已归档」下的哪一类`,
+            onClick: (ev) => {
+              stop(ev);
+              startCategory(e);
+            },
+          },
+          '分类',
+        );
+
+      const categoryRow = (e) =>
+        categorizing && categorizing.id === e.id
+          ? h(
+              'div',
+              { className: 'dsh-memory-delta-topic', key: `${e.id}:category`, onClick: halt },
+              h('input', {
+                value: categorizing.value,
+                list: 'dsh-memory-delta-category-options',
+                placeholder: '归档分类，例如 已过期 / 已蒸馏',
+                'aria-label': '归档分类',
+                onChange: (ev) => setCategorizing({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
+                onKeyDown: (ev) => {
+                  halt(ev);
+                  if (ev && ev.key === 'Enter') setCategory(e.id, categorizing.value);
+                },
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-memory-delta-mini',
+                  disabled: pendingId === e.id,
+                  onClick: (ev) => {
+                    stop(ev);
+                    setCategory(e.id, categorizing.value);
+                  },
+                },
+                pendingId === e.id ? '保存中…' : '保存',
               ),
             )
           : null;
@@ -1799,6 +1922,15 @@ window.__ModuleLoader__.load({
         ),
       ].sort((a, b) => a.localeCompare(b));
 
+      /** 库里已经用过的归档分类（给「分类」输入做候选；默认那两个由常量补上）。 */
+      const KNOWN_CATEGORIES = [
+        ...new Set(
+          (Array.isArray(state.archive) ? state.archive : [])
+            .map((e) => (e && typeof e.category === 'string' && e.category ? e.category : null))
+            .filter(Boolean),
+        ),
+      ].sort((a, b) => a.localeCompare(b));
+
       /**
        * 按记录日期分组用的日期人话（今天 / 昨天 / 前天 / 周几）——
        * 比一串 ISO 日期好读，且**用 state.today 算差**，不靠浏览器本地时区猜。
@@ -1880,17 +2012,46 @@ window.__ModuleLoader__.load({
           }
           return out;
         }
-        if (dimension === 'exit') {
-          // **归档层**的默认主题视角（`archiveTopicOf`）：没写主题的归档条目按"为什么退场"落进
-          // `已蒸馏` / `已过期`，写了的用用户自己的主题 —— 所以它同时是"默认分组"和"允许自建主题"。
-          // ⚠️ 这个维度**不在头部给按钮**（用户 2026-09-23 反馈：不需要一个额外的档位），
-          // 归档层在主题视角下就用它；保留这个分支是为了让渲染与测试都能直接按名字取到它。
-          return bucket(list, (e) => archiveTopicOf(e), {
-            missingKey: NO_TOPIC,
-            missingTitle: '其它退场',
-            missingHint: 'status 不是 superseded / expired（多半是手改过）',
-            namedHint: '按主题（归档层默认落在「已蒸馏」/「已过期」）',
-          });
+        if (dimension === 'archive') {
+          // **归档层的三层结构**（分类 → 小主题 → 条目）：
+          //   分类 = `category`（人写的）或按 status 推的默认（已蒸馏 / 已过期）
+          //   小主题 = 这条记忆原本的 `topic`（可选，支持 `父/子` 两级）
+          // 分类这一层**始终出分组头**（哪怕只有一类），否则用户看不到"这条为什么在这"；
+          // 小主题只在确实分了类时才出，避免每条都套一层空壳。
+          const byCategory = new Map();
+          for (const e of list) {
+            const cat = archiveCategoryOf(e);
+            if (!byCategory.has(cat)) byCategory.set(cat, []);
+            byCategory.get(cat).push(e);
+          }
+          const cats = [...byCategory.entries()].sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
+          const out = [];
+          for (const [cat, items] of cats) {
+            const hint =
+              cat === ARCHIVE_CATEGORY_DEFAULT.superseded
+                ? '结论已经搬进文档、或被新版本顶上 —— 留着只为留个出处'
+                : cat === ARCHIVE_CATEGORY_DEFAULT.expired
+                  ? '不再适用又没有替代 —— 结论作废，原因写在条目正文里'
+                  : '你给的归档分类';
+            // 分类下再按 topic 分（没有 topic 的直接挂在分类下，不额外造一层）
+            const withTopic = items.filter((e) => typeof e.topic === 'string' && e.topic.trim());
+            if (!withTopic.length) {
+              out.push({ key: cat, title: cat, hint, list: items });
+              continue;
+            }
+            const plain = items.filter((e) => !(typeof e.topic === 'string' && e.topic.trim()));
+            if (plain.length) out.push({ key: cat, title: cat, hint, list: plain });
+            const topicMap = new Map();
+            for (const e of withTopic) {
+              const t = e.topic.trim();
+              if (!topicMap.has(t)) topicMap.set(t, []);
+              topicMap.get(t).push(e);
+            }
+            for (const [t, sub] of [...topicMap.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+              out.push({ key: `${cat}\u0000${t}`, title: t, parent: cat, hint: `「${cat}」下的小主题`, list: sub });
+            }
+          }
+          return out;
         }
         if (dimension === 'tag') {
           return bucket(list, (e) => (Array.isArray(e.tags) && e.tags.length ? String(e.tags[0]) : ''), {
@@ -1930,7 +2091,8 @@ window.__ModuleLoader__.load({
       /** 某一阶段的条目按钮组 —— 三个阶段各自的动作不一样（提升 / 撤回 / 取回…）。 */
       const actionsFor = (layer, e) => {
         const base = layer === 'inbox' ? [promoteButton(e)] : layer === 'archive' ? [restoreButton(e)] : [demoteButton(e), archiveButton(e)];
-        return [...base, topicButton(e), tidyButton(e), layer === 'inbox' ? removeButton(e) : null];
+        // 「分类」只在归档层出现（它问的是"为什么退场"）
+        return [...base, topicButton(e), layer === 'archive' ? categoryButton(e) : null, tidyButton(e), layer === 'inbox' ? removeButton(e) : null];
       };
 
       /**
@@ -2039,7 +2201,7 @@ window.__ModuleLoader__.load({
             showType: dimension !== 'type',
             showTopic: dimension !== 'topic',
             actions: actionsFor(layer, e),
-            extraRow: confirmRow(e) || renameRow(e) || topicRow(e),
+            extraRow: confirmRow(e) || renameRow(e) || topicRow(e) || categoryRow(e),
             // 勾选：三个阶段都能选，批量条按"选中的条目属于哪个阶段"决定按钮可用性
             select: { checked: isSelected(e.id), onToggle: () => toggleSelected(e.id) },
           });
@@ -2503,6 +2665,14 @@ window.__ModuleLoader__.load({
               KNOWN_TOPICS.map((t) => h('option', { key: t, value: t })),
             )
           : null,
+        // 「归档分类」的候选 = 两个默认 + 库里**已经用过**的分类（避免同义分类越写越多）
+        h(
+          'datalist',
+          { id: 'dsh-memory-delta-category-options' },
+          [...new Set([...ARCHIVE_PRESET_CATEGORIES, ...ARCHIVE_CATEGORY_OTHER ? [ARCHIVE_CATEGORY_OTHER] : [], ...KNOWN_CATEGORIES])].map((c) =>
+            h('option', { key: c, value: c }),
+          ),
+        ),
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,
         // 有搜索词时**只显示结果**（否则一屏里两套列表，谁也看不清）

@@ -173,12 +173,12 @@ whitelisted `POST /dsh-memory-delta/action` route (promote / withdraw / archive 
 candidate / safe rename / assign topic / rename topic / batch) — there is no generic edit back door,
 and `allowWrite: false` turns the whole route off.
 Two defaults that keep the tab calm: **the archived stage is collapsed by default** (retired conclusions
-should not push the live entries out of view) and **the archive's topics are "yours, or the default"** —
-an archived entry with no topic falls under `已蒸馏` (distilled / superseded) or `已过期` (no longer
-applicable), while entries you labelled keep your own topic alongside them. So **you can create your own
-top-level topics under the archive**; the defaults are only a fallback, and they are not written into the
-frontmatter (your data stays clean). The archive still follows the header axis: switching to type / tag /
-date re-groups it too.
+should not push the live entries out of view) and **the archive reads in three levels** —
+`archived → category → sub-topic → entries`. The category is *why it left* (the `category` field): pick it
+in the archive confirmation strip (`已过期` / `已蒸馏`, defaulting to 已过期, or type your own), it is derived
+from how the entry left when you do not pick one, and the row's 分类 button changes it later. The sub-topic is
+the entry's original `topic` (optional, up to two levels). The archive still follows the header axis:
+switching to type / tag / date re-groups it too.
 Topics support **two levels**: write `parent/child` in the topic name (e.g. `DSH 插件开发/面板`) and the child
 nests under the parent; no separator means one level, so existing entries need no migration.</sub>
 

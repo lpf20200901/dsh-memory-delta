@@ -26,7 +26,7 @@ const CONFIG_FILE = 'memory.config.json';
 const TYPES = ['fact', 'decision'];
 const STATUSES = ['active', 'superseded', 'expired'];
 const DIR_OF = { fact: 'facts', decision: 'decisions', inbox: 'inbox', archive: 'archive' };
-const FM_KEYS = ['id', 'type', 'scope', 'key', 'topic', 'tags', 'status', 'date', 'source', 'supersedes', 'superseded_by', 'verify_when'];
+const FM_KEYS = ['id', 'type', 'scope', 'key', 'topic', 'category', 'tags', 'status', 'date', 'source', 'supersedes', 'superseded_by', 'verify_when'];
 
 /* ------------------------------------------------------------------ 输出 */
 
@@ -140,6 +140,15 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 | \`archive <id>\` | **不再适用，又没有替代** | → \`archive/\`（status=expired） | 能：\`restore <id>\` 捞回候选层 |
 | \`supersede <旧> <新>\` | 这条**错了/过时了**，有新的顶上 | → \`archive/\`（status=superseded） | 能：\`restore\`，或直接改新条目的 supersedes |
 
+**归档之后还分"哪一类"**：每条归档条目有一个**归档分类**（frontmatter 的 \`category\`），
+面板里它是「已归档」下面的**第一层**：\`已归档 → 分类（已过期 / 已蒸馏 / 你自己起的）→ 小主题 → 条目\`。
+- 归档时可选：面板的确认条里有 \`已过期 / 已蒸馏\` 两个快捷项，也可以自己写一个；
+  CLI 是 \`mem archive <id> --category "已过期"\`。
+- **不给就按退场方式推默认**：不再适用 → \`已过期\`，被取代 → \`已蒸馏\`（旧条目没写这个字段的也这么显示）。
+- 事后想改：面板上条目行的「分类」按钮，或 \`mem set <id> --category "..."\`（**只对归档里的条目有效** ——
+  常驻条目还没退场，不该被问"为什么退场"）。
+- 它**不进注入、也不影响检索**，纯粹是"归档区怎么读"的归纳。
+
 拿不准一条该放哪边，问一句：**"明天世界变了，这条会不会失效？"**
 - 会 → \`facts/\`（比如"沙箱禁止命名管道"—— 换个环境就可能不成立）
 - 只有你改主意才失效 → \`decisions/\`（比如"事实层只能由人确认后写入"）
@@ -163,8 +172,9 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 mem list / show <id> / due / recall "<词>"   # 看、查、搜索
 mem promote <id> [--supersedes <旧id>]       # 人确认：inbox → facts|decisions
 mem demote <id>                              # 先不当真：facts|decisions → inbox（能再 promote 回来）
-mem archive <id>                             # 不再适用又没有替代：→ archive/（status=expired）
+mem archive <id> [--category "已过期"]       # 不再适用又没有替代：→ archive/（可指定归档分类）
 mem restore <id>                             # 取回：archive/ → inbox（再确认一次才重新生效）
+mem set <id> --category "已蒸馏"            # 改**归档分类**（「已归档」下的第一层；只对归档条目有效）
 mem rm <id>                                  # 删除**候选**（只允许 inbox/；常驻的走上面的退场方式）
 mem set <id> --key k --verify-when "3个月后" # 补语义键 / 约定复核时间（到期会在会话里提醒）
 mem rename <旧id> <新id>                     # 安全改名（id + 文件名 + 引用一起改）
@@ -458,6 +468,41 @@ function readAll(L) {
 
 function findById(L, id) {
   return readAll(L).filter((e) => e.id === id);
+}
+
+/**
+ * **归档分类**（`category`）：条目**为什么进归档**的那一类 —— 面板里是「已归档」下面的第一层。
+ *
+ * 与 `topic` 的分工（这是本字段存在的唯一理由）：`topic` 是**通用**标签，在「已在用」里也用同一份，
+ * 而且是可选的、带层级的（`父/子`）；归档层需要的是"它属于哪一类退场"，与它原本讲什么话题无关。
+ * 把两件事挤进 `topic` 会让「已在用」的分组也被归档词污染（项目早期就这么干过一版，已回退）。
+ *
+ * 与 `status` 的关系：`status` 是**机器事实**（expired / superseded，validate 与取代链都靠它），
+ * `category` 是**人的归类**。默认由 status 推出来（不再适用→已过期、被取代→已蒸馏），
+ * 但**允许人改成别的**（比如把一条 superseded 归到「已过期」）—— 所以它是独立字段，不是派生。
+ */
+export const ARCHIVE_CATEGORY_DEFAULT = { expired: '已过期', superseded: '已蒸馏' };
+export const ARCHIVE_CATEGORY_OTHER = '其它退场';
+export const CATEGORY_MAX = 40;
+
+/**
+ * 归一化归档分类：空白/超长按读路径**降级**（不抛），只有写路径才严格。
+ * @param {{strict?: boolean}} [opts]
+ */
+export function normalizeCategory(value, { strict = false } = {}) {
+  if (value === null || value === undefined) return null;
+  const t = String(value).replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (strict && t.length > CATEGORY_MAX) throw new Error(`归档分类太长了（${t.length} 字，最多 ${CATEGORY_MAX}）`);
+  return t;
+}
+
+/** 一条归档条目**显示用**的分类：人写过的优先，没写就按 status 推。 */
+export function categoryOf(e) {
+  const own = normalizeCategory(e?.data?.category ?? e?.category ?? null);
+  if (own) return own;
+  const status = e?.data?.status ?? e?.status;
+  return ARCHIVE_CATEGORY_DEFAULT[status] || ARCHIVE_CATEGORY_OTHER;
 }
 
 function requireOne(L, id) {
@@ -1137,19 +1182,40 @@ export function archiveEntry(L, id, opts = {}) {
   if (status !== 'expired' && status !== 'superseded') {
     throw new Error(`归档状态只能是 expired 或 superseded（收到 ${status}）`);
   }
+  // 归档分类（面板「已归档」下的第一层）：没给就按 status 推默认；给了就用人的（严格校验长度）。
+  const category = normalizeCategory(opts.category, { strict: true }) || ARCHIVE_CATEGORY_DEFAULT[status] || ARCHIVE_CATEGORY_OTHER;
   // ⚠️ 给了 `--superseded-by` 就必须**双向**写链接（以前只写自己那一半）：
   // 否则 validate 会一直报「superseded_by=X，但对方没有 supersedes 这条」，而这是**用户按 help 敲的**
   // 正式用法（审计 2026-09-23：那条坏状态曾经连 --fix 都修不好）。
   if (opts.supersededBy) {
     const target = requireOneOrThrow(L, String(opts.supersededBy));
     applySupersedeLink(L, e, target); // 会把 e 标成 superseded + 给对方补 supersedes + 落盘对方
+    e.data.category = category;
+    fs.writeFileSync(e.file, serializeEntry(e), 'utf8'); // applySupersedeLink 已落过一次盘，这里补上分类
   } else {
     e.data.status = status;
+    e.data.category = category;
   }
   const dest = path.join(L.archive, `${e.id}.md`);
   moveEntry(e.file, dest, serializeEntry(e));
   writeIndex(L);
-  return { id: e.id, from: e.where, status: e.data.status, file: dest };
+  return { id: e.id, from: e.where, status: e.data.status, category: e.data.category, file: dest };
+}
+
+/**
+ * **改归档分类**（面板上「已归档 → 已蒸馏/已过期」那一层）。
+ *
+ * 只允许改**已经在归档里**的条目：分类是"为什么退场"的记录，常驻条目还没有这个问题
+ * （它们要退场时才会被问）。这样也避免它变成第二个 topic 字段。
+ */
+export function setArchiveCategory(L, id, category) {
+  const e = requireOneOrThrow(L, id);
+  if (e.where !== 'archive') throw new Error(`只有归档里的条目有"归档分类"（这条在 ${e.where}/）`);
+  const next = normalizeCategory(category, { strict: true });
+  if (!next) throw new Error('归档分类不能为空（想按退场原因自动分就把它清掉）');
+  e.data.category = next;
+  fs.writeFileSync(e.file, serializeEntry(e), 'utf8');
+  return { id: e.id, category: next, file: e.file };
 }
 
 /**
@@ -1230,14 +1296,14 @@ function cmdArchive(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
   const id = opts._[0];
-  if (!id) fail('用法：mem archive <id> [--superseded-by <新id>]\n  这条不再适用、又没有新版本顶上来时用；被新真相取代请用 mem supersede <旧> <新>');
+  if (!id) fail('用法：mem archive <id> [--superseded-by <新id>] [--category "已过期"]\n  这条不再适用、又没有新版本顶上来时用；被新真相取代请用 mem supersede <旧> <新>\n  --category = 面板「已归档」下的第一层分类（不给就按退场方式推默认）');
   let result;
   try {
-    result = archiveEntry(L, id, { supersededBy: opts['superseded-by'] });
+    result = archiveEntry(L, id, { supersededBy: opts['superseded-by'], category: opts.category });
   } catch (error) {
     fail(error.message);
   }
-  ok(`已归档 ${c(1, result.id)}：${result.from}/ → archive/（status=${result.status}）`);
+  ok(`已归档 ${c(1, result.id)}：${result.from}/ → archive/（status=${result.status}，分类「${result.category}」）`);
   console.log(dim('  它不再参与注入，但仍能被 mem recall / 面板搜索搜到；想捞回来：mem restore ' + result.id));
 }
 
@@ -1293,11 +1359,11 @@ function cmdSupersede(opts) {
   const root = resolveRoot(opts.root);
   ensureLayout(root, { create: false });
   const [oldId, newId] = opts._;
-  if (!oldId || !newId) fail('用法：mem supersede <旧id> <新id>');
-  cmdPromoteInternal(root, newId, oldId);
+  if (!oldId || !newId) fail('用法：mem supersede <旧id> <新id> [--category "已蒸馏"]');
+  cmdPromoteInternal(root, newId, oldId, { category: opts.category });
 }
 
-function cmdPromoteInternal(root, newId, oldId) {
+function cmdPromoteInternal(root, newId, oldId, opts = {}) {
   const L = ensureLayout(root, { create: false });
   const e = requireOne(L, newId);
   const old = requireOne(L, oldId);
@@ -1307,10 +1373,12 @@ function cmdPromoteInternal(root, newId, oldId) {
   } catch (error) {
     fail(error.message);
   }
+  // 归档分类：被取代的默认归「已蒸馏」（结论被新版本顶上）；`--category` 可覆盖
+  old.data.category = normalizeCategory(opts.category, { strict: true }) || ARCHIVE_CATEGORY_DEFAULT.superseded;
   const archived = path.join(L.archive, `${old.id}.md`);
   if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
   else moveEntry(old.file, archived, serializeEntry(old));
-  ok(`${oldId} → superseded by ${newId}（已归档）`);
+  ok(`${oldId} → superseded by ${newId}（已归档，分类「${old.data.category}」）`);
 }
 
 /**
@@ -1368,6 +1436,18 @@ function cmdSet(opts) {
       fail(error.message);
     }
     changed.push('topic');
+  }
+  if (opts.category !== undefined) {
+    // 归档分类（面板「已归档 → 已蒸馏/已过期」那一层）。只允许给**归档里**的条目设 ——
+    // 见 setArchiveCategory 的注释：常驻条目还没退场，不该有"为什么退场"的分类。
+    if (e.where !== 'archive') fail(`--category 只对归档里的条目有意义（${id} 在 ${e.where}/）—— 退场时才会问"为什么退场"`);
+    try {
+      e.data.category = normalizeCategory(opts.category === true ? '' : opts.category, { strict: true });
+      if (!e.data.category) fail('--category 不能为空（想按退场方式自动分就把它清掉：--category "" 目前不支持，请用 mem set --category "已过期"）');
+    } catch (error) {
+      fail(error.message);
+    }
+    changed.push('category');
   }
   if (opts.scope) {
     e.data.scope = String(opts.scope);
