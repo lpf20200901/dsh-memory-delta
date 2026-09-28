@@ -29,6 +29,7 @@
     "bin",
     "src",
     "client",
+    "docs",
     "cordis.patch.yml",
     "README.md"
   ],

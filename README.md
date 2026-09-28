@@ -14,6 +14,10 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
 > verified inside a real DSH session, and the later improvements are covered by 1096 assertions
 > plus a real-machine preflight. See [Verification](#verification).
+>
+> **Questions?** → [FAQ](docs/faq.md) — "is the whole memory re-sent on every turn?", "what happens when a
+> store goes over budget?", "archive vs withdraw vs supersede", "does this duplicate `AGENTS.md`?".
+> 中文版：[常见疑问](docs/faq.zh.md)。
 
 ## Why
 
