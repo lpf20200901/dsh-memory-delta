@@ -1153,10 +1153,15 @@ section('组件：归档分类（归档时选 + 事后改）');
   const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^✓?\s*已过期$/.test(allText(b).trim()));
   check('手动归档只给一个预设：「已过期」（默认选中）', presets.length === 1 && String(presets[0].props.className).includes('is-on'), allText(bar));
   check('「已蒸馏」**不是**手动归档的选项（它是取代/蒸馏的自动归类）', !allText(bar).includes('✓ 已蒸馏') && !findAllByClass(bar, 'dsh-memory-delta-mini').some((b) => allText(b).trim() === '已蒸馏'), allText(bar));
-  check('行内说明了「已蒸馏」从哪来', allText(bar).includes('取代') || allText(bar).includes('蒸馏'), allText(bar));
+  // 「已蒸馏从哪来」的说明搬到了归档按钮的 hover 说明里（确认条只留必要的一句，别挤成一坨）
+  const archBtn = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').find((b) => allText(b).trim() === '归档');
+  check('归档按钮的 hover 说明里讲清「已蒸馏」从哪来', /已蒸馏/.test(String(archBtn.props.title)) && /supersede/.test(String(archBtn.props.title)), String(archBtn.props.title));
   check('选中的那个**看得出被选中**（✓ + is-on + aria-pressed）', allText(presets[0]).trim().startsWith('✓') && presets[0].props['aria-pressed'] === 'true', `${allText(presets[0])} / ${presets[0].props['aria-pressed']}`);
   check('行内说明"现在会归到哪一类"', allText(bar).includes('→ 归到「已过期」'), allText(bar));
   check('可以自己写一个分类（输入框在）', findByClass(bar, 'dsh-memory-delta-topic').kids.some((k) => k.type === 'input'), 'input');
+  // 视觉：归档**不是**危险动作（能取回）→ 确认条不刷红（用户实测"一片红，难看而且不清晰"）
+  check('归档的确认条**不刷红**（红色留给删除这种不可逆动作）', !String(bar.props.className).includes('is-danger'), String(bar.props.className));
+  check('确认归档的按钮也不是红的', !String(findAllByClass(bar, 'dsh-memory-delta-mini').find((b) => allText(b).includes('确认归档')).props.className).includes('is-danger'), 'go');
   // 自己写 → 行内说明与发出的分类都跟着变
   const catInput = findAllByClass(bar, 'dsh-memory-delta-topic').flatMap((d) => d.kids).find((k) => k && k.type === 'input');
   catInput.props.onChange({ target: { value: '演示用分类' } });
@@ -1189,6 +1194,16 @@ section('组件：归档分类（归档时选 + 事后改）');
   await flush();
   const catCall = calls.find((c) => c.op === 'category');
   check('改分类发 op=category + 新分类', catCall?.id === 'a9' && catCall?.category === '已过期', JSON.stringify(catCall));
+
+  // ③ 删除候选（不可逆）—— 那一条**必须**是红的
+  const delBtn = findAllByClass(mounted.tree(), 'dsh-memory-delta-mini').find((b) => allText(b).trim() === '删除');
+  if (delBtn) {
+    delBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
+    const delBar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
+    check('删除候选的确认条**是红的**（不可逆动作才配红色）', String(delBar.props.className).includes('is-danger'), String(delBar.props.className));
+  } else {
+    check('（跳过）收件箱里没有候选可删', true, 'n/a');
+  }
   globalThis.fetch = originalFetch;
 }
 
@@ -1215,7 +1230,7 @@ section('组件：常驻条目的「归档」按钮');
   archiveBtn.props.onClick({ stopPropagation() {}, preventDefault() {} });
   check('归档也要先确认', calls.length === 0 && Boolean(findByClass(mounted.tree(), 'dsh-memory-delta-confirm')), JSON.stringify(calls));
   const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
-  check('确认文案区分"归档"与"取代"', allText(bar).includes('要归档这条？') && allText(bar).includes('supersede'), allText(bar));
+  check('确认文案区分"归档"与"取代"（贴在归档按钮的 hover 说明上）', /supersede/.test(String(findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini').find((b) => allText(b).trim() === '归档')?.props.title)), 'title');
   findAllByClass(bar, 'dsh-memory-delta-mini')
     .find((b) => allText(b).includes('确认归档'))
     .props.onClick({ stopPropagation() {}, preventDefault() {} });

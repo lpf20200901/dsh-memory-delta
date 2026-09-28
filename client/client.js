@@ -189,18 +189,30 @@ window.__ModuleLoader__.load({
   border-color: var(--dsw-alias-state-error-secondary, rgba(198,40,40,.45));
   color: var(--dsw-alias-state-error-primary, #c62828);
 }
+/* 危险动作的确认条（删除）。⚠️ 颜色**留给真正危险的**（remove）：
+   demote / restore / archive 都可逆（归档还能取回），一律刷红只会让人麻木、还难看。
+   ⚠️ 这段在模板字符串里 —— **注释里不能出现反引号**（会提前闭合 CSS 模板，实测踩过两次）。 */
 .dsh-memory-delta-confirm {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 5px;
   margin-top: 4px;
-  padding: 4px 6px;
+  padding: 6px 8px;
   border-radius: 6px;
-  border: 1px solid var(--dsw-alias-state-error-secondary, rgba(198,40,40,.35));
-  background: var(--dsw-alias-state-error-secondary, rgba(198,40,40,.08));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.45));
+  border-left-width: 3px;
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,.1));
 }
-.dsh-memory-delta-confirm-text { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+.dsh-memory-delta-confirm.is-danger {
+  border-color: var(--dsw-alias-state-error-secondary, rgba(198,40,40,.35));
+  border-left-width: 3px;
+  background: transparent;
+}
+.dsh-memory-delta-confirm-text { font-size: 11px; line-height: 1.5; }
+/* 动作按钮与"选分类"横向排一行，可换行；说明文字独占一行（别和按钮挤在一起） */
+.dsh-memory-delta-confirm-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.dsh-memory-delta-confirm-row > .dsh-memory-delta-topic { display: flex; gap: 4px; align-items: center; flex: 1 1 auto; }
+.dsh-memory-delta-confirm-tip { font-size: 10px; line-height: 1.4; }
 .dsh-memory-delta-seg { display: flex; gap: 4px; margin-left: auto; align-items: center; }
 .dsh-memory-delta-seg + .dsh-memory-delta-btn { margin-left: 6px; }
 .dsh-memory-delta-seg > button {
@@ -1234,7 +1246,8 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'dsh-memory-delta-mini',
             disabled: pendingId === e.id,
-            title: '归档：不再适用又没有替代 → 进 archive/（不再发给模型，仍能搜到，也能取回）',
+                    title: '归档后不再发给模型，但搜得到、也能「取回」。'
+                      + '若它其实是被新结论取代了，请用 mem supersede <旧> <新> 建立双向链接（那样会自动归到「已蒸馏」）',
             onClick: (ev) => {
               stop(ev);
               // 每次打开确认条都把分类**重置回默认**（上次给别人选过「已蒸馏」不该带到这一条）
@@ -1246,7 +1259,9 @@ window.__ModuleLoader__.load({
                       id: e.id,
                       op: 'archive',
                       label: '确认归档',
-                      hint: '归档后它不再发给模型，但仍能搜到、也能「取回」；有替代它的新结论请用 CLI 的 mem supersede 建立双向链接。',
+                      // 提示句尽量短：确认条里还要放"选分类"，长句子会把那一行挤乱。
+                      // 「有替代请用 supersede」这种进阶说明放按钮的 title（hover 才看）。
+                      hint: '归档后不再发给模型，但搜得到、也能取回。',
                     },
               );
             },
@@ -1306,38 +1321,18 @@ window.__ModuleLoader__.load({
         confirming && confirming.id === e.id
           ? h(
               'div',
-              { className: 'dsh-memory-delta-confirm', key: `${e.id}:confirm`, onClick: stop },
+              {
+                // ⚠️ 红色只给**真正危险**的动作（删除）：归档/撤回/取回都可逆，一律刷红会让人麻木、也难看
+                className: confirming.op === 'remove' ? 'dsh-memory-delta-confirm is-danger' : 'dsh-memory-delta-confirm',
+                key: `${e.id}:confirm`,
+                onClick: stop,
+              },
               h(
                 'span',
                 { className: 'dsh-memory-delta-confirm-text' },
                 `要${CONFIRM_VERB[confirming.op] || '执行'}这条？${confirming.hint}`,
               ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: confirming.op === 'remove' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
-                  disabled: pendingId === e.id,
-                  onClick: (ev) => {
-                    stop(ev);
-                    runConfirmed(confirming.op, e.id);
-                  },
-                },
-                pendingId === e.id ? '处理中…' : confirming.label,
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-memory-delta-mini',
-                  onClick: (ev) => {
-                    stop(ev);
-                    setConfirming(null);
-                  },
-                },
-                '取消',
-              ),
-              // 归档时**选分类**（「已归档」下的第一层）—— 用户在确认条里就定好，不用事后补
+              // 归档的分类选择**独占一行**（它是"这条归到哪一类"的输入，不是确认/取消那种按钮）
               confirming.op === 'archive'
                 ? h(
                     'div',
@@ -1349,7 +1344,6 @@ window.__ModuleLoader__.load({
                           type: 'button',
                           key: `cat:${cat}`,
                           className: archiveCategoryInput === cat ? 'dsh-memory-delta-mini is-on' : 'dsh-memory-delta-mini',
-                          // `aria-pressed` 是给读屏/自动化用的"当前选中"信号（视觉上靠 is-on + ✓）
                           'aria-pressed': archiveCategoryInput === cat ? 'true' : 'false',
                           title: `归档分类选「${cat}」`,
                           onClick: (ev) => {
@@ -1358,13 +1352,10 @@ window.__ModuleLoader__.load({
                           },
                         },
                         // ⚠️ 选中要**看得见**：光加 is-on 不够（那条样式原先只写给头部维度按钮，
-                        // 用户实测"选了看不出哪个"）—— 所以再加一个 ✓，颜色/字重之外还有符号表达。
+                        // 用户实测"选了看不出哪个"）—— 再加一个 ✓，颜色/字重之外还有符号表达。
                         archiveCategoryInput === cat ? `✓ ${cat}` : cat,
                       ),
                     ),
-                    // 行内说清"现在会归到哪一类"，自己写的分类也能立刻确认
-                    h('span', { className: 'dsh-memory-delta-dim', key: 'now' }, `→ 归到「${archiveCategoryInput || ARCHIVE_PRESET_CATEGORIES[0]}」`),
-                    h('span', { className: 'dsh-memory-delta-dim', key: 'hint' }, '（「已蒸馏」由「取代/蒸馏」自动落，不用手选）'),
                     h('input', {
                       value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
                       placeholder: '或自己写一个分类',
@@ -1374,6 +1365,43 @@ window.__ModuleLoader__.load({
                     }),
                   )
                 : null,
+              // 动作按钮一行；下面那行只说"会归到哪一类 / 已蒸馏从哪来"（说明不该和按钮抢地方）
+              h(
+                'div',
+                { className: 'dsh-memory-delta-confirm-row', key: 'row' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: confirming.op === 'remove' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
+                    disabled: pendingId === e.id,
+                    onClick: (ev) => {
+                      stop(ev);
+                      runConfirmed(confirming.op, e.id);
+                    },
+                  },
+                  pendingId === e.id ? '处理中…' : confirming.label,
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-memory-delta-mini',
+                    onClick: (ev) => {
+                      stop(ev);
+                      setConfirming(null);
+                    },
+                  },
+                  '取消',
+                ),
+                confirming.op === 'archive'
+                  ? h(
+                      'span',
+                      { className: 'dsh-memory-delta-dim dsh-memory-delta-confirm-tip', key: 'now' },
+                      `→ 归到「${archiveCategoryInput || ARCHIVE_PRESET_CATEGORIES[0]}」`,
+                    )
+                  : null,
+              ),
             )
           : null;
 
@@ -1660,7 +1688,8 @@ window.__ModuleLoader__.load({
         // 而界面上明明显示"已选 1 条"（2026-09-23 测试现场抓到）。
         const ids = activeSelection;
         const ok = ids.length > 0 && (!stage || ids.every((id) => layerOfId(id) === stage));
-        const danger = action === 'remove' || action === 'archive';
+        // 红色只给**不可逆**的动作（删除）。归档/撤回/取回都能回头，刷红只会让人麻木
+        const danger = action === 'remove';
         return h(
           'button',
           {
@@ -2512,7 +2541,8 @@ window.__ModuleLoader__.load({
                     {
                       type: 'button',
                       key: 'go',
-                      className: batch.action === 'remove' || batch.action === 'archive' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
+                      // 与单条一致：红色只给**不可逆**的删除（归档能取回、撤回能再提升）
+                      className: batch.action === 'remove' ? 'dsh-memory-delta-mini is-danger' : 'dsh-memory-delta-mini',
                       disabled: pendingId === '__batch__',
                       onClick: (ev) => {
                         stop(ev);
