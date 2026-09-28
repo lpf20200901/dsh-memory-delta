@@ -783,6 +783,16 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   const catStanding = run(['set', '--root', root, 'retire-me', '--category', '已过期']);
   check('对常驻条目设分类 → 拒绝（分类只回答"为什么退场"）', catStanding.code !== 0 && /只对归档里的条目有意义/.test(catStanding.out + catStanding.err), flat(catStanding.out + catStanding.err));
   check('加了 category 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+
+  // 「已蒸馏」是**取代/蒸馏**的自动归类，不是手动归档时挑的选项（用户 2026-09-23 定的语义）
+  run(['new', '--root', root, '--type', 'fact', '--key', 'old-one', '--conclusion', '旧结论', '--source', 's']);
+  run(['new', '--root', root, '--type', 'fact', '--key', 'new-one', '--conclusion', '新结论', '--source', 's']);
+  run(['promote', '--root', root, 'old-one']);
+  const sup = run(['promote', '--root', root, 'new-one', '--supersedes', 'old-one']);
+  check('promote --supersedes 成功', sup.code === 0, flat(sup.out + sup.err));
+  const oldRaw = fs.readFileSync(path.join(root, 'archive', 'old-one.md'), 'utf8');
+  check('被取代的条目**自动**落「已蒸馏」（不用人挑）', /^category: 已蒸馏$/m.test(oldRaw), oldRaw.split(/\r?\n/).slice(0, 12).join(' | '));
+  check('取代之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 }
 section('取回会清掉对方的悬挂引用（取代的**反向**操作必须双向）');
 {

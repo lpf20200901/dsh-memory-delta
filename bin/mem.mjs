@@ -142,9 +142,13 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 
 **归档之后还分"哪一类"**：每条归档条目有一个**归档分类**（frontmatter 的 \`category\`），
 面板里它是「已归档」下面的**第一层**：\`已归档 → 分类（已过期 / 已蒸馏 / 你自己起的）→ 小主题 → 条目\`。
-- 归档时可选：面板的确认条里有 \`已过期 / 已蒸馏\` 两个快捷项，也可以自己写一个；
-  CLI 是 \`mem archive <id> --category "已过期"\`。
-- **不给就按退场方式推默认**：不再适用 → \`已过期\`，被取代 → \`已蒸馏\`（旧条目没写这个字段的也这么显示）。
+- **人手动归档**：默认就是 \`已过期\`（面板确认条里选好，也可以自己写一个分类；
+  CLI 是 \`mem archive <id> --category "..."\`）。
+- \`已蒸馏\` **不是**手动归档时挑的选项 —— 它是"这条被新版本取代 / 结论已经搬进文档"的**自动归类**，
+  由 \`mem supersede <旧> <新>\`（或 \`mem archive --superseded-by\`、\`promote --supersedes\`）落下来。
+  （蒸馏是有实际动作的，不该靠人选一个标签来声称。）
+- 旧条目没写这个字段的，按 \`status\` 实时推出来（expired → 已过期、superseded → 已蒸馏），
+  所以面板上一样分得对。
 - 事后想改：面板上条目行的「分类」按钮，或 \`mem set <id> --category "..."\`（**只对归档里的条目有效** ——
   常驻条目还没退场，不该被问"为什么退场"）。
 - 它**不进注入、也不影响检索**，纯粹是"归档区怎么读"的归纳。
@@ -925,6 +929,9 @@ export function promoteEntry(L, id, opts = {}) {
   for (const oldId of raw) {
     const old = requireOneOrThrow(L, oldId);
     applySupersedeLink(L, old, e);
+    // 被取代 = 结论被新版本顶上（多半就是"蒸馏进了文档"）→ 归档分类自动落「已蒸馏」。
+    // 「已蒸馏」是这条自动归类，**不是**人在手动归档时挑的选项（面板的归档确认只给「已过期」+ 自写）。
+    old.data.category = ARCHIVE_CATEGORY_DEFAULT.superseded;
     const archived = path.join(L.archive, `${old.id}.md`);
     if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
     else moveEntry(old.file, archived, serializeEntry(old));

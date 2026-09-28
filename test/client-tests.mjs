@@ -1145,27 +1145,29 @@ section('组件：归档分类（归档时选 + 事后改）');
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
 
-  // ① 归档时选分类：确认条里给预设（默认「已过期」）+ 可自己写
+  // ① 归档时选分类：**默认「已过期」**（手动归档最常见的理由）+ 可自己写一个
+  //    ⚠️「已蒸馏」**不在**预设里 —— 那是"被取代/结论已搬进文档"的自动归类，由 mem supersede 落
   const btns = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini');
   btns.find((b) => allText(b).trim() === '归档').props.onClick({ stopPropagation() {}, preventDefault() {} });
   const bar = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
-  // 选中的那个带 ✓ 前缀 —— 用户实测"选了看不出哪个"，所以除了 is-on 还要有符号表达
-  const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^✓?\s*(已过期|已蒸馏)$/.test(allText(b).trim()));
-  check('归档确认条里能选分类（预设两个）', presets.length === 2, allText(bar));
-  check('默认选中「已过期」（不再适用是归档最常见的理由）', String(presets[0].props.className).includes('is-on') && allText(presets[0]).trim().endsWith('已过期'), `${allText(presets[0])} / ${presets[0].props.className}`);
-  check('选中的那个**看得出被选中**（✓ + is-on + aria-pressed）', allText(presets[0]).trim().startsWith('✓') && presets[0].props['aria-pressed'] === 'true' && presets[1].props['aria-pressed'] === 'false', `${allText(presets[0])} / ${JSON.stringify(presets.map((p) => p.props['aria-pressed']))}`);
+  const presets = findAllByClass(bar, 'dsh-memory-delta-mini').filter((b) => /^✓?\s*已过期$/.test(allText(b).trim()));
+  check('手动归档只给一个预设：「已过期」（默认选中）', presets.length === 1 && String(presets[0].props.className).includes('is-on'), allText(bar));
+  check('「已蒸馏」**不是**手动归档的选项（它是取代/蒸馏的自动归类）', !allText(bar).includes('✓ 已蒸馏') && !findAllByClass(bar, 'dsh-memory-delta-mini').some((b) => allText(b).trim() === '已蒸馏'), allText(bar));
+  check('行内说明了「已蒸馏」从哪来', allText(bar).includes('取代') || allText(bar).includes('蒸馏'), allText(bar));
+  check('选中的那个**看得出被选中**（✓ + is-on + aria-pressed）', allText(presets[0]).trim().startsWith('✓') && presets[0].props['aria-pressed'] === 'true', `${allText(presets[0])} / ${presets[0].props['aria-pressed']}`);
   check('行内说明"现在会归到哪一类"', allText(bar).includes('→ 归到「已过期」'), allText(bar));
-  presets.find((b) => allText(b).trim().endsWith('已蒸馏')).props.onClick({ stopPropagation() {}, preventDefault() {} });
+  check('可以自己写一个分类（输入框在）', findByClass(bar, 'dsh-memory-delta-topic').kids.some((k) => k.type === 'input'), 'input');
+  // 自己写 → 行内说明与发出的分类都跟着变
+  const catInput = findAllByClass(bar, 'dsh-memory-delta-topic').flatMap((d) => d.kids).find((k) => k && k.type === 'input');
+  catInput.props.onChange({ target: { value: '演示用分类' } });
   const bar2 = findByClass(mounted.tree(), 'dsh-memory-delta-confirm');
-  const after = findAllByClass(bar2, 'dsh-memory-delta-mini').filter((b) => /已过期|已蒸馏/.test(allText(b).trim()));
-  check('点了「已蒸馏」后勾跑到它上面', allText(after.find((b) => allText(b).includes('已蒸馏'))).trim().startsWith('✓') && !allText(after.find((b) => allText(b).includes('已过期'))).trim().startsWith('✓'), after.map((b) => allText(b).trim()).join(' | '));
-  check('行内说明跟着变', allText(bar2).includes('→ 归到「已蒸馏」'), allText(bar2));
+  check('自己写的分类会显示在"归到哪一类"里', allText(bar2).includes('→ 归到「演示用分类」'), allText(bar2));
   findAllByClass(findByClass(mounted.tree(), 'dsh-memory-delta-confirm'), 'dsh-memory-delta-mini')
     .find((b) => allText(b).includes('确认归档'))
     .props.onClick({ stopPropagation() {}, preventDefault() {} });
   await flush();
-  check('确认归档时把**选中的分类**一起发出去', calls[0]?.op === 'archive' && calls[0]?.category === '已蒸馏', JSON.stringify(calls[0]));
-  check('回执里说明归到哪一类', allText(mounted.tree()).includes('分类「已蒸馏」'), allText(mounted.tree()).slice(0, 200));
+  check('确认归档时把**选中的分类**一起发出去', calls[0]?.op === 'archive' && calls[0]?.category === '演示用分类', JSON.stringify(calls[0]));
+  check('回执里说明归到哪一类', allText(mounted.tree()).includes('分类「演示用分类」'), allText(mounted.tree()).slice(0, 200));
 
   // ② 归档条目行上有「分类」按钮 → 行内输入 → op=category
   openArchive(mounted);

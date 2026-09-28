@@ -562,8 +562,17 @@ window.__ModuleLoader__.load({
      */
     const ARCHIVE_CATEGORY_DEFAULT = { superseded: '已蒸馏', expired: '已过期' };
     const ARCHIVE_CATEGORY_OTHER = '其它退场';
-    /** 归档确认里给的**快捷分类**：默认第一项（已过期）—— "不再适用"是归档最常见的理由。 */
-    const ARCHIVE_PRESET_CATEGORIES = ['已过期', '已蒸馏'];
+    /**
+     * 手动归档时能选的**预设分类**。
+     *
+     * ⚠️ 刻意只有一个（用户 2026-09-23 定的）：「已蒸馏」**不是**手动归档时挑的选项 ——
+     * 它是"被取代 / 结论已经搬进文档"这件事的**自动归类**，由 `mem supersede`
+     * （或 `archive --superseded-by`）落下来。也就是说：
+     *   人手动归档 → 默认「已过期」，或自己写一个分类；
+     *   蒸馏 / 取代 → 由那条命令自动落「已蒸馏」。
+     * 把它也做成按钮会让人误以为"我可以声称这条已经蒸馏过了"，而蒸馏是有实际动作的。
+     */
+    const ARCHIVE_PRESET_CATEGORIES = ['已过期'];
 
     /**
      * 归档层的**分类 → 小主题 → 条目**三层（用户 2026-09-23 定的结构）：
@@ -1355,6 +1364,7 @@ window.__ModuleLoader__.load({
                     ),
                     // 行内说清"现在会归到哪一类"，自己写的分类也能立刻确认
                     h('span', { className: 'dsh-memory-delta-dim', key: 'now' }, `→ 归到「${archiveCategoryInput || ARCHIVE_PRESET_CATEGORIES[0]}」`),
+                    h('span', { className: 'dsh-memory-delta-dim', key: 'hint' }, '（「已蒸馏」由「取代/蒸馏」自动落，不用手选）'),
                     h('input', {
                       value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
                       placeholder: '或自己写一个分类',

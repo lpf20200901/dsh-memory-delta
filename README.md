@@ -175,8 +175,8 @@ and `allowWrite: false` turns the whole route off.
 Two defaults that keep the tab calm: **the archived stage is collapsed by default** (retired conclusions
 should not push the live entries out of view) and **the archive reads in three levels** —
 `archived → category → sub-topic → entries`. The category is *why it left* (the `category` field): pick it
-in the archive confirmation strip (`已过期` / `已蒸馏`, defaulting to 已过期, or type your own), it is derived
-from how the entry left when you do not pick one, and the row's 分类 button changes it later. The sub-topic is
+in the archive confirmation strip (manual archiving defaults to `已过期`, or type your own), while `已蒸馏`
+is set **automatically** when an entry is superseded / distilled into the docs, and the row's 分类 button changes it later. The sub-topic is
 the entry's original `topic` (optional, up to two levels). The archive still follows the header axis:
 switching to type / tag / date re-groups it too.
 Topics support **two levels**: write `parent/child` in the topic name (e.g. `DSH 插件开发/面板`) and the child
