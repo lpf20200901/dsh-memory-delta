@@ -2005,7 +2005,7 @@ section('组件：勾选残留与阶段判定（审计 P3）');
   globalThis.fetch = originalFetch;
 }
 
-section('组件：长路径截断（尾部才是可辨识的部分）');
+section('组件：条目行只显示文件名（不显示路径）—— 截图隐私 + 去噪');
 {
   const originalFetch = globalThis.fetch;
   const LONG = {
@@ -2026,10 +2026,18 @@ section('组件：长路径截断（尾部才是可辨识的部分）');
   const longItem = findByProp(mounted.tree(), 'key', 'long-path');
   const node = findAllByClass(longItem, 'dsh-memory-delta-file')[0];
   const shown = allText(node);
-  check('超长路径从开头截断（留尾部）', shown.startsWith('…') && shown.endsWith('name.md'), shown);
-  check('截断后的显示长度受控（不会把行撑爆）', shown.length <= 46, `${shown.length} 字符`);
-  check('截断的只是显示：title 仍是完整路径（不逼人去翻文件树）', String(node.props.title).endsWith('a-quite-long-generated-file-name.md') && String(node.props.title).startsWith('D:\\'), String(node.props.title));
-  check('未超长的路径原样显示（不无谓加省略号）', !allText(findAllByClass(findByProp(mounted.tree(), 'key', 'cand-1'), 'dsh-memory-delta-file')[0]).startsWith('…'), 'cand-1.md');
+  /**
+   * 用户 2026-09-29 让"用现在的面板换掉老截图"时发现的：条目行当时显示的是**路径尾巴**
+   * （`…-o23\ai\memory\decisions\openspec-attribution.md`）—— 而这张截图是要进公开仓库 / 市场页的。
+   * "库：D:\…"那一行我们早就特意裁掉了（截图脚本的 `--crop-local-path`），条目行却把路径漏了出去。
+   * 现在只显示**文件名**，完整路径留在 hover 的 title 里（点整行还能直接打开文件，信息没丢）。
+   */
+  check('只显示文件名', shown === '2026-09-23-a-quite-long-generated-file-name.md', shown);
+  check('行里**不含任何目录分隔符**（不泄露本地路径）', !shown.includes('\\') && !shown.includes('/'), shown);
+  check('完整路径仍在 hover 的 title 里（不逼人去翻文件树）', String(node.props.title) === 'D:\\idea2023\\ai\\workspace\\very-deep\\memory\\facts\\2026-09-23-a-quite-long-generated-file-name.md', String(node.props.title));
+  // 全局扫一遍：**所有**条目行的路径文字都不该带分隔符（别在别处又漏一个）
+  const allFileRows = findAllByClass(mounted.tree(), 'dsh-memory-delta-file').map((n) => allText(n));
+  check('整个面板里所有条目行都不带路径', allFileRows.length > 0 && allFileRows.every((s) => !s.includes('\\') && !s.includes('/')), allFileRows.join(' | '));
   globalThis.fetch = originalFetch;
 }
 

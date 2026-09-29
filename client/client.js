@@ -302,7 +302,12 @@ window.__ModuleLoader__.load({
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* 截断在 JS 里做（tailOf）：CSS 的 direction: rtl 会在 RTL 段落里按 bidi 规则重排数字开头的名字 */
+  /* 只显示**文件名**（不显示目录）：完整路径在 title（hover）里。
+     ⚠️ 别退回去显示路径尾巴：面板截图是要进公开仓库 / 市场页的，
+     路径会带出本地工作区根（实测新截图里是 …-o23\ai\memory\decisions\…），
+     而"库：D:\…"那一行我们早就特意裁掉了（--crop-local-path）—— 两处口径要一致。
+     也别用 CSS 的 direction: rtl 去截左边：RTL 段落里 bidi 会把数字开头的名字**重排**。
+     ⚠️ 这条注释本身也不能出现反引号 —— 整块 CSS 是一个模板字符串，出现反引号当场 SyntaxError。 */
   text-align: left;
 }
 .dsh-memory-delta-due {
@@ -638,16 +643,19 @@ window.__ModuleLoader__.load({
      */
 
     /**
-     * 长路径从**开头**截断，保留尾部（`D:\…\memory\archive\a-very-long-id.md`）。
+     * 只取路径里的**文件名**。
      *
-     * 为什么不用 CSS 的 `direction: rtl` 那套技巧：在 RTL 段落里，bidi 规则会把
-     * `2026-09-23-xxx` 这种数字开头的名字**重排**（行首的日期被搬到行尾），显示出来是错的名字。
-     * 所以在 JS 里按字符数截，`…` 手动补 —— 显示长度可控，也不受 bidi 影响。
+     * 为什么不在行里显示路径（哪怕只是尾部）：面板截图会进公开仓库与市场页，
+     * 路径会带出本地工作区根；而且行里已经有类型（事实/决策）和 id —— 目录那一段是纯噪音。
+     * 完整路径在 hover 的 `title` 里，点整行还能直接打开文件，所以信息一点没丢。
+     *
+     * ⚠️ 别用 CSS 的 `direction: rtl` 去"从左边截"：RTL 段落里 bidi 规则会把
+     * `2026-09-23-xxx` 这种数字开头的名字**重排**，显示出来是错的名字。
      */
-    const tailOf = (s, max = 46) => {
-      const str = String(s == null ? '' : s);
-      if (str.length <= max) return str;
-      return `…${str.slice(str.length - (max - 1))}`;
+    const baseName = (p) => {
+      const str = String(p == null ? '' : p);
+      const cut = Math.max(str.lastIndexOf('/'), str.lastIndexOf('\\'));
+      return cut >= 0 ? str.slice(cut + 1) : str;
     };
 
     /**
@@ -756,9 +764,8 @@ window.__ModuleLoader__.load({
         opts.showSnippet && e.snippet && e.snippet !== e.line
           ? h('div', { className: 'dsh-memory-delta-snippet', title: typeof e.score === 'number' ? `score ${e.score}` : undefined }, e.snippet)
           : null,
-        // 路径长时截**开头**（tailOf）而不是靠 CSS 的 ellipsis：尾部才是可辨识的 id/文件名。
-        // title 永远给完整路径 —— 截断只是显示层的事，别让人为了看全路径去翻文件树。
-        file ? h('div', { className: 'dsh-memory-delta-file', title: file }, tailOf(file)) : null,
+        // **只显示文件名**，完整路径放在 title（hover）—— 见 baseName 的注释（截图隐私 + 去噪）
+        file ? h('div', { className: 'dsh-memory-delta-file', title: file }, baseName(file)) : null,
         opts.extraRow || null,
       );
     }
