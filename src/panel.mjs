@@ -803,7 +803,7 @@ export function createActionRoute(opts = {}) {
             writeJson(res, 400, { ok: false, error: `一次最多处理 ${PANEL_BATCH_LIMIT} 条（收到 ${ids.length} 条）` });
             return;
           }
-          const r = applyBatch(L, ids, action, { topic: body?.topic });
+          const r = applyBatch(L, ids, action, { topic: body?.topic, category: body?.category });
           writeJson(res, 200, { ok: true, op, ...r });
           return;
         }

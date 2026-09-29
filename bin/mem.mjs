@@ -141,9 +141,12 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 | \`supersede <旧> <新>\` | 这条**错了/过时了**，有新的顶上 | → \`archive/\`（status=superseded） | 能：\`restore\`，或直接改新条目的 supersedes |
 
 **归档之后还分"哪一类"**：每条归档条目有一个**归档分类**（frontmatter 的 \`category\`），
-面板里它是「已归档」下面的**第一层**：\`已归档 → 分类（已过期 / 已蒸馏 / 你自己起的）→ 小主题 → 条目\`。
+面板里它是「已归档」下面的**第一层**：\`已归档 → 分类 → 主题 → 条目\`。
+- 分类默认有**两个**（一直显示，空的就报 0 条）：\`已过期\`、\`已蒸馏\`；**你自己写的分类**是第三种。
+- 分类下面的**主题行**就是这条记忆原本的 \`topic\`；**点开主题才列出条目**
+  （归档区先给你一张目录，不会一上来倒几十条）。没写主题的条目直接列在分类下。
 - **人手动归档**：默认就是 \`已过期\`（面板确认条里选好，也可以自己写一个分类；
-  CLI 是 \`mem archive <id> --category "..."\`）。
+  **批量归档**的确认条里同样能选/新建分类）。CLI 是 \`mem archive <id> --category "..."\`。
 - \`已蒸馏\` **不是**手动归档时挑的选项 —— 它是"这条被新版本取代 / 结论已经搬进文档"的**自动归类**，
   由 \`mem supersede <旧> <新>\`（或 \`mem archive --superseded-by\`、\`promote --supersedes\`）落下来。
   （蒸馏是有实际动作的，不该靠人选一个标签来声称。）
@@ -477,8 +480,8 @@ function findById(L, id) {
 /**
  * **归档分类**（`category`）：条目**为什么进归档**的那一类 —— 面板里是「已归档」下面的第一层。
  *
- * 与 `topic` 的分工（这是本字段存在的唯一理由）：`topic` 是**通用**标签，在「已在用」里也用同一份，
- * 而且是可选的、带层级的（`父/子`）；归档层需要的是"它属于哪一类退场"，与它原本讲什么话题无关。
+ * 与 `topic` 的分工（这是本字段存在的唯一理由）：`topic` 是**通用**标签，在「已在用」里也用同一份；
+ * 归档层需要的是"它属于哪一类退场"，与它原本讲什么话题无关。
  * 把两件事挤进 `topic` 会让「已在用」的分组也被归档词污染（项目早期就这么干过一版，已回退）。
  *
  * 与 `status` 的关系：`status` 是**机器事实**（expired / superseded，validate 与取代链都靠它），
@@ -1085,6 +1088,8 @@ export function renameTopic(L, from, to) {
  *
  * @param {string[]} ids
  * @param {'promote'|'demote'|'archive'|'restore'|'remove'|'topic'} action
+ * @param {{topic?: string, status?: string, category?: string}} [opts]
+ *   `topic` 给 `topic` 用；`category` 给 `archive` 用（归档到哪一类，等于单条 `mem archive --category`）。
  * @returns {{action: string, total: number, succeeded: string[], failed: Array<{id: string, error: string}>}}
  */
 export function applyBatch(L, ids, action, opts = {}) {
@@ -1095,7 +1100,7 @@ export function applyBatch(L, ids, action, opts = {}) {
     try {
       if (action === 'promote') promoteEntry(L, id, { supersedes: opts.supersedes });
       else if (action === 'demote') demoteEntry(L, id);
-      else if (action === 'archive') archiveEntry(L, id, { status: opts.status });
+      else if (action === 'archive') archiveEntry(L, id, { status: opts.status, category: opts.category });
       else if (action === 'restore') restoreEntry(L, id);
       else if (action === 'remove') removeEntry(L, id);
       else if (action === 'topic') setTopicEntry(L, id, opts.topic, { index: false });

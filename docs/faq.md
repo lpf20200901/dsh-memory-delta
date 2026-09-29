@@ -69,6 +69,26 @@ kept from growing without bound.
 **Archive ≠ delete.** `mem recall` and the sidebar search still find archived entries; they are simply no
 longer sent to the model every session.
 
+### Q: What are all those categories and topics in the archived stage?
+
+The archived stage reads in three levels:
+
+```
+archived
+  已过期 (20)        ← category: why it left. Two are always present (已过期 / 已蒸馏; an empty one shows 0)
+    · gitignore-…    ← entries with no topic are listed right under the category
+    DSH 插件开发 (6)  ← topic rows: click one to reveal its entries
+    开源与发布 (5)
+  已蒸馏 (20)        ← superseded / distilled into the docs (set automatically, not hand-picked)
+```
+
+- **Category** (the `category` field) is *why it left*. `已过期` and `已蒸馏` are the two defaults; when
+  archiving (single or batch) you can pick an existing one or **type a new one**.
+- **Topic rows** are the entry's own `topic`. **Click one to see its entries** — the archive gives you a
+  table of contents first instead of dumping dozens of rows. Topics have **one level**: same name, same group
+  (a `/` inside a name is just an ordinary character — no parent/child splitting any more).
+- To move an entry: the 分类 button on its row, or `mem set <id> --category "…"`.
+
 ### Q: Why can only candidates be deleted?
 
 A standing entry has probably been injected and referenced by other entries. Deleting it makes it vanish for

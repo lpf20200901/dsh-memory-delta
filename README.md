@@ -174,13 +174,14 @@ candidate / safe rename / assign topic / rename topic / batch) — there is no g
 and `allowWrite: false` turns the whole route off.
 Two defaults that keep the tab calm: **the archived stage is collapsed by default** (retired conclusions
 should not push the live entries out of view) and **the archive reads in three levels** —
-`archived → category → sub-topic → entries`. The category is *why it left* (the `category` field): pick it
-in the archive confirmation strip (manual archiving defaults to `已过期`, or type your own), while `已蒸馏`
-is set **automatically** when an entry is superseded / distilled into the docs, and the row's 分类 button changes it later. The sub-topic is
-the entry's original `topic` (optional, up to two levels). The archive still follows the header axis:
-switching to type / tag / date re-groups it too.
-Topics support **two levels**: write `parent/child` in the topic name (e.g. `DSH 插件开发/面板`) and the child
-nests under the parent; no separator means one level, so existing entries need no migration.</sub>
+`archived → category → topic → entries`. The category is *why it left* (the `category` field). Two of them
+are always there — `已过期` and `已蒸馏` (an empty one still shows, with `0`) — and archiving lets you type a
+new one (single or batch). `已蒸馏` is set **automatically** when an entry is superseded / distilled into the
+docs, and the row's 分类 button changes it later. Below a category, **topic rows** (the entry's own `topic`)
+are **collapsed — click one to see its entries**; entries without a topic are listed right under the category.
+The archive still follows the header axis: switching to type / tag / date re-groups it too.
+Topics have **one level**: the topic name is just a string (same name = same group; a `/` in it is an ordinary
+character). Earlier versions split `parent/child` into two levels — that was dropped in favour of the simpler model.</sub>
 
 ## CLI usage
 

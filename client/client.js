@@ -109,14 +109,14 @@ window.__ModuleLoader__.load({
    之前用原生 <details> 又隐藏了 ::-webkit-details-marker，结果**没有任何可展开的标志**
    —— 用户根本不知道能点。现在自绘箭头（CSS 三角），展开时旋转 90°。 */
 .dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 6px; }
-/* 子主题：缩进一格 + 左侧竖线 + **小一号字**，一眼看出它挂在上面那个父分组下面。
+/* 二级分组（归档层里的主题行）：缩进一格 + 左侧竖线 + **小一号字**，一眼看出它挂在上面那个分类下面。
    层级靠位置与样式表达，**不靠重复父名**（用户 2026-09-23 反馈："已过期 下面一堆 已过期>…"很违和）。 */
 .dsh-memory-delta-section.is-child { margin-left: 12px; padding-left: 8px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28)); }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-hint { display: none; }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-count { font-size: 10px; }
 /* 归档层的分类头（已过期 / 已蒸馏 / 你自己写的）是**容器**：它体内挂着若干小主题。
-   条数报的是**整类**（含小主题里的），所以给它比子主题更重的标题 —— 一眼分出"大类"和"小类"。
+   条数报的是**整类**（含主题里的），所以给它比主题行更重的标题 —— 一眼分出"大类"和"小类"。
    ⚠️ CSS 注释里不能出现反引号（模板字符串会当场 SyntaxError）。 */
 .dsh-memory-delta-section.is-category > .dsh-memory-delta-section-head .dsh-memory-delta-section-title { font-weight: 700; }
 /* 容器体内的小主题：缩进与竖线由容器体提供，自己不再叠一层；小节之间的横线也去掉（靠间距分） */
@@ -612,20 +612,15 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * **子主题**：主题名里带分隔符就是两级（`DSH 插件开发/面板` → 父 `DSH 插件开发` + 子 `面板`）。
+     * 主题**只有一级**（2026-09-29 用户决定撤掉两级）。
      *
-     * 为什么用"约定分隔符"而不是加一个字段：主题是**人**手填的字符串（CLI `--topic` / 面板归类），
-     * 加字段就要同时改存储、CLI、面板、迁移脚本四处；而分隔符只影响**显示**，
-     * 旧数据（不带分隔符）自动就是"只有一级" —— 零迁移、零兼容负担。
+     * 曾经试过"主题名里带分隔符就是两级"（`DSH 插件开发/面板` → 父 + 子），零迁移、
+     * 不加字段的好处是真的，但**代价在界面**：父分组要不要出、条数算不算子级、
+     * 分组头位置在真实数据上反复踩坑（用户原话"两级主题 bug 有点多，还是换回一级主题吧"）。
+     * 现在的模型最简单也最不会错：**主题名就是一个字符串**，同名就是一组。
+     * 名字里真带了 `/` 也只是普通字符（老库里这么写过的，会原样显示成一个主题名，
+     * 用「改主题名」批量改掉即可）。
      */
-    const TOPIC_SEP = /[\/／›]/;
-    const splitTopic = (topic) => {
-      const t = typeof topic === 'string' ? topic.trim() : '';
-      if (!t) return { parent: null, child: null };
-      const parts = t.split(TOPIC_SEP).map((s) => s.trim()).filter(Boolean);
-      if (parts.length <= 1) return { parent: parts[0] ?? t, child: null };
-      return { parent: parts[0], child: parts.slice(1).join(' / ') };
-    };
 
     /**
      * 长路径从**开头**截断，保留尾部（`D:\…\memory\archive\a-very-long-id.md`）。
@@ -648,7 +643,7 @@ window.__ModuleLoader__.load({
      *
      * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, className, titleAttr }`
      *   `slug` 是磁盘上的文件夹名（facts / decisions / inbox）；没有对应目录的分组传 null。
-     *   `titleAttr` 是 hover 提示（子主题用它补全 `父 › 子`，而标题本身只显示子名）。
+     *   `titleAttr` 是 hover 提示（归档层的主题行用它补全 `分类 › 主题`，而标题本身只显示主题名）。
      */
     function section(spec, children) {
       const { key, title, slug, count, hint, open, onToggle, className, titleAttr } = spec;
@@ -886,8 +881,18 @@ window.__ModuleLoader__.load({
        * （而且 `pendingId` 只有一个槽位，`batch`/`topic` 互相同住一个变量，更容易串）。
        */
       const clearPending = () => setPendingId(null);
-      const toggleSection = (key) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
-      const isOpen = (key) => !collapsed[key];
+      /**
+       * 折叠状态。默认值**不是全局一致的**：阶段头（全局规范 / 已归档）与归档层的**主题行**
+       * 默认收起，其余（分类头、其下条目、主题/类型/标签/日期各分组）默认展开。
+       *
+       * ⚠️ 所以取反必须按**当前有效状态**来算，不能写 `!prev[key]` ——
+       * 默认收起的分组 `prev[key]` 是 `undefined`，`!undefined === true` 只会再置成"收起"，
+       * 于是点了没反应。`fallbackOpen` 由调用方（`renderGroup`）按分组自己的默认值给。
+       */
+      const toggleSection = (key, fallbackOpen = true) =>
+        setCollapsed((prev) => ({ ...prev, [key]: isOpen(key, fallbackOpen) }));
+      const isOpen = (key, fallbackOpen = true) =>
+        collapsed[key] === undefined ? fallbackOpen : !collapsed[key];
 
       const hostCtx = props.hostCtx || props.ctx || null;
 
@@ -1368,7 +1373,9 @@ window.__ModuleLoader__.load({
                     ),
                     h('input', {
                       value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
-                      placeholder: '或自己写一个分类',
+                      // 候选 = 库里**已经用过**的分类（含你自建的）—— 直接选现成的，或写一个新的
+                      list: 'dsh-memory-delta-category-options',
+                      placeholder: '或选/写一个分类（新的就是新建）',
                       'aria-label': '归档分类',
                       onChange: (ev) => setArchiveCategoryInput(ev && ev.target ? ev.target.value : ''),
                       onKeyDown: (ev) => halt(ev),
@@ -1765,7 +1772,7 @@ window.__ModuleLoader__.load({
           // 是「已蒸馏」/「已过期」+ 你自建的主题，见 `archiveTopicOf`。
           h(
             'button',
-            { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳：没归类的落在「未归类」；主题名里写 `父/子` 就是两级。归档层默认落在「已蒸馏」/「已过期」，也可以自己归类到别的主题）' },
+            { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳：没归类的落在「未归类」。归档层先按分类分，分类下面是主题行，点开才见条目）' },
             '主题',
           ),
           h(
@@ -2036,58 +2043,59 @@ window.__ModuleLoader__.load({
        */
       const subGroups = (list, dimension, layer) => {
         if (dimension === 'topic') {
-          // **两级主题**：父主题（`DSH 插件开发`）下面挂子主题（`面板`）。
-          // 没写分隔符的主题直接就是"只有一级"，不额外包一层（避免给老数据加噪音层级）。
-          const byParent = new Map();
+          /**
+           * **主题只有一级**：同名就是一组。
+           *
+           * 这里曾经有一整套"父/子两级主题"（按 `父/子` 拆、父分组再挂子分组）——
+           * 撤掉了（用户 2026-09-29："两级主题 bug 有点多"）。理由不是做不到，而是
+           * **层级要花在刀刃上**：归档层已经有"分类 → 主题 → 条目"三层，
+           * 主题自己再套一层就有四级，分组头该报谁、该收谁全变成判断题。
+           */
+          const byTopic = new Map();
           for (const e of list) {
-            const { parent, child } = splitTopic(e.topic);
-            const p = parent || NO_TOPIC;
-            if (!byParent.has(p)) byParent.set(p, []);
-            byParent.get(p).push({ e, child });
+            const t = typeof e.topic === 'string' && e.topic.trim() ? e.topic.trim() : NO_TOPIC;
+            if (!byTopic.has(t)) byTopic.set(t, []);
+            byTopic.get(t).push(e);
           }
-          const named = [...byParent.entries()].filter(([k]) => k !== NO_TOPIC);
+          const named = [...byTopic.entries()].filter(([k]) => k !== NO_TOPIC);
           named.sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
-          const out = [];
-          for (const [p, items] of named) {
-            const children = [...new Set(items.map((i) => i.child).filter(Boolean))].sort();
-            if (children.length === 0) {
-              // 父主题自身没有子主题 → 就是一条普通分组（老数据走这条）
-              out.push({ key: p, title: p, hint: '按主题（你指定的归纳）', list: items.map((i) => i.e) });
-              continue;
-            }
-            // 有子主题：父主题**始终**出一条分组（装"没再分小主题"的那部分），
-            // 子主题再跟在后面 —— 这样"父主题"这一层的条数（含子）在分组头上看得出来，
-            // 而点父主题能拿到它自己那几条。父组没有自己的条目时不占位置。
-            const noChild = items.filter((i) => !i.child).map((i) => i.e);
-            if (noChild.length) out.push({ key: p, title: p, hint: '这个主题下没再分小主题的条目', list: noChild });
-            for (const c of children) {
-              const sub = items.filter((i) => i.child === c).map((i) => i.e);
-              out.push({ key: `${p}/${c}`, title: c, parent: p, hint: '子主题', list: sub });
-            }
-          }
-          const missing = byParent.get(NO_TOPIC);
+          const out = named.map(([t, items]) => ({ key: t, title: t, hint: '按主题（你指定的归纳）', list: items }));
+          const missing = byTopic.get(NO_TOPIC);
           if (missing) {
             out.push({
               key: NO_TOPIC,
               title: '未归类',
-              hint: '还没归纳 · 在条目上点「归类」填一个主题名；想要两级就写 `父主题/子主题`',
-              list: missing.map((i) => i.e),
+              hint: '还没归纳 · 在条目上点「归类」填一个主题名',
+              list: missing,
             });
           }
           return out;
         }
         if (dimension === 'archive') {
-          // **归档层的三层结构**（分类 → 小主题 → 条目）：
-          //   分类 = `category`（人写的）或按 status 推的默认（已蒸馏 / 已过期）
-          //   小主题 = 这条记忆原本的 `topic`（可选，支持 `父/子` 两级）
-          // 分类这一层**始终出分组头**（哪怕只有一类），否则用户看不到"这条为什么在这"；
-          // 小主题只在确实分了类时才出，避免每条都套一层空壳。
+          /**
+           * **归档层的三层结构**（分类 → 主题 → 条目）：
+           *   分类 = `category`（人写的）或按 status 推的默认（已蒸馏 / 已过期）
+           *   主题 = 这条记忆原本的 `topic`（可选，**一级**；没有主题的条目直接列在分类下）
+           *
+           * 分类这一层**始终出分组头**（哪怕这一类只有 0 条），否则用户看不到"这条为什么在这"。
+           */
           const byCategory = new Map();
           for (const e of list) {
             const cat = archiveCategoryOf(e);
             if (!byCategory.has(cat)) byCategory.set(cat, []);
             byCategory.get(cat).push(e);
           }
+          /**
+           * ⚠️ 两个**默认分类**永远在（用户 2026-09-29 定："空的就是 0 条"，不许消失）。
+           *
+           * 踩过的坑：以前"分类下没有直接条目就不出分类头" → 20 条全在主题里的「已蒸馏」
+           * 整块从界面上消失（用户原话"已蒸馏没了"）。分类是**容器**，
+           * 它的存在与否由"库里有没有这类退场"决定，不是由"有没有直接挂在它下面的条目"决定。
+           */
+          for (const dflt of Object.values(ARCHIVE_CATEGORY_DEFAULT)) {
+            if (!byCategory.has(dflt)) byCategory.set(dflt, []);
+          }
+          // 条数多的在前；两个默认分类条数相同时按名字排（保证顺序稳定，测试也钉得住）
           const cats = [...byCategory.entries()].sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
           const out = [];
           for (const [cat, items] of cats) {
@@ -2097,22 +2105,15 @@ window.__ModuleLoader__.load({
                 : cat === ARCHIVE_CATEGORY_DEFAULT.expired
                   ? '不再适用又没有替代 —— 结论作废，原因写在条目正文里'
                   : '你给的归档分类';
-            /**
-             * ⚠️ 分类头**无条件出现**，而且 `count` 报的是**这一类总共多少条**（含下面小主题里的）。
-             *
-             * 踩过的坑（用户 2026-09-23 实测）：以前"分类下没有直接条目就不出分类头" →
-             * 20 条全在子主题里的「已蒸馏」**连分组头都没有**（看着像整类消失），
-             * 而「已过期」的头只数了自己那 1 条直接条目（看着像"只有一条"）。
-             * 一个分类是**容器**，不是"直接挂在它下面的那几条"。
-             */
             out.push({
               key: cat,
               title: cat,
               hint,
+              // `count` 报的是**这一类总共多少条**（含下面主题里的）
               count: items.length,
               isCategory: true,
-              // `list` = 直接挂在分类下的条目（没写 topic 的那些）；
-              // `all` = 这一类**全部**条目 ——「选本组」要选的是整类，不是光那几条没归小主题的
+              // `list` = 直接挂在分类下的条目（没写主题的那些）；
+              // `all` = 这一类**全部**条目 ——「选本组」要选的是整类，不是光那几条没归主题的
               list: items.filter((e) => !(typeof e.topic === 'string' && e.topic.trim())),
               all: items,
             });
@@ -2124,7 +2125,9 @@ window.__ModuleLoader__.load({
               topicMap.get(t).push(e);
             }
             for (const [t, sub] of [...topicMap.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
-              out.push({ key: `${cat}\u0000${t}`, title: t, parent: cat, hint: `「${cat}」下的小主题`, list: sub });
+              // 主题行**默认收起**（用户 2026-09-29 定："点击主题打开才能看到记忆列表"）——
+              // 归档区是"翻旧账"的地方，先给你一张目录，别一上来倒 20 条
+              out.push({ key: `${cat}\u0000${t}`, title: t, parent: cat, hint: `「${cat}」下的主题`, nested: true, collapsedByDefault: true, list: sub });
             }
           }
           return out;
@@ -2283,49 +2286,50 @@ window.__ModuleLoader__.load({
             // 勾选：三个阶段都能选，批量条按"选中的条目属于哪个阶段"决定按钮可用性
             select: { checked: isSelected(e.id), onToggle: () => toggleSelected(e.id) },
           });
-        /** 一个分组 → 一个小节；`extra` 是插在条目后面的东西（归档层用它挂小主题）。 */
+        /** 一个分组 → 一个小节；`extra` 是插在条目后面的东西（归档层用它挂主题行）。 */
         const renderGroup = (g, extra = []) => {
-          // 子主题的 key 要带父主题前缀（不然 `面板` 这种子主题名会在别的父主题下撞 key，
+          // 主题行的 key 要带分类前缀（不然 `面板` 这种主题名会在别的分类下撞 key，
           // 折叠状态是**按 key 存的**，撞了就会一起开合）
           const key = g.parent ? `${layer}:${dimension}:${g.parent}/${g.title}` : `${layer}:${dimension}:${g.key}`;
+          const openByDefault = g.collapsedByDefault !== true;
           const note = dimension === 'type' && layer === 'standing' && g.key === 'facts'
             ? '换个环境或换个版本，它可能就不成立了 —— 所以写清"什么情况下适用"最有价值。'
             : dimension === 'type' && layer === 'standing' && g.key === 'decisions'
               ? '业务/流程/口味上的决定：只有你改主意才会变 —— 记下"为什么这么定"，我就不会再问第二遍。'
               : null;
+          // 空分组（刚被清空的默认分类）不出工具条 ——「选本组 0 条」「搜这组」点了都没意义
+          const bar = (g.all ?? g.list).length ? [groupBar(layer, dimension, g)] : [];
           return section(
             {
               key,
-              // ⚠️ 子主题**只显示自己的名字**，不再拼 `父 › 子`（用户反馈："已过期 下面一堆 已过期>…"很违和）。
-              // 层级已经由缩进 + 左侧竖线 + 更小的字号表达了，把父名再重复一遍纯属噪音。
-              // 父名仍然在 `title`（hover）与 `key`（折叠状态）里 —— 信息没丢，只是不占版面。
               title: g.title,
               slug: g.slug ?? null,
-              // 容器的条数是**整类**（含小主题里的），不是"直接挂在它下面的那几条" —— 见 subGroups 里的注释
+              // 容器的条数是**整类**（含主题里的），不是"直接挂在它下面的那几条" —— 见 subGroups 里的注释
               count: g.count ?? g.list.length,
               hint: g.hint,
-              // 子主题缩进一格 + 小一号字（样式在 CSS 的 `.is-child`）；分类头是内容器（`.is-category`）
-              // ⚠️ **挂在容器体内**的子主题（`is-nested`）**不再自己缩进** —— 容器体本身已经给了缩进
+              // 主题行缩进一格 + 小一号字（`.is-child`）；分类头是容器（`.is-category`）。
+              // ⚠️ **挂在容器体内**的主题行（`is-nested`）**不再自己缩进** —— 容器体本身已经给了缩进
               // 与左侧竖线，再叠一层会把条目挤到窄侧栏的边缘（条目文字只剩几十像素）。
               className: g.parent
                 ? g.nested ? 'is-child is-nested' : 'is-child'
                 : g.isCategory ? 'is-category' : undefined,
+              // hover 里给全路径（标题只写自己的名字，层级靠缩进表达）
               titleAttr: g.parent ? `${g.parent} › ${g.title}` : undefined,
-              open: isOpen(key),
-              onToggle: () => toggleSection(key),
+              open: isOpen(key, openByDefault),
+              onToggle: () => toggleSection(key, openByDefault),
             },
-            [groupBar(layer, dimension, g)]
+            bar
               .concat(note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : [])
               .concat(byDateDesc(g.list).map(rowOf))
               .concat(extra),
           );
         };
         /**
-         * ⚠️ **归档层是"容器 + 体内挂小主题"**，不是一排平级的分组头。
+         * ⚠️ **归档层是"容器 + 体内挂主题行"**，不是一排平级的分组头。
          *
-         * 踩过的坑（用户 2026-09-23 实测）：小主题以前跟分类头**平级**排在后面，
-         * 于是"已过期"和"已蒸馏"各带一串小主题混在一起，看不出谁挂在谁下面；
-         * 改成嵌套之后，分类头一收起，整类（连同它的小主题）一起收。
+         * 踩过的坑（用户 2026-09-23 实测）：主题以前跟分类头**平级**排在后面，
+         * 于是"已过期"和"已蒸馏"各带一串主题混在一起，看不出谁挂在谁下面；
+         * 改成嵌套之后，分类头一收起，整类（连同它的主题行）一起收。
          */
         const containers = new Set(groups.filter((g) => g.isCategory).map((g) => g.key));
         return groups
@@ -2580,9 +2584,45 @@ window.__ModuleLoader__.load({
       const batchBar = activeSelection.length
         ? (() => {
             const batch = confirming && confirming.batch ? confirming.batch : null;
+            /**
+             * 批量归档也要能选分类（用户 2026-09-29："归档时也可创建新的分组"）。
+             * 以前批量那条路**没有**分类入口，于是"一次勾 10 条归档"全落进默认的「已过期」，
+             * 想按类放还得一条条再点「分类」—— 与单条能力不对等。
+             */
+            const catRow = (key) =>
+              h(
+                'div',
+                { className: 'dsh-memory-delta-topic', key },
+                ...ARCHIVE_PRESET_CATEGORIES.map((cat) =>
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      key: `cat:${cat}`,
+                      className: archiveCategoryInput === cat ? 'dsh-memory-delta-mini is-on' : 'dsh-memory-delta-mini',
+                      'aria-pressed': archiveCategoryInput === cat ? 'true' : 'false',
+                      title: `归档分类选「${cat}」`,
+                      onClick: (ev) => {
+                        stop(ev);
+                        setArchiveCategoryInput(cat);
+                      },
+                    },
+                    archiveCategoryInput === cat ? `✓ ${cat}` : cat,
+                  ),
+                ),
+                h('input', {
+                  value: archiveCategoryInput && !ARCHIVE_PRESET_CATEGORIES.includes(archiveCategoryInput) ? archiveCategoryInput : '',
+                  list: 'dsh-memory-delta-category-options',
+                  placeholder: '或选/写一个分类（新的就是新建）',
+                  'aria-label': '批量归档分类',
+                  onChange: (ev) => setArchiveCategoryInput(ev && ev.target ? ev.target.value : ''),
+                  onKeyDown: (ev) => halt(ev),
+                }),
+              );
             const inner = batch
               ? [
                   h('span', { className: 'dsh-memory-delta-confirm-text', key: 'ask' }, `要批量${BATCH_VERB[batch.action] || batch.action}这 ${batch.ids.length} 条？${batch.hint || ''}`),
+                  batch.action === 'archive' ? catRow('cat') : null,
                   h(
                     'button',
                     {
@@ -2593,11 +2633,19 @@ window.__ModuleLoader__.load({
                       disabled: pendingId === '__batch__',
                       onClick: (ev) => {
                         stop(ev);
-                        runBatch(batch.action, batch.ids, batch.extra);
+                        // 批量归档时把选好的分类带上（与单条归档同一条语义）
+                        runBatch(batch.action, batch.ids, batch.action === 'archive' ? { ...(batch.extra || {}), category: archiveCategoryInput } : batch.extra);
                       },
                     },
                     `确认${BATCH_VERB[batch.action] || ''} ${batch.ids.length} 条`,
                   ),
+                  batch.action === 'archive'
+                    ? h(
+                        'span',
+                        { className: 'dsh-memory-delta-dim dsh-memory-delta-confirm-tip', key: 'now' },
+                        `→ 全归到「${archiveCategoryInput || ARCHIVE_PRESET_CATEGORIES[0]}」`,
+                      )
+                    : null,
                   h(
                     'button',
                     { type: 'button', key: 'cancel', className: 'dsh-memory-delta-mini', onClick: (ev) => { stop(ev); setConfirming(null); } },
