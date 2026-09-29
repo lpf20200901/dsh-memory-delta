@@ -2008,7 +2008,25 @@ window.__ModuleLoader__.load({
         ),
       ].sort((a, b) => a.localeCompare(b));
 
-      /** 库里已经用过的归档分类（给「分类」输入做候选；默认那两个由常量补上）。 */
+      /**
+       * 「归档分类」输入框的候选。
+       *
+       * ⚠️ 只给**能手动选的两个**：`已废弃` / `暂时不用` —— 加上用户**自己建过**的分类。
+       * 绝不列这三个（用户 2026-09-29 反馈"可选的归档分组里有已过期等，只保留已废弃和暂时不用"）：
+       *   · `已蒸馏`   —— 那是"被取代 / 结论搬进文档"的**自动归类**，由 mem supersede 落，
+       *                   列出来等于让人以为"我可以自己声称蒸馏过了"（旧版本就是这么误导的）；
+       *   · `已过期`   —— v1.2.x 的旧默认名，现在叫 `已废弃`（列出来会在库里分裂出第二个近义分组）；
+       *   · `其它退场` —— 内部兜底值（status 认不出来时用的），不该出现在人选的清单里。
+       * 想新建分类直接打字就行（输入框是自由文本），所以候选少不会挡路。
+       */
+      const BUILTIN_CATEGORIES = new Set([
+        ARCHIVE_CATEGORY_DEFAULT.superseded,
+        ARCHIVE_CATEGORY_DEFAULT.expired,
+        ARCHIVE_CATEGORY_PARKED,
+        ARCHIVE_CATEGORY_OTHER,
+        ...Object.keys(LEGACY_CATEGORY_ALIAS),
+      ]);
+      /** 库里已经用过的归档分类（原始值；按"内置/旧名"过滤一遍才给人选）。 */
       const KNOWN_CATEGORIES = [
         ...new Set(
           (Array.isArray(state.archive) ? state.archive : [])
@@ -2016,6 +2034,10 @@ window.__ModuleLoader__.load({
             .filter(Boolean),
         ),
       ].sort((a, b) => a.localeCompare(b));
+      const CATEGORY_OPTIONS = [
+        ...ARCHIVE_PRESET_CATEGORIES,
+        ...KNOWN_CATEGORIES.filter((c) => !BUILTIN_CATEGORIES.has(LEGACY_CATEGORY_ALIAS[c] || c)),
+      ].filter((c, i, arr) => arr.indexOf(c) === i);
 
       /**
        * 按记录日期分组用的日期人话（今天 / 昨天 / 前天 / 周几）——
@@ -2839,13 +2861,12 @@ window.__ModuleLoader__.load({
               KNOWN_TOPICS.map((t) => h('option', { key: t, value: t })),
             )
           : null,
-        // 「归档分类」的候选 = 两个默认 + 库里**已经用过**的分类（避免同义分类越写越多）
+        // 「归档分类」的候选 = 能手动选的两个（已废弃 / 暂时不用）+ 用户自建的分类
+        // （`已蒸馏` 是自动归类、`已过期` 是旧名、`其它退场` 是内部兜底 —— 都**不列**，见 CATEGORY_OPTIONS 的注释）
         h(
           'datalist',
           { id: 'dsh-memory-delta-category-options' },
-          [...new Set([...ARCHIVE_PRESET_CATEGORIES, ...ARCHIVE_CATEGORY_OTHER ? [ARCHIVE_CATEGORY_OTHER] : [], ...KNOWN_CATEGORIES])].map((c) =>
-            h('option', { key: c, value: c }),
-          ),
+          CATEGORY_OPTIONS.map((c) => h('option', { key: c, value: c })),
         ),
         actionError ? h('div', { className: 'dsh-memory-delta-note' }, actionError) : null,
         notice ? h('div', { className: 'dsh-memory-delta-note dsh-memory-delta-ok' }, notice) : null,

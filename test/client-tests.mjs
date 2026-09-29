@@ -1162,6 +1162,44 @@ section('组件：归档分类（归档时选 + 事后改）');
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   await flush();
 
+  /**
+   * ①-b 「归档分类」下拉里到底能给哪些（用户 2026-09-29 反馈："可选的归档分组里有已过期等，
+   * 目前只保留已废弃和暂时不用，其他清理掉"）。
+   *
+   * 旧实现是 `[两个预设, 其它退场, ...库里用过的所有分类]` —— 于是**库里有 已蒸馏（20 条）/
+   * 已过期（旧 host 写下的）**，下拉里就真的能选到它们：
+   *   · 「已蒸馏」列出来 = 让人以为"我可以自己声称蒸馏过了"（它是 supersede 的自动归类）；
+   *   · 「已过期」列出来 = 在库里分裂出第二个近义分组（现在叫「已废弃」）。
+   */
+  const optionValues = (node, out = []) => {
+    if (!node || typeof node !== 'object') return out;
+    if (Array.isArray(node)) {
+      for (const n of node) optionValues(n, out);
+      return out;
+    }
+    if (node.type === 'option' && node.props && node.props.value !== undefined) out.push(String(node.props.value));
+    optionValues(node.kids ?? node.children, out);
+    return out;
+  };
+  const catDatalist = findByProp(mounted.tree(), 'id', 'dsh-memory-delta-category-options');
+  const catOptions = catDatalist ? optionValues(catDatalist) : [];
+  check('分类下拉只给「已废弃 / 暂时不用」两个（不再把库里用过的分类一股脑列出来）', catOptions.length === 2 && catOptions.includes('已废弃') && catOptions.includes('暂时不用'), catOptions.join(' | '));
+  check('下拉里**没有**「已蒸馏」（它是自动归类，不该给人选）', !catOptions.includes('已蒸馏'), catOptions.join(' | '));
+  check('下拉里**没有**「已过期」（旧默认名，会裂出第二个近义分组）', !catOptions.includes('已过期'), catOptions.join(' | '));
+  check('下拉里**没有**「其它退场」（内部兜底值，不是给人选的）', !catOptions.includes('其它退场'), catOptions.join(' | '));
+  // 但**用户自建**的分类要给回来（否则每次都得重打一遍）
+  {
+    const orig = globalThis.fetch;
+    const custom = { ...withArchive, archive: [...withArchive.archive, { id: 'a10', type: 'fact', status: 'expired', category: '等 V2 再说', tags: [], line: '自建分类的一条', date: '2026-09-12', file: 'D:\\proj\\memory\\archive\\a10.md' }] };
+    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(custom) });
+    const m = mountPanel({ scope: { sessionId: 's1b', cwd: 'D:\\proj' } });
+    await flush();
+    const dl = findByProp(m.tree(), 'id', 'dsh-memory-delta-category-options');
+    const opts = dl ? optionValues(dl) : [];
+    check('库里**用户自建**的分类仍然给候选', opts.includes('等 V2 再说') && opts.includes('已废弃') && opts.includes('暂时不用') && !opts.includes('已蒸馏'), opts.join(' | '));
+    globalThis.fetch = orig;
+  }
+
   // ① 归档时选分类：**默认「已废弃」**（手动归档最常见的理由）+ 可自己写一个
   //    ⚠️「已蒸馏」**不在**预设里 —— 那是"被取代/结论已搬进文档"的自动归类，由 mem supersede 落
   const btns = findAllByClass(sectionByKey(mounted, 'standing:topic:环境与沙箱'), 'dsh-memory-delta-mini');
