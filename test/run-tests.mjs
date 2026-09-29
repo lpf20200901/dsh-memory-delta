@@ -756,6 +756,21 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   check('取回的边界：对非归档条目 restore → 报错', run(['restore', '--root', root, 'retire-me']).code !== 0);
   check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 
+  /* 取回要**清掉归档分类**（2026-09-29：真实库里 5 条取回回来的条目一直挂着"为什么退场"） */
+  {
+    // 前置：这一条此刻是常驻（上面刚 promote 过）
+    run(['archive', '--root', root, 'retire-me', '--category', '暂时不用']);
+    const beforeRestore = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
+    check('（前置）归档条目上确实写着 category', /^category: 暂时不用$/m.test(beforeRestore), 'category');
+    run(['restore', '--root', root, 'retire-me']);
+    const afterRestore = fs.readFileSync(path.join(root, 'inbox', 'retire-me.md'), 'utf8');
+    check('取回后**清掉** category（常驻条目不该带着"退场理由"）', !/^category:/m.test(afterRestore), afterRestore.split(/\r?\n/).slice(0, 12).join(' | '));
+    check('清的是整个字段，不是写成 `category: null`（后者读起来像"曾经是暂时不用"）', !/^category: null$/m.test(afterRestore), afterRestore.split(/\r?\n/).slice(0, 12).join(' | '));
+    check('取回并清掉 category 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+    // 复原后面那节的前置状态：它是常驻条目才能再归档
+    run(['promote', '--root', root, 'retire-me']);
+  }
+
   /* 归档分类（`category`）：面板「已归档」下的第一层（2026-09-23 用户定的三层结构） */
   const arCat = run(['archive', '--root', root, 'retire-me', '--category', '已废弃']);
   check('带 --category 的归档成功', arCat.code === 0, flat(arCat.out + arCat.err));

@@ -1278,6 +1278,15 @@ export function restoreEntry(L, id) {
   const wasSupersededBy = e.data.superseded_by ?? null;
   e.data.status = 'active';
   e.data.superseded_by = null;
+  /**
+   * ⚠️ `category` 是**归档层专属**的元数据（"它为什么退场"），取回之后这条已经**没有退场**了，
+   * 必须一起清掉 —— 否则常驻条目身上挂着一个"退场理由"，等于把第二批 topic 又造了一遍
+   * （用户 2026-09-29 在两条取回回来的 playbook 条目上看到 `category: 暂时不用`）。
+   *
+   * 用 `delete` 而不是置 null：`renderFrontmatter` 对 null 会写出 `category: null`，
+   * 那是"这里曾经有过值"的残留，人读 frontmatter 时最容易误判成"它还是暂时不用"。
+   */
+  delete e.data.category;
   moveEntry(e.file, dest, serializeEntry(e));
 
   // 反向清理悬挂引用（见上面的注释）
