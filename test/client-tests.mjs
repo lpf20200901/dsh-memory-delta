@@ -2143,6 +2143,58 @@ section('组件：空态文案（没有任何数据时不能让人以为是坏�
   globalThis.fetch = originalFetch;
 }
 
+/* ------------------------------- 组件：已在用为空时，两份规范仍要在（用户 2026-09-29 报的 bug） */
+
+section('组件：「已在用」空态**不能吃掉**全局规范 / 工作区规范');
+{
+  const originalFetch = globalThis.fetch;
+  /**
+   * 用户报的原话："已在用下没有记忆时，全局规范和工作区规范都没有显示"。
+   *
+   * 根因：空态分支把**整个分组正文**换成了那句"还没有已确认的记忆"，
+   * 而这两份规范是跟列表**并列**的东西（它们不依赖库里有没有常驻条目 —— 那是 DSH 每轮注入的文件）。
+   * 与"父级是容器"是同一类坑：**空态是列表的空态，不是这个分组内容的空态。**
+   */
+  const noStanding = {
+    ...SAMPLE,
+    entries: [],
+    due: [],
+    // ⚠️ 必须带上 global / workspaceRules：**正是这两块**在空态下被吃掉了（用户报的就是它们不见了）
+    global: {
+      displayPath: '~/.dsh/AGENTS.md',
+      exists: true,
+      bytes: 4861,
+      lines: 130,
+      mtime: '2026-09-29T05:00:00.000Z',
+      preview: ['# 全局记忆', '', '- 中文交流，直接给结论'],
+      truncated: true,
+      source: { name: 'global-AGENTS.md', bytes: 4861, mtime: '2026-09-29T04:00:00.000Z' },
+    },
+    workspaceRules: [
+      { name: 'AGENTS.md', exists: true, bytes: 900, lines: 30, mtime: '2026-09-29T05:00:00.000Z', preview: ['# 工作区'], truncated: false },
+      { name: 'AGENTS.local.md', exists: true, bytes: 500, lines: 20, mtime: '2026-09-29T05:00:00.000Z', preview: ['# 本地'], truncated: false },
+    ],
+    counts: { ...SAMPLE.counts, active: 0, facts: 0, decisions: 0, due: 0 },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(noStanding) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  const text = allText(mounted.tree());
+  check('常驻 0 条时，「全局规范」照样显示', Boolean(sectionByKey(mounted, 'stage:global')), headerTexts(mounted.tree()).join(' | '));
+  check('常驻 0 条时，「工作区规范」照样显示', Boolean(sectionByKey(mounted, 'stage:wsrules')), headerTexts(mounted.tree()).join(' | '));
+  check('两份规范仍然在「已在用」这个分组里（不是被挪到别处）', Boolean(findByProp(sectionByKey(mounted, 'stage:standing'), 'key', 'stage:global')) && Boolean(findByProp(sectionByKey(mounted, 'stage:standing'), 'key', 'stage:wsrules')), orderedSectionKeys(mounted.tree()).join(' > '));
+  check('空态文案也还在（说清"怎么才会有"）', text.includes('还没有已确认的记忆') && text.includes('你点一下提升就会到这里'), text.slice(0, 400));
+  check('分组头的说明改成"现在只有下面这两份规范"（不再假装还有条目）', headerTexts(mounted.tree()).some((hd) => hd.includes('现在只有下面这两份规范')), headerTexts(mounted.tree()).join(' | '));
+  // 反过来：有常驻条目时也必须在（别为了修这个把另一支弄坏）
+  const withStanding = { ...noStanding, entries: SAMPLE.entries, counts: { ...SAMPLE.counts, active: SAMPLE.entries.length } };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(withStanding) });
+  const m2 = mountPanel({ scope: { sessionId: 's2', cwd: 'D:\\proj' } });
+  await flush();
+  check('有常驻条目时两份规范同样在（两支都要对）', Boolean(sectionByKey(m2, 'stage:global')) && Boolean(sectionByKey(m2, 'stage:wsrules')), headerTexts(m2.tree()).join(' | '));
+  check('有常驻条目时分组头说的是"这就是它记住了的部分"（不是空态那句）', headerTexts(m2.tree()).some((hd) => hd.includes('这就是"它记住了"的部分')), headerTexts(m2.tree()).join(' | '));
+  globalThis.fetch = originalFetch;
+}
+
 /* ------------------------------------------------------- 组件：错误态 */
 
 section('组件：fetch 抛错 / ok:false');

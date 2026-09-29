@@ -2486,35 +2486,41 @@ window.__ModuleLoader__.load({
             ),
       );
 
-      const standing = entries.length
-        ? section(
-            {
-              key: 'stage:standing',
-              title: '已在用',
-              slug: null,
-              count: entries.length,
-              hint: '每轮会话自动发给模型 · 这就是"它记住了"的部分',
-              open: isOpen('stage:standing'),
-              onToggle: () => toggleSection('stage:standing'),
-            },
-            [globalBlock, workspaceRulesBlock].concat(standingBody).concat([omissionFor('standing')].filter(Boolean)),
-          )
-        : section(
-            {
-              key: 'stage:standing',
-              title: '已在用',
-              slug: null,
-              count: 0,
-              hint: '每轮会话自动发给模型',
-              open: isOpen('stage:standing'),
-              onToggle: () => toggleSection('stage:standing'),
-            },
-            h(
-              'div',
-              { className: 'dsh-memory-delta-muted dsh-memory-delta-empty' },
-              '还没有已确认的记忆 —— 模型写进「待你确认」的候选，你点一下提升就会到这里',
-            ),
-          );
+      /**
+       * 「已在用」= 常驻条目（`facts/` `decisions/`）**+ 两份每轮注入的规范文件**。
+       *
+       * ⚠️ 空态只替换**列表那一部分**，不能替换整个分组的正文（用户 2026-09-29 报："已在用下没有记忆时，
+       * 全局规范和工作区规范都没有显示"）。这两份规范**不依赖**库里有没有常驻条目 ——
+       * 它们是 DSH 自己每轮注入的东西，只要打开面板就该看得见。
+       * 这类"空态分支把兄弟节点一起吃掉"的写法跟"父级是容器"是同一个坑：
+       * **空态是列表的空态，不是这个分组内容的空态。**
+       */
+      const standing = section(
+        {
+          key: 'stage:standing',
+          title: '已在用',
+          slug: null,
+          count: entries.length,
+          hint: entries.length
+            ? '每轮会话自动发给模型 · 这就是"它记住了"的部分'
+            : '每轮会话自动发给模型（现在只有下面这两份规范）',
+          open: isOpen('stage:standing'),
+          onToggle: () => toggleSection('stage:standing'),
+        },
+        [globalBlock, workspaceRulesBlock]
+          .concat(entries.length ? standingBody : [])
+          .concat(
+            entries.length
+              ? [omissionFor('standing')].filter(Boolean)
+              : [
+                  h(
+                    'div',
+                    { className: 'dsh-memory-delta-muted dsh-memory-delta-empty', key: 'empty' },
+                    '还没有已确认的记忆 —— 模型写进「待你确认」的候选，你点一下提升就会到这里',
+                  ),
+                ],
+          ),
+      );
 
       const inbox = Array.isArray(state.inbox) ? state.inbox : [];
       const inboxBlock = section(
@@ -2564,7 +2570,7 @@ window.__ModuleLoader__.load({
             archiveCount === 0
               ? '还没有归档 —— 结论被取代（supersede）或不再适用（归档）时会搬到这里，不再发给模型'
               : '这些是退场的旧结论：不再发给模型，但仍在库里（可搜索）。点「取回」会把它放回「待你确认」，再确认一次才重新生效。' +
-                '默认按**退场原因**分组（顶部点「主题/类型/标签/日期」它就跟着换，点「退场原因」切回来）。',
+                '上面三个分类（已蒸馏 / 已废弃 / 暂时不用）是常驻的，分类下面是主题行 —— 点开主题才列出条目。',
           ),
           ...(archived.length ? groupedBody(archived, archiveDimension(), 'archive') : []),
           archiveCount > archived.length
