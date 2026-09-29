@@ -1388,6 +1388,64 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   globalThis.fetch = originalFetch;
 }
 
+section('组件：归档分类是**容器**（分类头总在、条数报整类、小主题挂在它体内）');
+{
+  const originalFetch = globalThis.fetch;
+  /**
+   * 夹具照着**真实库**的形状做（用户 2026-09-23 反馈的 bug 就是这个形状）：
+   *  · 「已蒸馏」20 条**全在子主题里** → 旧实现"分类下没有直接条目就不出分类头" → **整类消失**
+   *  · 「已过期」1 条直接挂 + 2 条在子主题里 → 旧实现分类头只报 1 条（看着像"这一类只有一条"）
+   */
+  const CATSTORE = {
+    ...SAMPLE,
+    inbox: [],
+    archive: [
+      { id: 's1', type: 'fact', key: 's1', status: 'superseded', topic: 'DSH 插件开发', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\s1.md', line: '蒸馏一' },
+      { id: 's2', type: 'fact', key: 's2', status: 'superseded', topic: 'DSH 插件开发', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\s2.md', line: '蒸馏二' },
+      { id: 's3', type: 'fact', key: 's3', status: 'superseded', topic: '记忆机制本身', tags: ['dsh'], date: '2026-09-10', file: 'D:\\proj\\memory\\archive\\s3.md', line: '蒸馏三' },
+      { id: 'e1', type: 'fact', key: 'e1', status: 'expired', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\e1.md', line: '过期直接一条' },
+      { id: 'e2', type: 'fact', key: 'e2', status: 'expired', topic: '环境与沙箱', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\e2.md', line: '过期子主题一' },
+      { id: 'e3', type: 'fact', key: 'e3', status: 'expired', topic: '环境与沙箱', tags: ['dsh'], date: '2026-09-11', file: 'D:\\proj\\memory\\archive\\e3.md', line: '过期子主题二' },
+    ],
+    counts: { ...SAMPLE.counts, inbox: 0, archive: 6 },
+  };
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(CATSTORE) });
+  const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
+  await flush();
+  openArchive(mounted);
+
+  const heads = headerTexts(mounted.tree()).join(' | ');
+  const sup = findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏');
+  const exp = findByProp(mounted.tree(), 'key', 'archive:archive:已过期');
+  /** 某个小节**自己**的分组头条数（DFS 先命中它自己的头，再进体里的子主题）。 */
+  const countOf = (sec) => allText(findByClass(sec, 'dsh-memory-delta-count'));
+
+  // ① 分类头**无条件出现**：这一类哪怕一条直接条目都没有，也得出头（否则整类看着像消失了）
+  check('分类头总在：条目全在子主题里的「已蒸馏」也有分组头', Boolean(sup), heads);
+  // ② 条数是**整类**（含小主题里的），不是"直接挂在它下面的那几条"
+  check('分类头的条数报整类：「已蒸馏」= 3（3 条都在子主题里）', Boolean(sup) && countOf(sup) === '3', `${countOf(sup)} / ${allText(sup).slice(0, 120)}`);
+  check('分类头的条数报整类：「已过期」= 3（1 条直接 + 2 条在子主题里），不是 1', Boolean(exp) && countOf(exp) === '3', `${countOf(exp)} / ${allText(exp).slice(0, 120)}`);
+  // ③ 小主题**挂在分类体内**（嵌套），不再跟分类头平级排成一长串
+  check('小主题嵌套在分类体内（不是平级跟在后面）', Boolean(findByProp(sup, 'key', 'archive:archive:已蒸馏/DSH 插件开发')) && Boolean(findByProp(exp, 'key', 'archive:archive:已过期/环境与沙箱')), orderedSectionKeys(mounted.tree()).join(' > '));
+  check('分类的条目与它的小主题都在同一个容器里', allText(sup).includes('蒸馏一') && allText(sup).includes('蒸馏三') && allText(exp).includes('过期直接一条'), allText(exp).slice(0, 200));
+  // ④ 「选本组」选的是**整类**（含小主题），与分组头的条数一致 —— 否则按钮说 1 条、头说 3 条
+  const expBar = findByClass(exp, 'dsh-memory-delta-groupbar');
+  const supBar = findByClass(sup, 'dsh-memory-delta-groupbar');
+  check('「选本组」按整类算：「已过期」给 3 条', allText(expBar).includes('选本组 3 条'), allText(expBar));
+  check('「选本组」按整类算：没有直接条目的「已蒸馏」也给 3 条', allText(supBar).includes('选本组 3 条'), allText(supBar));
+  // ⑤ 大类小类视觉上分得开：分类头 is-category、体内小主题 is-nested（不再叠缩进）
+  check('分类头带 is-category（比小主题更重的标题）', String(sup.props.className).includes('is-category'), String(sup.props.className));
+  const nested = findByProp(sup, 'key', 'archive:archive:已蒸馏/DSH 插件开发');
+  check('容器体内的小主题带 is-nested（缩进由容器体给，不叠一层）', String(nested.props.className).includes('is-nested'), String(nested.props.className));
+  // ⑥ 收起分类头 = 整类（连同小主题）一起收
+  const catToggle = findAllByClass(sup, 'dsh-memory-delta-toggle')[0];
+  catToggle.props.onClick({});
+  await flush();
+  check('收起分类头后，它的小主题也一起收起来（真嵌套）', !findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏/DSH 插件开发') && Boolean(findByProp(mounted.tree(), 'key', 'archive:archive:已过期')), orderedSectionKeys(mounted.tree()).join(' > '));
+
+  globalThis.fetch = originalFetch;
+}
+
 section('组件：每个阶段都照当前维度分组（不做"单组就不出头"的特殊处理）');
 {
   const originalFetch = globalThis.fetch;

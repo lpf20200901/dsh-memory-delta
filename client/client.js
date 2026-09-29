@@ -115,6 +115,13 @@ window.__ModuleLoader__.load({
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-hint { display: none; }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-count { font-size: 10px; }
+/* 归档层的分类头（已过期 / 已蒸馏 / 你自己写的）是**容器**：它体内挂着若干小主题。
+   条数报的是**整类**（含小主题里的），所以给它比子主题更重的标题 —— 一眼分出"大类"和"小类"。
+   ⚠️ CSS 注释里不能出现反引号（模板字符串会当场 SyntaxError）。 */
+.dsh-memory-delta-section.is-category > .dsh-memory-delta-section-head .dsh-memory-delta-section-title { font-weight: 700; }
+/* 容器体内的小主题：缩进与竖线由容器体提供，自己不再叠一层；小节之间的横线也去掉（靠间距分） */
+.dsh-memory-delta-section.is-category > .dsh-memory-delta-body > .dsh-memory-delta-section { border-top: 0; }
+.dsh-memory-delta-section.is-child.is-nested { margin-left: 0; padding-left: 0; border-left: 0; }
 .dsh-memory-delta-section-head {
   display: flex;
   align-items: center;
@@ -2090,17 +2097,29 @@ window.__ModuleLoader__.load({
                 : cat === ARCHIVE_CATEGORY_DEFAULT.expired
                   ? '不再适用又没有替代 —— 结论作废，原因写在条目正文里'
                   : '你给的归档分类';
-            // 分类下再按 topic 分（没有 topic 的直接挂在分类下，不额外造一层）
-            const withTopic = items.filter((e) => typeof e.topic === 'string' && e.topic.trim());
-            if (!withTopic.length) {
-              out.push({ key: cat, title: cat, hint, list: items });
-              continue;
-            }
-            const plain = items.filter((e) => !(typeof e.topic === 'string' && e.topic.trim()));
-            if (plain.length) out.push({ key: cat, title: cat, hint, list: plain });
+            /**
+             * ⚠️ 分类头**无条件出现**，而且 `count` 报的是**这一类总共多少条**（含下面小主题里的）。
+             *
+             * 踩过的坑（用户 2026-09-23 实测）：以前"分类下没有直接条目就不出分类头" →
+             * 20 条全在子主题里的「已蒸馏」**连分组头都没有**（看着像整类消失），
+             * 而「已过期」的头只数了自己那 1 条直接条目（看着像"只有一条"）。
+             * 一个分类是**容器**，不是"直接挂在它下面的那几条"。
+             */
+            out.push({
+              key: cat,
+              title: cat,
+              hint,
+              count: items.length,
+              isCategory: true,
+              // `list` = 直接挂在分类下的条目（没写 topic 的那些）；
+              // `all` = 这一类**全部**条目 ——「选本组」要选的是整类，不是光那几条没归小主题的
+              list: items.filter((e) => !(typeof e.topic === 'string' && e.topic.trim())),
+              all: items,
+            });
             const topicMap = new Map();
-            for (const e of withTopic) {
-              const t = e.topic.trim();
+            for (const e of items) {
+              const t = typeof e.topic === 'string' ? e.topic.trim() : '';
+              if (!t) continue;
               if (!topicMap.has(t)) topicMap.set(t, []);
               topicMap.get(t).push(e);
             }
@@ -2159,7 +2178,8 @@ window.__ModuleLoader__.load({
        * 再塞三个按钮就会在窄侧栏里换行难看。
        */
       const groupBar = (layer, dimension, g) => {
-        const ids = g.list.map((e) => e.id);
+        // 归档层的分类头是**容器**：它体内还挂着若干小主题 → 「选本组」指的是整类（`g.all`）
+        const ids = (g.all ?? g.list).map((e) => e.id);
         const allOn = ids.length > 0 && ids.every(isSelected);
         const buttons = [
           h(
@@ -2247,9 +2267,10 @@ window.__ModuleLoader__.load({
       /**
        * 渲染一个阶段的条目：按当前维度分子组。
        *
-       * **只有一组时不出分组头** —— 那时"归纳"其实没发生，一个折叠头包着全部条目只是噪音
-       * （「待你确认」经常只有两三条，套一层头更难看）。这条判据让三个阶段都能跟随维度，
-       * 又不会在小列表上凭空多一层。
+       * **不再"单组就不出头"**：早期为了少一层折叠试过这条判据，结果真实数据上翻车 ——
+       * 「待你确认」里两条候选没主题、第一个标签又相同 → 主题/标签/日期各只剩一组，
+       * 于是界面上"只有类型看得出分组"（用户 2026-09-22 反馈的就是这个）。
+       * 现在**每个阶段都照维度分组**，一致性优先；单组时那个头也顺带说明"这一组是什么"。
        */
       const groupedBody = (list, dimension, layer) => {
         const groups = subGroups(list, dimension, layer);
@@ -2262,11 +2283,8 @@ window.__ModuleLoader__.load({
             // 勾选：三个阶段都能选，批量条按"选中的条目属于哪个阶段"决定按钮可用性
             select: { checked: isSelected(e.id), onToggle: () => toggleSelected(e.id) },
           });
-        // ⚠️ **不再"单组就不出头"**：早期为了少一层折叠试过这个判据，结果真实数据上翻车 ——
-        // 「待你确认」里两条候选没主题、第一个标签又相同 → 主题/标签/日期各只剩一组，
-        // 于是界面上"只有类型看得出分组"（用户 2026-09-22 反馈的就是这个）。
-        // 现在**每个阶段都照维度分组**，一致性优先；单组时那个头也顺带说明"这一组是什么"。
-        return groups.map((g) => {
+        /** 一个分组 → 一个小节；`extra` 是插在条目后面的东西（归档层用它挂小主题）。 */
+        const renderGroup = (g, extra = []) => {
           // 子主题的 key 要带父主题前缀（不然 `面板` 这种子主题名会在别的父主题下撞 key，
           // 折叠状态是**按 key 存的**，撞了就会一起开合）
           const key = g.parent ? `${layer}:${dimension}:${g.parent}/${g.title}` : `${layer}:${dimension}:${g.key}`;
@@ -2283,19 +2301,41 @@ window.__ModuleLoader__.load({
               // 父名仍然在 `title`（hover）与 `key`（折叠状态）里 —— 信息没丢，只是不占版面。
               title: g.title,
               slug: g.slug ?? null,
-              count: g.list.length,
+              // 容器的条数是**整类**（含小主题里的），不是"直接挂在它下面的那几条" —— 见 subGroups 里的注释
+              count: g.count ?? g.list.length,
               hint: g.hint,
-              // 子主题缩进一格 + 小一号字（样式在 CSS 的 .is-child）
-              className: g.parent ? 'is-child' : undefined,
+              // 子主题缩进一格 + 小一号字（样式在 CSS 的 `.is-child`）；分类头是内容器（`.is-category`）
+              // ⚠️ **挂在容器体内**的子主题（`is-nested`）**不再自己缩进** —— 容器体本身已经给了缩进
+              // 与左侧竖线，再叠一层会把条目挤到窄侧栏的边缘（条目文字只剩几十像素）。
+              className: g.parent
+                ? g.nested ? 'is-child is-nested' : 'is-child'
+                : g.isCategory ? 'is-category' : undefined,
               titleAttr: g.parent ? `${g.parent} › ${g.title}` : undefined,
               open: isOpen(key),
               onToggle: () => toggleSection(key),
             },
             [groupBar(layer, dimension, g)]
               .concat(note ? [h('div', { className: 'dsh-memory-delta-dim', key: 'note' }, note)] : [])
-              .concat(byDateDesc(g.list).map(rowOf)),
+              .concat(byDateDesc(g.list).map(rowOf))
+              .concat(extra),
           );
-        });
+        };
+        /**
+         * ⚠️ **归档层是"容器 + 体内挂小主题"**，不是一排平级的分组头。
+         *
+         * 踩过的坑（用户 2026-09-23 实测）：小主题以前跟分类头**平级**排在后面，
+         * 于是"已过期"和"已蒸馏"各带一串小主题混在一起，看不出谁挂在谁下面；
+         * 改成嵌套之后，分类头一收起，整类（连同它的小主题）一起收。
+         */
+        const containers = new Set(groups.filter((g) => g.isCategory).map((g) => g.key));
+        return groups
+          .filter((g) => !(g.parent && containers.has(g.parent)))
+          .map((g) =>
+            renderGroup(
+              g,
+              g.isCategory ? groups.filter((x) => x.parent === g.key).map((x) => renderGroup({ ...x, nested: true })) : [],
+            ),
+          );
       };
 
       /* -------------------------------------------------- 已在用（常驻层）
