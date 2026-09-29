@@ -757,10 +757,10 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   check('archive/restore 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 
   /* 归档分类（`category`）：面板「已归档」下的第一层（2026-09-23 用户定的三层结构） */
-  const arCat = run(['archive', '--root', root, 'retire-me', '--category', '已过期']);
+  const arCat = run(['archive', '--root', root, 'retire-me', '--category', '已废弃']);
   check('带 --category 的归档成功', arCat.code === 0, flat(arCat.out + arCat.err));
   const catRaw = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
-  check('--category 写进 frontmatter', /^category: 已过期$/m.test(catRaw), catRaw.split(/\r?\n/).slice(0, 10).join(' | '));
+  check('--category 写进 frontmatter', /^category: 已废弃$/m.test(catRaw), catRaw.split(/\r?\n/).slice(0, 10).join(' | '));
   const catLong = run(['archive', '--root', root, 'retire-me', '--category', 'x'.repeat(41)]);
   check('对已归档的条目再 archive → 报错（顺便确认这条闸门还在）', catLong.code !== 0 && /已经在 archive/.test(catLong.out + catLong.err), flat(catLong.out + catLong.err));
   const longCat = run(['set', '--root', root, 'retire-me', '--category', 'x'.repeat(41)]);
@@ -773,14 +773,23 @@ section('M10：archive（不再适用 → 归档）与 restore（取回）');
   const arAgain = run(['archive', '--root', root, 'retire-me']);
   check('取回并重新确认后能再归档', arAgain.code === 0, flat(arAgain.out + arAgain.err));
   const catDefault = fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8');
-  check('不给 --category 时按退场方式推默认（expired → 已过期）', /^category: 已过期$/m.test(catDefault), catDefault.split(/\r?\n/).slice(0, 10).join(' | '));
+  check('不给 --category 时按退场方式推默认（expired → 已废弃）', /^category: 已废弃$/m.test(catDefault), catDefault.split(/\r?\n/).slice(0, 10).join(' | '));
   const setCat = run(['set', '--root', root, 'retire-me', '--category', '另外一类']);
   check('mem set --category 改归档分类', setCat.code === 0 && /^category: 另外一类$/m.test(fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8')), flat(setCat.out));
+  // 「暂时不用」= 暂时用不上、但可能再启用（第三个默认分类，2026-09-29 加）：与「已废弃」共用
+  // status=expired，差别只在 category —— 所以它不该牵动 validate / 取代链 / restore 三处
+  const setParked = run(['set', '--root', root, 'retire-me', '--category', '暂时不用']);
+  check('mem set --category 能设「暂时不用」', setParked.code === 0 && /^category: 暂时不用$/m.test(fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8')), flat(setParked.out));
+  check('「暂时不用」的 status 仍是 expired（不新增状态，validate 与取代链不用改）', /^status:\s*expired$/m.test(fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8')), 'expired');
+  check('设成「暂时不用」后 validate 仍通过', run(['validate', '--root', root]).code === 0);
+  // v1.2.x 的旧默认名 `已过期` 在**写**边界也归一（否则库里会同时存在两个近义分组）
+  const setLegacy = run(['set', '--root', root, 'retire-me', '--category', '已过期']);
+  check('写 `已过期`（旧默认名）落成 `已废弃`', setLegacy.code === 0 && /^category: 已废弃$/m.test(fs.readFileSync(path.join(root, 'archive', 'retire-me.md'), 'utf8')), flat(setLegacy.out));
   check('带 category 的归档条目**不参与注入**（分类只影响归档层的显示）', !JSON.parse(run(['inject', '--root', root, '--json']).out).entries.some((e) => e.id === 'retire-me'));
   // ⚠️ 常驻条目**不该**有"为什么退场"的分类（否则它就是第二个 topic 字段）
   run(['restore', '--root', root, 'retire-me']);
   run(['promote', '--root', root, 'retire-me']);
-  const catStanding = run(['set', '--root', root, 'retire-me', '--category', '已过期']);
+  const catStanding = run(['set', '--root', root, 'retire-me', '--category', '已废弃']);
   check('对常驻条目设分类 → 拒绝（分类只回答"为什么退场"）', catStanding.code !== 0 && /只对归档里的条目有意义/.test(catStanding.out + catStanding.err), flat(catStanding.out + catStanding.err));
   check('加了 category 之后 validate 仍通过', run(['validate', '--root', root]).code === 0);
 

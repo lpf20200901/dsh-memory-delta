@@ -142,16 +142,21 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 
 **归档之后还分"哪一类"**：每条归档条目有一个**归档分类**（frontmatter 的 \`category\`），
 面板里它是「已归档」下面的**第一层**：\`已归档 → 分类 → 主题 → 条目\`。
-- 分类默认有**两个**（一直显示，空的就报 0 条）：\`已过期\`、\`已蒸馏\`；**你自己写的分类**是第三种。
+- 分类默认有**三个**（一直显示，空的就报 0 条）：\`已蒸馏\`、\`已废弃\`、\`暂时不用\`；**你自己写的分类**再加一种。
 - 分类下面的**主题行**就是这条记忆原本的 \`topic\`；**点开主题才列出条目**
   （归档区先给你一张目录，不会一上来倒几十条）。没写主题的条目直接列在分类下。
-- **人手动归档**：默认就是 \`已过期\`（面板确认条里选好，也可以自己写一个分类；
-  **批量归档**的确认条里同样能选/新建分类）。CLI 是 \`mem archive <id> --category "..."\`。
+- 三条常见的退场理由：\`已蒸馏\`（结论已经进了文档 / 被新版本顶上，"怎么做"那类多半走这条）、
+  \`已废弃\`（彻底没用了，不会再启用）、\`暂时不用\`（这个工作区暂时用不上，换个业务/项目可能又要 ——
+  想再用就是条目上的「取回」→「提升」）。
+- **人手动归档**：面板确认条里默认选 \`已废弃\`，也可以选 \`暂时不用\` 或自己写一个分类；
+  **批量归档**的确认条里同样能选/新建分类。CLI 是 \`mem archive <id> --category "..."\`。
 - \`已蒸馏\` **不是**手动归档时挑的选项 —— 它是"这条被新版本取代 / 结论已经搬进文档"的**自动归类**，
   由 \`mem supersede <旧> <新>\`（或 \`mem archive --superseded-by\`、\`promote --supersedes\`）落下来。
   （蒸馏是有实际动作的，不该靠人选一个标签来声称。）
-- 旧条目没写这个字段的，按 \`status\` 实时推出来（expired → 已过期、superseded → 已蒸馏），
-  所以面板上一样分得对。
+- \`暂时不用\` 与 \`已废弃\` 的差别**只在"还会不会回来"**：两者的 \`status\` 都是 \`expired\`，
+  靠 \`category\` 区分 —— 所以它不牵动 validate / 取代链 / restore（那三处只需要知道"它不生效了"）。
+- 旧条目没写这个字段的，按 \`status\` 实时推出来（expired → 已废弃、superseded → 已蒸馏），
+  所以面板上一样分得对。\`已过期\` 是 v1.2.x 的旧默认名，读到时按 \`已废弃\` 归组（别名，不用预先迁移）。
 - 事后想改：面板上条目行的「分类」按钮，或 \`mem set <id> --category "..."\`（**只对归档里的条目有效** ——
   常驻条目还没退场，不该被问"为什么退场"）。
 - 它**不进注入、也不影响检索**，纯粹是"归档区怎么读"的归纳。
@@ -179,7 +184,7 @@ const STORAGE_README = `# 记忆库（dsh-memory-delta）
 mem list / show <id> / due / recall "<词>"   # 看、查、搜索
 mem promote <id> [--supersedes <旧id>]       # 人确认：inbox → facts|decisions
 mem demote <id>                              # 先不当真：facts|decisions → inbox（能再 promote 回来）
-mem archive <id> [--category "已过期"]       # 不再适用又没有替代：→ archive/（可指定归档分类）
+mem archive <id> [--category "已废弃"]       # 不再适用又没有替代：→ archive/（可指定归档分类）
 mem restore <id>                             # 取回：archive/ → inbox（再确认一次才重新生效）
 mem set <id> --category "已蒸馏"            # 改**归档分类**（「已归档」下的第一层；只对归档条目有效）
 mem rm <id>                                  # 删除**候选**（只允许 inbox/；常驻的走上面的退场方式）
@@ -485,11 +490,29 @@ function findById(L, id) {
  * 把两件事挤进 `topic` 会让「已在用」的分组也被归档词污染（项目早期就这么干过一版，已回退）。
  *
  * 与 `status` 的关系：`status` 是**机器事实**（expired / superseded，validate 与取代链都靠它），
- * `category` 是**人的归类**。默认由 status 推出来（不再适用→已过期、被取代→已蒸馏），
- * 但**允许人改成别的**（比如把一条 superseded 归到「已过期」）—— 所以它是独立字段，不是派生。
+ * `category` 是**人的归类**。默认由 status 推出来（不再适用→已废弃、被取代→已蒸馏），
+ * 但**允许人改成别的**（比如把一条 superseded 归到「已废弃」）—— 所以它是独立字段，不是派生。
+ *
+ * ⚠️ `暂时不用` **没有对应的 status**：它和「已废弃」一样是 `status=expired`（就是不生效了），
+ * 差别只在"还会不会回来"。给它单独造一个 status 会牵动 validate / 取代链 / restore 三处，
+ * 而这三处都只需要知道"它不生效"—— 那点区别属于**人的归类**，正是 `category` 的职责。
  */
-export const ARCHIVE_CATEGORY_DEFAULT = { expired: '已过期', superseded: '已蒸馏' };
+export const ARCHIVE_CATEGORY_DEFAULT = { expired: '已废弃', superseded: '已蒸馏' };
 export const ARCHIVE_CATEGORY_OTHER = '其它退场';
+/** 暂时用不上、但可能再启用的那类（2026-09-29 用户加的第三个默认分组）。 */
+export const ARCHIVE_CATEGORY_PARKED = '暂时不用';
+/**
+ * 「已归档」下**永远显示**的分组（哪怕 0 条）：
+ * 三个都是"为什么退场"的常见答案，少一个用户就会以为"这类东西不存在"。
+ */
+export const ARCHIVE_CATEGORY_ALWAYS = ['已蒸馏', '已废弃', ARCHIVE_CATEGORY_PARKED];
+/**
+ * 旧默认名的别名 —— `已过期` 在 v1.2.x 是默认分类，2026-09-29 改名成 `已废弃`。
+ *
+ * 在读**和**写边界都归一：老库里的 `category: 已过期` 直接按「已废弃」分组（不用先迁移），
+ * 人手再写 `已过期` 也会落成 `已废弃`（否则库里会同时存在两个近义分组）。
+ */
+export const LEGACY_CATEGORY_ALIAS = { 已过期: '已废弃' };
 export const CATEGORY_MAX = 40;
 
 /**
@@ -501,7 +524,7 @@ export function normalizeCategory(value, { strict = false } = {}) {
   const t = String(value).replace(/\s+/g, ' ').trim();
   if (!t) return null;
   if (strict && t.length > CATEGORY_MAX) throw new Error(`归档分类太长了（${t.length} 字，最多 ${CATEGORY_MAX}）`);
-  return t;
+  return LEGACY_CATEGORY_ALIAS[t] || t;
 }
 
 /** 一条归档条目**显示用**的分类：人写过的优先，没写就按 status 推。 */
@@ -933,7 +956,7 @@ export function promoteEntry(L, id, opts = {}) {
     const old = requireOneOrThrow(L, oldId);
     applySupersedeLink(L, old, e);
     // 被取代 = 结论被新版本顶上（多半就是"蒸馏进了文档"）→ 归档分类自动落「已蒸馏」。
-    // 「已蒸馏」是这条自动归类，**不是**人在手动归档时挑的选项（面板的归档确认只给「已过期」+ 自写）。
+    // 「已蒸馏」是这条自动归类，**不是**人在手动归档时挑的选项（面板的归档确认只给「已废弃」「暂时不用」+ 自写）。
     old.data.category = ARCHIVE_CATEGORY_DEFAULT.superseded;
     const archived = path.join(L.archive, `${old.id}.md`);
     if (path.resolve(old.file) === path.resolve(archived)) fs.writeFileSync(archived, serializeEntry(old), 'utf8');
@@ -1215,7 +1238,7 @@ export function archiveEntry(L, id, opts = {}) {
 }
 
 /**
- * **改归档分类**（面板上「已归档 → 已蒸馏/已过期」那一层）。
+ * **改归档分类**（面板上「已归档 → 已蒸馏/已废弃/暂时不用」那一层）。
  *
  * 只允许改**已经在归档里**的条目：分类是"为什么退场"的记录，常驻条目还没有这个问题
  * （它们要退场时才会被问）。这样也避免它变成第二个 topic 字段。
@@ -1308,7 +1331,7 @@ function cmdArchive(opts) {
   const root = resolveRoot(opts.root);
   const L = ensureLayout(root, { create: false });
   const id = opts._[0];
-  if (!id) fail('用法：mem archive <id> [--superseded-by <新id>] [--category "已过期"]\n  这条不再适用、又没有新版本顶上来时用；被新真相取代请用 mem supersede <旧> <新>\n  --category = 面板「已归档」下的第一层分类（不给就按退场方式推默认）');
+  if (!id) fail('用法：mem archive <id> [--superseded-by <新id>] [--category "已废弃"]\n  这条不再适用、又没有新版本顶上来时用；被新真相取代请用 mem supersede <旧> <新>\n  --category = 面板「已归档」下的第一层分类（不给就按退场方式推默认；\n  默认三个是 已蒸馏 / 已废弃 / 暂时不用 —— 「暂时不用」= 这个工作区暂时用不上、但可能再启用）');
   let result;
   try {
     result = archiveEntry(L, id, { supersededBy: opts['superseded-by'], category: opts.category });
@@ -1450,12 +1473,12 @@ function cmdSet(opts) {
     changed.push('topic');
   }
   if (opts.category !== undefined) {
-    // 归档分类（面板「已归档 → 已蒸馏/已过期」那一层）。只允许给**归档里**的条目设 ——
+    // 归档分类（面板「已归档 → 已蒸馏/已废弃/暂时不用」那一层）。只允许给**归档里**的条目设 ——
     // 见 setArchiveCategory 的注释：常驻条目还没退场，不该有"为什么退场"的分类。
     if (e.where !== 'archive') fail(`--category 只对归档里的条目有意义（${id} 在 ${e.where}/）—— 退场时才会问"为什么退场"`);
     try {
       e.data.category = normalizeCategory(opts.category === true ? '' : opts.category, { strict: true });
-      if (!e.data.category) fail('--category 不能为空（想按退场方式自动分就把它清掉：--category "" 目前不支持，请用 mem set --category "已过期"）');
+      if (!e.data.category) fail('--category 不能为空（想按退场方式自动分就把它清掉：--category "" 目前不支持，请用 mem set --category "已废弃"）');
     } catch (error) {
       fail(error.message);
     }

@@ -115,7 +115,7 @@ window.__ModuleLoader__.load({
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-secondary, #6b6b6b); }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-section-hint { display: none; }
 .dsh-memory-delta-section.is-child .dsh-memory-delta-count { font-size: 10px; }
-/* 归档层的分类头（已过期 / 已蒸馏 / 你自己写的）是**容器**：它体内挂着若干小主题。
+/* 归档层的分类头（已蒸馏 / 已废弃 / 暂时不用 / 你自己写的）是**容器**：它体内挂着若干小主题。
    条数报的是**整类**（含主题里的），所以给它比主题行更重的标题 —— 一眼分出"大类"和"小类"。
    ⚠️ CSS 注释里不能出现反引号（模板字符串会当场 SyntaxError）。 */
 .dsh-memory-delta-section.is-category > .dsh-memory-delta-section-head .dsh-memory-delta-section-title { font-weight: 700; }
@@ -239,7 +239,7 @@ window.__ModuleLoader__.load({
   color: inherit;
   font-weight: 600;
 }
-/* 行内小按钮的**选中态** —— 别省：归档确认条里选「已过期 / 已蒸馏」时，
+/* 行内小按钮的**选中态** —— 别省：归档确认条里选「已废弃 / 暂时不用」时，
    没有这条规则就是"点了没反应"（is-on 的样式原先只写给头部维度按钮，实测被用户抓到）。
    用边框 + 底色 + 加粗三重表达（主题里色差小，只靠底色会看不出来）。 */
 .dsh-memory-delta-mini.is-on {
@@ -581,24 +581,38 @@ window.__ModuleLoader__.load({
      * 与宿主的 `ARCHIVE_CATEGORY_DEFAULT` 必须一致（真正会用到的值由宿主在 payload 里算好 ——
      * 客户端这份只是渲染兜底：万一字段缺失也不至于显示成空白）。
      */
-    const ARCHIVE_CATEGORY_DEFAULT = { superseded: '已蒸馏', expired: '已过期' };
+    const ARCHIVE_CATEGORY_DEFAULT = { superseded: '已蒸馏', expired: '已废弃' };
     const ARCHIVE_CATEGORY_OTHER = '其它退场';
+    /**
+     * 「已归档」下**永远显示**的分组（哪怕 0 条）—— 与宿主 `ARCHIVE_CATEGORY_ALWAYS` 一致。
+     *
+     * 三个都是"为什么退场"的常见答案（用户 2026-09-29 补的第三个：`暂时不用`）：
+     *   · 已蒸馏   —— 结论已经搬进文档 / 被新版本顶上（自动归类，不是手选的）
+     *   · 已废弃   —— 彻底没用了，不会再启用
+     *   · 暂时不用 —— 这个工作区暂时用不上，但换个业务/项目可能又要（想再用就「取回」→「提升」）
+     * 少显示哪一个，用户就会以为"这类东西不存在"。
+     */
+    const ARCHIVE_CATEGORY_ALWAYS = ['已蒸馏', '已废弃', '暂时不用'];
+    /** 第三个默认分类（没有对应的 status，见宿主 `ARCHIVE_CATEGORY_PARKED` 的注释）。 */
+    const ARCHIVE_CATEGORY_PARKED = ARCHIVE_CATEGORY_ALWAYS[2];
+    /** v1.2.x 的旧默认名 → 新默认名（老库里的 `已过期` 直接按「已废弃」归组，不用预先迁移）。 */
+    const LEGACY_CATEGORY_ALIAS = { 已过期: '已废弃' };
     /**
      * 手动归档时能选的**预设分类**。
      *
-     * ⚠️ 刻意只有一个（用户 2026-09-23 定的）：「已蒸馏」**不是**手动归档时挑的选项 ——
-     * 它是"被取代 / 结论已经搬进文档"这件事的**自动归类**，由 `mem supersede`
-     * （或 `archive --superseded-by`）落下来。也就是说：
-     *   人手动归档 → 默认「已过期」，或自己写一个分类；
+     * ⚠️ 「已蒸馏」**不在**预设里（用户 2026-09-23 定的）：它是"被取代 / 结论已经搬进文档"
+     * 这件事的**自动归类**，由 `mem supersede`（或 `archive --superseded-by`）落下来。
+     * 也就是说：
+     *   人手动归档 → 默认「已废弃」（彻底没用），或选「暂时不用」（可能再启用），或自己写一个；
      *   蒸馏 / 取代 → 由那条命令自动落「已蒸馏」。
-     * 把它也做成按钮会让人误以为"我可以声称这条已经蒸馏过了"，而蒸馏是有实际动作的。
+     * 把「已蒸馏」也做成按钮会让人误以为"我可以声称这条已经蒸馏过了"，而蒸馏是有实际动作的。
      */
-    const ARCHIVE_PRESET_CATEGORIES = ['已过期'];
+    const ARCHIVE_PRESET_CATEGORIES = ['已废弃', '暂时不用'];
 
     /**
-     * 归档层的**分类 → 小主题 → 条目**三层（用户 2026-09-23 定的结构）：
+     * 归档层的**分类 → 主题行 → 条目**三层（用户 2026-09-23 定，2026-09-29 简化成一级主题）：
      *
-     *   已归档 → 「已过期 / 已蒸馏 / 你自建的」→ 小主题（这条记忆原本的 topic，可无）→ 条目
+     *   已归档 → 「已蒸馏 / 已废弃 / 暂时不用 / 你自建的」→ 主题行（点开才见条目）→ 条目
      *
      * 为什么分两层而不是像别的阶段那样只按一个维度分：归档条目已经不影响模型了，
      * 这时最有用的两个问题依次是"它为什么退场"（决定还能不能取回、值不值得看）
@@ -606,7 +620,8 @@ window.__ModuleLoader__.load({
      */
     const archiveCategoryOf = (e) => {
       const own = e && typeof e.category === 'string' ? e.category.trim() : '';
-      if (own) return own;
+      // 旧默认名（`已过期`）按新名归组 —— 老条目不用先迁移，也不会跟「已废弃」裂成两组
+      if (own) return LEGACY_CATEGORY_ALIAS[own] || own;
       const byStatus = ARCHIVE_CATEGORY_DEFAULT[e && e.status];
       return byStatus || ARCHIVE_CATEGORY_OTHER;
     };
@@ -825,7 +840,7 @@ window.__ModuleLoader__.load({
        *
        * 归档层**也跟随头部的 主题/类型/标签/日期**（用户要求"选主题时归档也按主题分"），
        * 而"主题"这一档在归档层用的是 `archiveTopicOf`：没写主题的按退场原因落到
-       * 「已蒸馏」/「已过期」，写了的用你给的主题 —— 所以**你可以在「已归档」下自建大主题**。
+       * 「已蒸馏」/「已废弃」/「暂时不用」，写了的用你给的主题 —— 所以**你可以在「已归档」下自建大主题**。
        */
       const archiveDimension = () => (groupBy === 'topic' ? 'archive' : groupBy);
       const [topicing, setTopicing] = useState(null);
@@ -839,7 +854,7 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState({});
       /** 批量归类的行内输入（`{ value }`，null = 没打开）。 */
       const [batchTopic, setBatchTopic] = useState(null);
-      /** 归档确认里选的分类（默认「已过期」，可改成预设里的另一个或自己写）。 */
+      /** 归档确认里选的分类（默认「已废弃」，可改成「暂时不用」或自己写）。 */
       const [archiveCategoryInput, setArchiveCategoryInput] = useState(ARCHIVE_PRESET_CATEGORIES[0]);
       /** 「改归档分类」的行内输入：`{ id, value }`。 */
       const [categorizing, setCategorizing] = useState(null);
@@ -1111,7 +1126,7 @@ window.__ModuleLoader__.load({
           .then(() => clearPending());
       };
 
-      /** 改**归档分类**（「已归档 → 已蒸馏/已过期/其它」那一层）。只对归档里的条目有效。 */
+      /** 改**归档分类**（「已归档 → 已蒸馏/已废弃/暂时不用/自建」那一层）。只对归档里的条目有效。 */
       const setCategory = (id, category) => {
         setPendingId(id);
         return callAction({ op: 'category', id, category })
@@ -1493,7 +1508,7 @@ window.__ModuleLoader__.load({
               h('input', {
                 value: categorizing.value,
                 list: 'dsh-memory-delta-category-options',
-                placeholder: '归档分类，例如 已过期 / 已蒸馏',
+                placeholder: '归档分类，例如 已废弃 / 暂时不用',
                 'aria-label': '归档分类',
                 onChange: (ev) => setCategorizing({ id: e.id, value: ev && ev.target ? ev.target.value : '' }),
                 onKeyDown: (ev) => {
@@ -1769,7 +1784,7 @@ window.__ModuleLoader__.load({
           // 顺序即推荐顺序：主题（真正把条目归纳到一起）→ 类型 → 标签 → 日期。
           // 四档都**作用于三个阶段**（待你确认 / 已在用 / 已归档）。
           // 不再有"退场原因"档位（用户 2026-09-23 反馈：不需要）：归档层的主题视角本来就
-          // 是「已蒸馏」/「已过期」+ 你自建的主题，见 `archiveTopicOf`。
+          // 是「已蒸馏」/「已废弃」/「暂时不用」+ 你自建的主题，见 `archiveTopicOf`。
           h(
             'button',
             { type: 'button', className: groupBy === 'topic' ? 'is-on' : undefined, onClick: () => setGroupBy('topic'), title: '按主题分组（你指定的归纳：没归类的落在「未归类」。归档层先按分类分，分类下面是主题行，点开才见条目）' },
@@ -2074,7 +2089,7 @@ window.__ModuleLoader__.load({
         if (dimension === 'archive') {
           /**
            * **归档层的三层结构**（分类 → 主题 → 条目）：
-           *   分类 = `category`（人写的）或按 status 推的默认（已蒸馏 / 已过期）
+           *   分类 = `category`（人写的）或按 status 推的默认（已蒸馏 / 已废弃 / 暂时不用）
            *   主题 = 这条记忆原本的 `topic`（可选，**一级**；没有主题的条目直接列在分类下）
            *
            * 分类这一层**始终出分组头**（哪怕这一类只有 0 条），否则用户看不到"这条为什么在这"。
@@ -2086,16 +2101,17 @@ window.__ModuleLoader__.load({
             byCategory.get(cat).push(e);
           }
           /**
-           * ⚠️ 两个**默认分类**永远在（用户 2026-09-29 定："空的就是 0 条"，不许消失）。
+           * ⚠️ 三个**默认分类**永远在（用户 2026-09-29 定："空的就是 0 条"，不许消失）。
            *
            * 踩过的坑：以前"分类下没有直接条目就不出分类头" → 20 条全在主题里的「已蒸馏」
            * 整块从界面上消失（用户原话"已蒸馏没了"）。分类是**容器**，
            * 它的存在与否由"库里有没有这类退场"决定，不是由"有没有直接挂在它下面的条目"决定。
            */
-          for (const dflt of Object.values(ARCHIVE_CATEGORY_DEFAULT)) {
+          for (const dflt of ARCHIVE_CATEGORY_ALWAYS) {
             if (!byCategory.has(dflt)) byCategory.set(dflt, []);
           }
-          // 条数多的在前；两个默认分类条数相同时按名字排（保证顺序稳定，测试也钉得住）
+          // 条数多的在前（有东西的先看见，空的默认分类沉底）；条数相同时按名字排，
+          // 保证顺序稳定、测试也钉得住
           const cats = [...byCategory.entries()].sort((a, b) => b[1].length - a[1].length || String(a[0]).localeCompare(String(b[0])));
           const out = [];
           for (const [cat, items] of cats) {
@@ -2103,8 +2119,10 @@ window.__ModuleLoader__.load({
               cat === ARCHIVE_CATEGORY_DEFAULT.superseded
                 ? '结论已经搬进文档、或被新版本顶上 —— 留着只为留个出处'
                 : cat === ARCHIVE_CATEGORY_DEFAULT.expired
-                  ? '不再适用又没有替代 —— 结论作废，原因写在条目正文里'
-                  : '你给的归档分类';
+                  ? '彻底没用了、不会再启用 —— 结论作废，原因写在条目正文里'
+                  : cat === ARCHIVE_CATEGORY_PARKED
+                    ? '这个工作区暂时用不上，但换个业务/项目可能又要 —— 想再用：条目上「取回」→「提升」'
+                    : '你给的归档分类';
             out.push({
               key: cat,
               title: cat,
@@ -2328,7 +2346,7 @@ window.__ModuleLoader__.load({
          * ⚠️ **归档层是"容器 + 体内挂主题行"**，不是一排平级的分组头。
          *
          * 踩过的坑（用户 2026-09-23 实测）：主题以前跟分类头**平级**排在后面，
-         * 于是"已过期"和"已蒸馏"各带一串主题混在一起，看不出谁挂在谁下面；
+         * 于是两个分类各带一串主题混在一起，看不出谁挂在谁下面；
          * 改成嵌套之后，分类头一收起，整类（连同它的主题行）一起收。
          */
         const containers = new Set(groups.filter((g) => g.isCategory).map((g) => g.key));
@@ -2586,7 +2604,7 @@ window.__ModuleLoader__.load({
             const batch = confirming && confirming.batch ? confirming.batch : null;
             /**
              * 批量归档也要能选分类（用户 2026-09-29："归档时也可创建新的分组"）。
-             * 以前批量那条路**没有**分类入口，于是"一次勾 10 条归档"全落进默认的「已过期」，
+             * 以前批量那条路**没有**分类入口，于是"一次勾 10 条归档"全落进默认的「已废弃」，
              * 想按类放还得一条条再点「分类」—— 与单条能力不对等。
              */
             const catRow = (key) =>

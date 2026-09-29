@@ -75,19 +75,25 @@ The archived stage reads in three levels:
 
 ```
 archived
-  已过期 (20)        ← category: why it left. Two are always present (已过期 / 已蒸馏; an empty one shows 0)
+  已废弃 (20)        ← category: why it left. Three are always present (已蒸馏 / 已废弃 / 暂时不用; an empty one shows 0)
     · gitignore-…    ← entries with no topic are listed right under the category
     DSH 插件开发 (6)  ← topic rows: click one to reveal its entries
     开源与发布 (5)
   已蒸馏 (20)        ← superseded / distilled into the docs (set automatically, not hand-picked)
+  暂时不用 (0)       ← not needed right now, but this workspace may want it again (restore → promote)
 ```
 
-- **Category** (the `category` field) is *why it left*. `已过期` and `已蒸馏` are the two defaults; when
-  archiving (single or batch) you can pick an existing one or **type a new one**.
+- **Category** (the `category` field) is *why it left*. Three defaults:
+  `已蒸馏` (distilled into the docs / superseded), `已废弃` (useless for good),
+  `暂时不用` (not needed right now, but another project or business need may want it back — the difference
+  from `已废弃` is only "might it return"; both keep `status: expired`).
+  When archiving (single or batch) you can pick one of them or **type a new one**.
 - **Topic rows** are the entry's own `topic`. **Click one to see its entries** — the archive gives you a
   table of contents first instead of dumping dozens of rows. Topics have **one level**: same name, same group
   (a `/` inside a name is just an ordinary character — no parent/child splitting any more).
 - To move an entry: the 分类 button on its row, or `mem set <id> --category "…"`.
+- The old default name `已过期` (written by v1.2.x) is grouped as `已废弃` on both read and write, so no
+  migration is required.
 
 ### Q: Why can only candidates be deleted?
 

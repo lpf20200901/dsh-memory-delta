@@ -1302,7 +1302,7 @@ section('「动作」路由（promote / rename / topic）');
 
   const batchTopicSet = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'topic', ids: [clashB.id], topic: '批量归类' }) });
   check('批量归类（op=batch + action=topic）', batchTopicSet.json.succeeded.length === 1 && readAll(L).find((e) => e.id === clashB.id)?.data.topic === '批量归类', JSON.stringify(batchTopicSet.json));
-  // 批量归档也要能选/新建分类（2026-09-29：以前批量那条路没有分类入口，全落进默认的「已过期」）
+  // 批量归档也要能选/新建分类（2026-09-29：以前批量那条路没有分类入口，全落进默认的「已废弃」）
   const mkStanding = async (key, conclusion) => {
     const c = createEntry(L, { type: 'fact', conclusion, key });
     await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'promote', ids: [c.id] }) });
@@ -1317,7 +1317,7 @@ section('「动作」路由（promote / rename / topic）');
   const archEntryB = readAll(L).find((e) => e.id === archB.id);
   // ⚠️ 不带分类时**照样显式写下默认值**（archiveEntry 一律落 category）——
   // 「按 status 推」只是**读**旧条目的兜底，不是写入口的常态
-  check('批量归档不带分类时按 status 落默认分类', archEntryB?.where === 'archive' && archEntryB?.data?.status === 'expired' && archEntryB?.data?.category === '已过期', JSON.stringify({ where: archEntryB?.where, status: archEntryB?.data?.status, cat: archEntryB?.data?.category }));
+  check('批量归档不带分类时按 status 落默认分类', archEntryB?.where === 'archive' && archEntryB?.data?.status === 'expired' && archEntryB?.data?.category === '已废弃', JSON.stringify({ where: archEntryB?.where, status: archEntryB?.data?.status, cat: archEntryB?.data?.category }));
 
   const batchBadAction = await callRoute(route, { body: JSON.stringify({ op: 'batch', action: 'rename', ids: ['x'] }) });
   check('批量不支持的动作（rename）→ 400', batchBadAction.status === 400 && /不支持的批量动作/.test(String(batchBadAction.json.error)), String(batchBadAction.json.error));

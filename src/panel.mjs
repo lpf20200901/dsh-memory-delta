@@ -774,7 +774,7 @@ export function createActionRoute(opts = {}) {
           return;
         }
         if (op === 'category') {
-          // 改**归档分类**（「已归档」下的第一层：已蒸馏 / 已过期 / 其它）。
+          // 改**归档分类**（「已归档」下的第一层：已蒸馏 / 已废弃 / 暂时不用 / 自建）。
           // 只对归档里的条目有效 —— 常驻条目还没退场，不该有"为什么退场"的分类（见 setArchiveCategory）。
           const r = setArchiveCategory(L, id, body?.category);
           writeJson(res, 200, { ok: true, op, id: r.id, category: r.category });

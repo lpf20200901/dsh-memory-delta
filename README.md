@@ -174,12 +174,15 @@ candidate / safe rename / assign topic / rename topic / batch) — there is no g
 and `allowWrite: false` turns the whole route off.
 Two defaults that keep the tab calm: **the archived stage is collapsed by default** (retired conclusions
 should not push the live entries out of view) and **the archive reads in three levels** —
-`archived → category → topic → entries`. The category is *why it left* (the `category` field). Two of them
-are always there — `已过期` and `已蒸馏` (an empty one still shows, with `0`) — and archiving lets you type a
-new one (single or batch). `已蒸馏` is set **automatically** when an entry is superseded / distilled into the
+`archived → category → topic → entries`. The category is *why it left* (the `category` field). Three of them
+are always there (an empty one still shows `0`): `已蒸馏` (distilled into the docs / superseded),
+`已废弃` (useless for good) and `暂时不用` (not needed right now, but this workspace or another business need
+may want it again — restore → promote brings it back). Archiving lets you pick one or type a new one
+(single or batch). `已蒸馏` is set **automatically** when an entry is superseded / distilled into the
 docs, and the row's 分类 button changes it later. Below a category, **topic rows** (the entry's own `topic`)
 are **collapsed — click one to see its entries**; entries without a topic are listed right under the category.
 The archive still follows the header axis: switching to type / tag / date re-groups it too.
+The old default name `已过期` (v1.2.x) is grouped as `已废弃` on read and write, so no migration is needed.
 Topics have **one level**: the topic name is just a string (same name = same group; a `/` in it is an ordinary
 character). Earlier versions split `parent/child` into two levels — that was dropped in favour of the simpler model.</sub>
 
