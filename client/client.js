@@ -109,10 +109,12 @@ window.__ModuleLoader__.load({
    之前用原生 <details> 又隐藏了 ::-webkit-details-marker，结果**没有任何可展开的标志**
    —— 用户根本不知道能点。现在自绘箭头（CSS 三角），展开时旋转 90°。 */
 .dsh-memory-delta-section { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18)); padding-top: 6px; }
-/* 子主题：缩进一格 + 左侧竖线，一眼看出它是挂在上面那个父主题下面的（两级主题用）
-   ⚠️ 只改**缩进与描边**，不改字号/颜色 —— 层级靠位置表达，别再靠小字注释 */
+/* 子主题：缩进一格 + 左侧竖线 + **小一号字**，一眼看出它挂在上面那个父分组下面。
+   层级靠位置与样式表达，**不靠重复父名**（用户 2026-09-23 反馈："已过期 下面一堆 已过期>…"很违和）。 */
 .dsh-memory-delta-section.is-child { margin-left: 12px; padding-left: 8px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(128,128,128,.28)); }
-.dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-weight: 500; }
+.dsh-memory-delta-section.is-child .dsh-memory-delta-section-title { font-size: 11px; font-weight: 500; color: var(--dsw-alias-label-secondary, #6b6b6b); }
+.dsh-memory-delta-section.is-child .dsh-memory-delta-section-hint { display: none; }
+.dsh-memory-delta-section.is-child .dsh-memory-delta-count { font-size: 10px; }
 .dsh-memory-delta-section-head {
   display: flex;
   align-items: center;
@@ -637,11 +639,12 @@ window.__ModuleLoader__.load({
      * 折叠状态由父组件的 `collapsed` 管（不受控的 `<details>` 在 React 里
      * 会被 `open` 属性来回覆盖，刷新后弹回全展开）。
      *
-     * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, className }`
+     * @param {object} spec `{ key, title, slug, count, hint, open, onToggle, className, titleAttr }`
      *   `slug` 是磁盘上的文件夹名（facts / decisions / inbox）；没有对应目录的分组传 null。
+     *   `titleAttr` 是 hover 提示（子主题用它补全 `父 › 子`，而标题本身只显示子名）。
      */
     function section(spec, children) {
-      const { key, title, slug, count, hint, open, onToggle, className } = spec;
+      const { key, title, slug, count, hint, open, onToggle, className, titleAttr } = spec;
       return h(
         'div',
         { className: className ? `dsh-memory-delta-section ${className}` : 'dsh-memory-delta-section', key },
@@ -655,7 +658,7 @@ window.__ModuleLoader__.load({
               className: 'dsh-memory-delta-toggle',
               onClick: onToggle,
               'aria-expanded': open ? 'true' : 'false',
-              title: open ? '收起' : '展开',
+              title: `${open ? '收起' : '展开'}${titleAttr ? ` · ${titleAttr}` : ''}`,
             },
             h('span', { className: open ? 'dsh-memory-delta-caret is-open' : 'dsh-memory-delta-caret' }, null),
             h('span', { className: 'dsh-memory-delta-section-title' }, title),
@@ -2275,12 +2278,16 @@ window.__ModuleLoader__.load({
           return section(
             {
               key,
-              title: g.parent ? `${g.parent} › ${g.title}` : g.title,
+              // ⚠️ 子主题**只显示自己的名字**，不再拼 `父 › 子`（用户反馈："已过期 下面一堆 已过期>…"很违和）。
+              // 层级已经由缩进 + 左侧竖线 + 更小的字号表达了，把父名再重复一遍纯属噪音。
+              // 父名仍然在 `title`（hover）与 `key`（折叠状态）里 —— 信息没丢，只是不占版面。
+              title: g.title,
               slug: g.slug ?? null,
               count: g.list.length,
               hint: g.hint,
-              // 子主题缩进一格，一眼看出层级
+              // 子主题缩进一格 + 小一号字（样式在 CSS 的 .is-child）
               className: g.parent ? 'is-child' : undefined,
+              titleAttr: g.parent ? `${g.parent} › ${g.title}` : undefined,
               open: isOpen(key),
               onToggle: () => toggleSection(key),
             },

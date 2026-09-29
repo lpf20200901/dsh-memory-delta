@@ -1370,9 +1370,12 @@ section('组件：维度作用于三个阶段（待你确认 / 已在用 / 已�
   check('第一层是分类：没写 category 的过期条目落「已过期」', Boolean(findByProp(mounted.tree(), 'key', 'archive:archive:已过期')), headers2);
   check('第一层是分类：没写 category 的取代条目落「已蒸馏」', Boolean(findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏')), headers2);
   const catSup = findByProp(mounted.tree(), 'key', 'archive:archive:已蒸馏');
-  check('第二层是小主题：带 topic 的归档缩进显示在分类下面', headers2.includes('已蒸馏 › 我自己建的主题'), headers2);
-  console.log('DBG catSup=', Boolean(catSup), JSON.stringify(allText(catSup || { kids: [] }).slice(0, 80)));
-  console.log('DBG children=', findAllByClass(catSup, 'dsh-memory-delta-section').map((s) => [String(s.props.className), allText(s).slice(0, 20)]));
+  // 子主题**只显示自己的名字**（不拼 `父 › 子` —— 用户反馈那样"已过期 下面一堆 已过期>…"很违和）；
+  // 完整路径仍在分组的 hover 提示里，信息没丢
+  const subSection = findAllByClass(mounted.tree(), 'dsh-memory-delta-section').find((s) => String(s.props.className).includes('is-child') && allText(s).includes('老的坑三'));
+  check('第二层是小主题：带 topic 的归档缩进在分类下面（标题只写子名，不带父名前缀）', Boolean(subSection) && headerTexts(subSection).some((hd) => hd.startsWith('我自己建的主题') && !hd.includes('已蒸馏 ›')), headerTexts(subSection || { kids: [] }).join(' / '));
+  const subToggle = findAllByClass(subSection, 'dsh-memory-delta-toggle')[0];
+  check('完整路径 `父 › 子` 仍在 hover 提示里', String(subToggle.props.title).includes('已蒸馏 › 我自己建的主题'), String(subToggle.props.title));
   check('分类头上说明了这一类为什么退场', allText(catSup).includes('搬进文档') || allText(catSup).includes('出处'), allText(catSup).slice(0, 140));
   check('头部**不再**有「退场原因」档位（用户反馈不需要）', !allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]).includes('退场原因'), allText(findAllByClass(mounted.tree(), 'dsh-memory-delta-seg')[0]));
 
@@ -1740,9 +1743,11 @@ section('组件：两级主题（父主题 / 子主题）+ 归档按退场原因
   const headers = headerTexts(mounted.tree()).join(' | ');
   check('父主题（不带分隔符）就是一条普通分组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发')), headers);
   check('带 `/` 的主题分成两级的子分组', Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/面板')) && Boolean(findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/宿主')), headers);
-  check('子分组标题写成「父 › 子」（位置表达层级，不靠注释）', headers.includes('DSH 插件开发 › 面板'), headers);
   const childSection = findByProp(mounted.tree(), 'key', 'standing:topic:DSH 插件开发/面板');
-  check('子分组带 is-child（缩进 + 左侧竖线，CSS 里定）', String(childSection.props.className).includes('is-child'), String(childSection.props.className));
+  check('子分组带 is-child（缩进 + 左侧竖线 + 小一号字，CSS 里定）', String(childSection.props.className).includes('is-child'), String(childSection.props.className));
+  check('子分组标题只写子名（不带父名前缀 —— 层级靠缩进与样式）', headerTexts(childSection).some((hd) => hd.startsWith('面板') && !hd.includes('DSH 插件开发 ›')), headerTexts(childSection).join(' / '));
+  const childToggle = findAllByClass(childSection, 'dsh-memory-delta-toggle')[0];
+  check('完整路径 `父 › 子` 在 hover 提示里（信息没丢，只是不占版面）', String(childToggle.props.title).includes('DSH 插件开发 › 面板'), String(childToggle.props.title));
   check('子分组只装自己的条目（父主题那条不在里面）', allText(childSection).includes('面板那条') && !allText(childSection).includes('父主题下的条目'), allText(childSection).slice(0, 120));
 
   // 归档层：主题= 你设的 或 默认（按退场原因）—— 这就是"已蒸馏/已过期 作为归档默认主题"的实现
