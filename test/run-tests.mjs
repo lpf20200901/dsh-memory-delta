@@ -123,7 +123,7 @@ section('基础流程（ASCII 路径）');
 
   run(['index', '--root', root]);
   r = run(['inject', '--root', root]);
-  // 注入正文里只有结论（id 不占预算，它随 source.entries 走结构化通道）
+  // 注入正文里只有结论（id 不占预算，它走侧车状态文件、不进上下文）
   check('inject 只含 active（被取代的不出现）', r.out.includes('结论二') && !r.out.includes('结论一'), flat(r.out));
   check('inject 正文不写 id（省预算）', !r.out.includes('<!--') && !r.out.includes(idB), flat(r.out));
   check('inject 与 validate 用同一套渲染（字节数才对得上）', r.out.includes('dsh-memory-delta 记录的项目长期记忆'), flat(r.out).slice(0, 80));

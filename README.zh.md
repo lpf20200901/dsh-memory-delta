@@ -65,15 +65,19 @@ AI 编码助手有两个反复出现的毛病：
 
 - **推送的东西必须极小**：注入层里的内容每次会话都要花 token。所以流水、设计文档都不进注入层。
   实测一个 31 条常驻的真实记忆库：注入文本 **4369 字节**，**平均 141 字节/条**，
-  所以同规模的库用 5 KB 预算就装得下。文本里刻意**不写**两样东西：条目 **id**（它随消息的
-  结构化 `source.entries` 一起走，内联进正文曾吃掉 **34%** 的预算），以及**与 id 一字不差的 key**
+  所以同规模的库用 5 KB 预算就装得下。文本里刻意**不写**两样东西：条目 **id**（它只是
+  差分用的元数据，落在侧车状态文件里，**根本不进上下文**；内联进正文曾吃掉 **34%** 的预算），
+  以及**与 id 一字不差的 key**
   （`createEntry` 会拿 key 当文件名，于是真实库里 31 条有 30 条的 key 与 id 完全相同 ——
   正文里再写一遍是纯重复，实测白占 15% 预算）。每条还会按 90 字截断首行。
 - **只推变化的部分**：每条条目带 12 位内容 hash，插件记住上一轮的状态，下一轮**只推新增/已更新/已失效**；
   **完全没变化时一个字都不注入**。（上游 `dsh-agent-instructions` 没有差分：文件一变就整篇重注入，
   实测一个会话里改 15 次某个 8.5 KB 的文件 ≈ 白烧 58k tokens。）
-- **状态从会话历史恢复**：不存旁路状态文件，而是从自己发过的消息里读回 `{id: hash}` ——
-  所以会话恢复 / 回放 / 压缩之后依然正确。
+- **状态存侧车文件**：`$DSH_HOME/storages/dsh-memory-delta/inject-state/<会话id>.json`。
+  ⚠️ 2026-09-30 改的：早先把 `{id: hash}` 塞在消息的 `source` 里，那**违反了 DSH 会话格式 v0 白名单**
+  （plugin source 只允许 `kind/plugin/form/sections/summary`），会让整条会话在格式迁移时被拒、
+  **永久打不开**（本机 14 条会话因此报废，只能手工修日志）。现在状态不碰会话格式，
+  且**只在消息真的进了上下文之后才记账** —— 排队后又被清掉的消息不会让状态虚增。
 - **模型只写收件箱**：错误结论若静默进入常驻层，会被**反复注入**。提升需要显式 `promote`。
 - **一个 key 一个真相**：事实/决策带语义键 `key`，同一个 `scope+key` 上**只能有一条 active**。
   新结论要进来，必须显式 `--supersedes` 旧的 —— 这是把"记忆腐化"挡在常驻层外的闸门。
@@ -217,7 +221,7 @@ mem journal add "流水一行"
 | 无变化 → 零注入 | 下一步没有重复注入，只补了一次蒸馏提醒 |
 | delta·新增 | "新增：<新条目>"，并注明"其余 N 条未变化" |
 | delta·已更新 | 改一条后只推"已更新：<该条>" |
-| 到期复核提醒 | 加一条 `verify_when` 已过期 16 天的条目 → 下一个"无变化"的步骤弹出一次 `form='due'` 提醒，**再下一步零注入**（提醒没污染差分基线） |
+| 到期复核提醒 | 加一条 `verify_when` 已过期 16 天的条目 → 下一个"无变化"的步骤弹出一次复核提醒，**再下一步零注入**（提醒没污染差分基线） |
 | 侧边栏**记忆**页签 | 真机打开后显示真实库路径、条目条数、"注入 1792 / 3072 字节"、事实/决策分组，以及（空的）收件箱 |
 | `memory_search` / `memory_write` | 真机调用成功 |
 | 写入只落 inbox | 写进去的候选**确实没进注入载荷**，promote 后才以 delta 出现 |
@@ -225,18 +229,18 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 1096 个断言，零依赖
+npm test        # 1206 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 274 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名、`topic` 全生命周期、保留主题名、注入正文瘦身、手写 frontmatter 保真） |
-| `test/planner-tests.mjs` | 46 | 差分算法 + 注入正文渲染（纯逻辑） |
+| `test/run-tests.mjs` | 295 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名、`topic` 全生命周期、保留主题名、注入正文瘦身、手写 frontmatter 保真） |
+| `test/planner-tests.mjs` | 52 | 差分算法 + 注入正文渲染 + 来源形状必须过 DSH 白名单（纯逻辑） |
 | `test/search-tests.mjs` | 56 | 分词 / 按层加权 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
-| `test/hook-tests.mjs` | 63 | 插件接线（假 agent / decision）：差分注入、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 300 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename/topic/batch 真的写库 + 400/500 错误码分类 + 白名单/来源校验 + 工具输出契约与 render 文本） |
-| `test/client-tests.mjs` | 264 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、四个维度覆盖三个阶段、归类、批量勾选、点条目调 openFile、检索时序与截断提示、提升/整理文件名、失败态） |
+| `test/hook-tests.mjs` | 66 | 插件接线（假 agent / decision）：差分注入、状态侧车落盘时机、蒸馏提醒、到期提醒 |
+| `test/plugin-tests.mjs` | 303 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename/topic/batch 真的写库 + 400/500 错误码分类 + 白名单/来源校验 + 工具输出契约与 render 文本） |
+| `test/client-tests.mjs` | 341 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、四个维度覆盖三个阶段、归类、批量勾选、点条目调 openFile、检索时序与截断提示、提升/整理文件名、失败态；含"没装 better-sidebar 时 apply 必须安全跳过"的回归） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。
@@ -253,7 +257,13 @@ npm test        # 1096 个断言，零依赖
   （`C:\Users\李鹏飞` → `C:\Users\%E6%9D%8E%E9%B9%8F%E9%A3%9E`），"往插件目录里写"就变成
   "往一个根本不存在的路径里写" —— 一律用 `fileURLToPath`；
 - 内部函数只给**部分** return 路径补字段（`due`），解构出来就是 `undefined`，每一步都抛错、
-  又被外层 try/catch 包装成"加载记忆失败" —— 于是有了防御式取值 + "零告警"断言。
+  又被外层 try/catch 包装成"加载记忆失败" —— 于是有了防御式取值 + "零告警"断言；
+- 注入消息的 `source` 必须用 **DSH 认可的插件包装**（`{kind:'plugin', plugin:'<包名>'}`）：
+  自定义 `source.kind`（老写法 `'memory'`）会让会话格式 v2→v3 迁移**拒绝整条会话**
+  （`cannot safely transform unclassified message source`），而源日志按设计**保持原样** ——
+  于是**凡是收到过这条消息的会话都会永久打不开**；迁移读回后的形态（`{kind:'plugin:<包名>'}`）
+  也必须认；**并且 plugin source 不能带 `entries` 或自定义 `form`**（v0→v1 的白名单只允许
+  `kind/plugin/form/sections/summary`）—— 差分状态因此改存侧车文件，不再随消息走。
 
 ## 路线图
 

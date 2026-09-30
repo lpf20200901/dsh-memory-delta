@@ -14,12 +14,14 @@ import { fileURLToPath } from 'node:url';
 import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
 import { createEntry, ensureLayout, injectPayload, loadConfig, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
 import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
-import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
+import { MEMORY_PLUGIN_ID, isMemorySource, memorySource } from '../src/planner.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // 沙箱目录**按进程分**：两套测试同时跑（两个 agent 并行、或边跑测试边手动验证）时
 // 共用同一个 `.test-sandbox` 会互相 rmrf，表现为"随机失败且每次失败项都不同" —— 真实踩过。
 const SANDBOX = process.env.MEM_TEST_SANDBOX || path.join(HERE, '..', `.test-sandbox-${process.pid}`);
+// 差分状态（侧车）也落沙箱：**绝不能**写进真实的 $DSH_HOME（见 src/plugin.mjs 的 stateDir）
+process.env.DSH_MEMORY_DELTA_STATE_DIR = path.join(SANDBOX, 'inject-state');
 
 let pass = 0;
 let fail = 0;
@@ -101,6 +103,19 @@ function rmrf(p) {
     for (const e of fs.readdirSync(p)) rmrf(path.join(p, e));
     fs.rmdirSync(p);
   } else fs.unlinkSync(p);
+}
+
+/**
+ * 模拟"这个会话已经注入过这些条目"：直接写侧车状态文件。
+ * 从 v1.3.1 起差分状态不再随消息的 `source.entries` 走（那会被会话格式白名单拒），
+ * 所以集成测试只能从状态文件这一侧播种。
+ */
+function seedSessionState(sessionId, entries) {
+  const dir = process.env.DSH_MEMORY_DELTA_STATE_DIR;
+  fs.mkdirSync(dir, { recursive: true });
+  const state = {};
+  for (const e of entries) state[e.id] = e.hash;
+  fs.writeFileSync(path.join(dir, `${sessionId}.json`), JSON.stringify({ state, dueNotified: false }), 'utf8');
 }
 
 /* -------------------------------------------------------- 假的 DSH ctx/agent */
@@ -381,7 +396,7 @@ const preStep = ctx.handlers.get('agent/pre-step');
   check('第 1 轮把 baseline 排进 inbox', agent.inbox.nextStep.length === 1);
   const baseline = agent.inbox.nextStep[0];
   check('baseline 内容是记忆条目', baseline.content[0].text.includes('不要用 rmSync'), baseline.content[0].text.slice(0, 60));
-  check('baseline 带 source.entries', Array.isArray(baseline.source.entries) && baseline.source.entries[0].id === 'known-fact');
+  check('baseline 的 source 是白名单形状（只有 kind+plugin）', baseline.source.kind === 'plugin' && Object.keys(baseline.source).length === 2, JSON.stringify(baseline.source));
 
   // 第 2 轮：已领取里含上轮那条 → 状态一致 → 零注入
   const claimed = [userMsg, baseline];
@@ -399,10 +414,13 @@ const preStep = ctx.handlers.get('agent/pre-step');
   const d3 = { kind: 'ok', messages: [...claimed] };
   const o3 = await preStep({ agent: fakeAgent(cwdOfProject), messages: claimed, step: 3 }, async () => d3);
   check('第 3 轮插入 1 条', o3.messages.length === d3.messages.length + 1, String(o3.messages.length));
-  const delta = o3.messages.find((m) => m.source?.kind === MEMORY_SOURCE_KIND && m.content[0].text.includes('新增'));
+  const delta = o3.messages.find((m) => isMemorySource(m.source) && m.content[0].text.includes('新增'));
   check('第 3 轮推的是 delta', !!delta, JSON.stringify(o3.messages.map((m) => m.content[0].text.slice(0, 24))));
+  // 2026-09-30 回归：注入消息的来源必须是 DSH 认可的 plugin 包装。
+  // 自定义 kind（老的 'memory'）会让 v2→v3 迁移拒绝整条会话 —— 会话从此打不开，且日志不会自动修复。
+  check('注入消息的来源是 plugin 包装', !!delta && delta.source.kind === 'plugin' && delta.source.plugin === MEMORY_PLUGIN_ID, JSON.stringify(delta?.source));
   check('delta 只含新条目', delta && /沙箱禁管道/.test(delta.content[0].text) && !/rmSync/.test(delta.content[0].text), delta?.content[0].text.slice(0, 120));
-  // 回归：id 只走 source.entries，不进正文（曾占掉 40% 注入字节）
+  // 回归：id 只进侧车状态，不进正文（曾占掉 40% 注入字节）
   check('注入正文不含 id 注释', delta && !delta.content[0].text.includes('<!--'), delta?.content[0].text.slice(0, 120));
   check('baseline 正文也不含 id 注释', !baseline.content[0].text.includes('<!--'), baseline.content[0].text.slice(0, 120));
 
@@ -625,7 +643,7 @@ section('超预算：memory_write 当场给一句可读告警');
 
 /* ------------------------------------------------- 到期复核：真接线跑一遍 */
 
-section('到期复核：通过插件真实接线发出 form=due 的提醒');
+section('到期复核：通过插件真实接线发出提醒（按文案认领）');
 {
   // 造一条"早已过期"的条目（verify_when 是过去日期），直接写进 facts/
   const created = createEntry(L, { type: 'fact', id: 'stale-fact', conclusion: '该复核的老结论', source: 's2' });
@@ -638,19 +656,19 @@ section('到期复核：通过插件真实接线发出 form=due 的提醒');
   apply(dueCtx, { root: ROOT, maxBytes: 3072 });
   const agent = fakeAgent(cwdOfProject, 'session-due');
 
-  // 传一份"已含全部当前记忆状态"的历史：这样 plan 是 none，走的正是到期提醒该出场的那条路
-  const state = injectPayload(L, 3072).entries.map((e) => ({ id: e.id, hash: e.hash }));
-  const seen = { id: 'seen', source: { kind: MEMORY_SOURCE_KIND, entries: state }, content: [{ type: 'text', text: '之前注入过' }] };
+  // 侧车：这个会话的状态已是最新 → plan 是 none，正是到期提醒该出场的那条路
+  seedSessionState('session-due', injectPayload(L, 3072).entries);
+  const seen = { id: 'seen', source: memorySource(), content: [{ type: 'text', text: '之前注入过' }] };
   const claimed = [{ id: 'u2', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }, seen];
   const d = { kind: 'ok', messages: [...claimed] };
 
   const out = await dueCtx.handlers.get('agent/pre-step')({ agent, messages: claimed, step: 2 }, async () => d);
-  const dueMsg = out.messages.find((m) => m.source?.form === 'due');
-  check('插件接线能发出到期提醒', !!dueMsg, JSON.stringify(out.messages.map((m) => m.source?.form)));
+  const dueMsg = out.messages.find((m) => /该复核的老结论/.test(m.content?.[0]?.text ?? ''));
+  check('插件接线能发出到期提醒', !!dueMsg, JSON.stringify(out.messages.map((m) => m.content[0].text.slice(0, 24))));
   check('提醒通过真实 createUserMessage 构造', !!dueMsg && dueMsg.role === 'user' && Array.isArray(dueMsg.content), JSON.stringify(dueMsg?.content));
-  check('提醒的 source.entries 是 undefined（不污染差分基线）', dueMsg && dueMsg.source.entries === undefined, JSON.stringify(dueMsg?.source));
+  check('提醒的 source 是白名单形状（不带状态）', !!dueMsg && Object.keys(dueMsg.source).length === 2, JSON.stringify(dueMsg?.source));
   check('提醒文案含该复核的条目', !!dueMsg && /该复核的老结论/.test(dueMsg.content[0].text), dueMsg?.content[0].text.slice(0, 160));
-  check('这一轮不重复注入记忆（desired 本来就是 null）', out.messages.filter((m) => m.source?.kind === MEMORY_SOURCE_KIND).length === 2, String(out.messages.length));
+  check('这一轮不重复注入记忆（desired 本来就是 null）', out.messages.filter((m) => isMemorySource(m.source)).length === 2, String(out.messages.length));
 
   // 同一个会话再跑一步 → 不再提醒
   const nextMessages = [...out.messages];
@@ -664,12 +682,12 @@ section('到期复核：通过插件真实接线发出 form=due 的提醒');
   const proseCtx = fakeCtx();
   apply(proseCtx, { root: ROOT, maxBytes: 3072 });
   const proseAgent = fakeAgent(cwdOfProject, 'session-prose');
-  const state2 = injectPayload(L, 3072).entries.map((e) => ({ id: e.id, hash: e.hash }));
-  const seen2 = { id: 'seen2', source: { kind: MEMORY_SOURCE_KIND, entries: state2 }, content: [{ type: 'text', text: '之前注入过' }] };
+  seedSessionState('session-prose', injectPayload(L, 3072).entries);
+  const seen2 = { id: 'seen2', source: memorySource(), content: [{ type: 'text', text: '之前注入过' }] };
   const claimed2 = [{ id: 'u3', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }, seen2];
   const d3 = { kind: 'ok', messages: [...claimed2] };
   const out3 = await proseCtx.handlers.get('agent/pre-step')({ agent: proseAgent, messages: claimed2, step: 2 }, async () => d3);
-  check('verify_when 是人话时不提醒（真实接线）', out3 === d3, JSON.stringify(out3.messages.map((m) => m.source?.form)));
+  check('verify_when 是人话时不提醒（真实接线）', out3 === d3, JSON.stringify(out3.messages.map((m) => m.content[0].text.slice(0, 20))));
 
   // dueWithin 从插件 Config **真的透传**到 hook：条目 10 天后才到复核期，
   // 默认（0）不提醒，"提前 30 天"要提醒。只看 schema 有没有字段是不够的 —— 得走真接线。
@@ -682,23 +700,25 @@ section('到期复核：通过插件真实接线发出 form=due 的提醒');
   fs.unlinkSync(soonCreated.file);
 
   const soonCwd = path.join(SANDBOX, 'due-within');
-  const soonState = injectPayload(soonL, 3072).entries.map((e) => ({ id: e.id, hash: e.hash }));
-  const seenSoon = { id: 'seen-soon', source: { kind: MEMORY_SOURCE_KIND, entries: soonState }, content: [{ type: 'text', text: '之前注入过' }] };
+  const seenSoon = { id: 'seen-soon', source: memorySource(), content: [{ type: 'text', text: '之前注入过' }] };
   const claimedSoon = [{ id: 'u-soon', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }, seenSoon];
   const dSoon = { kind: 'ok', messages: [...claimedSoon] };
+  const soonEntries = injectPayload(soonL, 3072).entries;
+  seedSessionState('session-soon-off', soonEntries);
+  seedSessionState('session-soon-on', soonEntries);
 
   const offCtxSoon = fakeCtx();
   apply(offCtxSoon, { root: soonRoot });
   const outSoonOff = await offCtxSoon.handlers.get('agent/pre-step')({ agent: fakeAgent(soonCwd, 'session-soon-off'), messages: claimedSoon, step: 2 }, async () => dSoon);
-  check('dueWithin 默认 0：还没到期的条目不提醒', outSoonOff === dSoon, JSON.stringify(outSoonOff.messages.map((m) => m.source?.form)));
+  check('dueWithin 默认 0：还没到期的条目不提醒', outSoonOff === dSoon, JSON.stringify(outSoonOff.messages.map((m) => m.content[0].text.slice(0, 20))));
 
   const onCtxSoon = fakeCtx();
   apply(onCtxSoon, { root: soonRoot, dueWithin: 30 });
   const outSoonOn = await onCtxSoon.handlers.get('agent/pre-step')({ agent: fakeAgent(soonCwd, 'session-soon-on'), messages: claimedSoon, step: 2 }, async () => dSoon);
-  const dueSoon = outSoonOn.messages.find((m) => m.source?.form === 'due');
-  check('dueWithin=30：还没到期但快了 → 提醒（Config 真的透传到了 hook）', !!dueSoon, JSON.stringify(outSoonOn.messages.map((m) => m.source?.form)));
+  const dueSoon = outSoonOn.messages.find((m) => m !== seenSoon && /还有 \d+ 天/.test(m.content?.[0]?.text ?? ''));
+  check('dueWithin=30：还没到期但快了 → 提醒（Config 真的透传到了 hook）', !!dueSoon, JSON.stringify(outSoonOn.messages.map((m) => m.content[0].text.slice(0, 24))));
   check('到期提醒里带上 verify_when 原值', !!dueSoon && dueSoon.content[0].text.includes(inTenDays), dueSoon?.content[0].text.slice(0, 120));
-  check('dueWithin 生效时也不带 entries（不污染差分基线）', !!dueSoon && dueSoon.source.entries === undefined, JSON.stringify(dueSoon?.source));
+  check('dueWithin 生效时 source 也是白名单形状', !!dueSoon && Object.keys(dueSoon.source).length === 2, JSON.stringify(dueSoon?.source));
 }
 
 /* --------------------------------------- 侧边栏「记忆」页签的数据路由 */

@@ -38,10 +38,7 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
-      "platform": "web",
-      "inject": [
-        "dsh-better-sidebar"
-      ]
+      "platform": "web"
     }
   },
   "engines": {

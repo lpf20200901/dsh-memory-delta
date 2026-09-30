@@ -7,10 +7,11 @@
 import {
   KEY_CAP,
   LINE_CAP,
-  MEMORY_SOURCE_KIND,
+  MEMORY_PLUGIN_ID,
   escapeFraming,
+  isMemorySource,
+  memorySource,
   planInjection,
-  previousStateFrom,
   renderBaseline,
   sourceEntries,
   stateOf,
@@ -99,7 +100,7 @@ section('渲染与框架转义');
 
   const b = renderBaseline([entry('f', 'h1', { type: 'fact' }), entry('d', 'h2', { type: 'decision' })]);
   check('baseline 分节事实/决策', b.includes('### 事实') && b.includes('### 决策'), b.slice(0, 200));
-  // key 只在**与 id 不同**时写进正文（2026-09-23 瘦身）：id 已经随 source.entries 给到模型，
+  // key 只在**与 id 不同**时写进正文（2026-09-23 瘦身）：id 从 v1.3.1 起只落侧车状态、不进上下文，
   // 而"有 key 就用 key 当文件名"让真实库里 30/31 条的 key 与 id 一字不差 —— 正文里那个
   // `[key]` 是第二遍，实测占 912 字节 / 注入总量的 15%（879 是纯重复）。
   const keyed = renderBaseline([entry('my-key', 'h', { key: 'my-key' })]);
@@ -111,7 +112,7 @@ section('渲染与框架转义');
   check(`超长 key 被截到 ${KEY_CAP} 字（正文里别白占预算）`, keyLine.includes(`[${'k'.repeat(KEY_CAP - 1)}…]`), keyLine.slice(-40));
   check('空集合 → 空文本', renderBaseline([]) === '');
 
-  // 回归：id 是差分元数据，走 source.entries；写进正文只会白占注入预算（实测占 40%）
+  // 回归：id 是差分元数据，只落侧车状态文件；写进正文只会白占注入预算（实测占 40%）
   // 故意让正文不含 id，才能验出「id 是从正文里删掉的」而不是「正文恰好没提」
   const withIds = renderBaseline([entry('alpha-id', 'h1', { line: '结论一' }), entry('beta-id', 'h2', { type: 'decision', line: '结论二' })]);
   check('baseline 正文不出现条目 id', !withIds.includes('<!--') && !withIds.includes('alpha-id') && !withIds.includes('beta-id'), withIds);
@@ -129,26 +130,26 @@ section('渲染与框架转义');
   check('未超长的不动', renderBaseline([entry('s', 'h', { line: '短的' })]).includes('- 短的'));
 }
 
-/* ------------------------------------------------- 从会话历史恢复状态 */
-section('previousStateFrom：从会话历史恢复上一轮状态');
+/* ------------------------------------ 来源形状：必须过 DSH 的格式白名单 */
+section('memorySource：写出去的形状必须过 DSH 会话格式白名单');
 {
-  const msg = (kind, entries) => ({ source: { kind, entries } });
+  /* 2026-09-30 事故（本机 14 条会话因此永久打不开）：老写法 `kind:'memory'` 会被 v2→v3 拒；
+     带 entries 或自定义 form 的 plugin 包装会被 v0→v1 拒（v0 白名单只允许
+     kind/plugin/form/sections/summary，form 限 6 个值）。这里把形状钉死。 */
+  const written = memorySource();
+  check('是 plugin 包装', written.kind === 'plugin' && written.plugin === MEMORY_PLUGIN_ID, JSON.stringify(written));
+  check('只有两个键（多任何成员都会被 v0 白名单拒）', Object.keys(written).length === 2, JSON.stringify(Object.keys(written)));
+  check('不带差分状态（状态走侧车文件）', written.entries === undefined && written.form === undefined);
+  check('写入形态能被认出来', isMemorySource(written));
+  check('迁移读回形态（plugin:<包名>）也认', isMemorySource({ kind: `plugin:${MEMORY_PLUGIN_ID}` }));
+  check('上游同名白名单形态也认', isMemorySource({ kind: MEMORY_PLUGIN_ID }));
+  check('历史遗留 kind 也认（老日志里还有）', isMemorySource({ kind: 'memory' }));
+  check('不误判别的插件', !isMemorySource({ kind: 'plugin', plugin: 'someone-else' }));
+  check('不误判别的 kind', !isMemorySource({ kind: 'agent-instructions' }));
+  check('容忍 null / 非对象', !isMemorySource(null) && !isMemorySource('memory'));
 
-  check('没有消息 → null', previousStateFrom([]) === null);
-  check('只有别的插件的消息 → null', previousStateFrom([msg('agent-instructions', [{ id: 'a', hash: 'x' }])]) === null);
-  check('忽略 source 缺 entries 的消息', previousStateFrom([{ source: { kind: MEMORY_SOURCE_KIND } }]) === null);
-
-  const state = previousStateFrom([msg('plugin', []), msg(MEMORY_SOURCE_KIND, [{ id: 'a', hash: 'h1' }])]);
-  check('能从自己的消息里恢复', state && state.a === 'h1', JSON.stringify(state));
-
-  const last = previousStateFrom([
-    msg(MEMORY_SOURCE_KIND, [{ id: 'a', hash: 'OLD' }]),
-    msg(MEMORY_SOURCE_KIND, [{ id: 'a', hash: 'NEW' }]),
-  ]);
-  check('取最后一条（最近状态）', last.a === 'NEW', JSON.stringify(last));
-
-  const roundTrip = previousStateFrom([{ source: { kind: MEMORY_SOURCE_KIND, entries: sourceEntries({ a: 'h1', b: 'h2' }) } }]);
-  check('sourceEntries ↔ previousStateFrom 往返一致', JSON.stringify(roundTrip) === JSON.stringify({ a: 'h1', b: 'h2' }), JSON.stringify(roundTrip));
+  check('stateOf：条目集合 → {id: hash}', JSON.stringify(stateOf([{ id: 'a', hash: 'h1' }])) === JSON.stringify({ a: 'h1' }));
+  check('sourceEntries：{id: hash} → 数组', JSON.stringify(sourceEntries({ a: 'h1' })) === JSON.stringify([{ id: 'a', hash: 'h1' }]));
 }
 
 /* -------------------------------------------------- 端到端：两轮差分 */

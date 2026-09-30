@@ -18,7 +18,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { createEntry, ensureLayout, injectPayload, loadConfig, searchLibrary } from '../bin/mem.mjs';
 import { createMemoryHook } from './hook.mjs';
 import { memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute } from './panel.mjs';
-import { MEMORY_SOURCE_KIND } from './planner.mjs';
+import { memorySource } from './planner.mjs';
 import { SKILL_CONTENT, SKILL_DESCRIPTION, SKILL_NAME, SKILL_SOURCE, SKILL_WHEN_TO_USE } from './skill.mjs';
 
 export const name = 'memory';
@@ -103,8 +103,48 @@ const defined = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) =
 export function apply(ctx, config = {}) {
   const storeOf = (cwd, opts) => openStore(config, cwd, opts);
 
+  /* ------------------------------------------------ 差分状态（侧车文件） */
+
+  /**
+   * 状态放 `$DSH_HOME/storages/dsh-memory-delta/inject-state/<sessionId>.json`。
+   *
+   * ⚠️ 为什么必须外置：DSH 会话格式的 v0 白名单只允许 plugin source 带
+   * `kind/plugin/form/sections/summary`（见 planner.mjs 注释），把差分状态塞进 source 会被
+   * 迁移拒绝、让整个会话**永久打不开**。放这里既不受格式约束，也不占模型预算。
+   * DSH_HOME 拿不到（脱离 DSH 单独跑）时降级为不持久化：进程内存里照常差分，
+   * 重启后重灌一次全量记忆（正确性不受影响）。
+   */
+  const stateDir = () => {
+    // 测试 / CI 显式指向沙箱，免得把差分状态写进真实的 DSH_HOME
+    if (process.env.DSH_MEMORY_DELTA_STATE_DIR) return process.env.DSH_MEMORY_DELTA_STATE_DIR;
+    const home = process.env.DSH_HOME;
+    return home ? path.join(home, 'storages', 'dsh-memory-delta', 'inject-state') : null;
+  };
+  const loadState = (sessionId) => {
+    const dir = stateDir();
+    if (!dir || !sessionId) return null;
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, `${sessionId}.json`), 'utf8'));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') ctx.logger?.warn?.('memory: 读取差分状态失败 %o', error);
+      return null;
+    }
+  };
+  const saveState = (sessionId, payload) => {
+    const dir = stateDir();
+    if (!dir || !sessionId || !payload) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${sessionId}.json`), JSON.stringify(payload), 'utf8');
+    } catch (error) {
+      ctx.logger?.warn?.('memory: 写出差分状态失败 %o', error);
+    }
+  };
+
   /* ------------------------------------------------------------ 注入 */
   const hook = createMemoryHook({
+    loadState,
+    saveState,
     loadPayload: async (cwd) => {
       const store = storeOf(cwd);
       if (!store) return null;
@@ -115,16 +155,12 @@ export function apply(ctx, config = {}) {
         return null;
       }
     },
-    createMessage: (text, entries, form) =>
+    createMessage: (text) =>
       createUserMessage({
         content: [{ type: 'text', text }],
-        // entries 只在携带状态时出现；蒸馏提醒（form='nudge'）故意不带 entries，
-        // 这样它不会被当成"上一轮状态"而把差分基线清零。
-        source: {
-          kind: MEMORY_SOURCE_KIND,
-          ...(Array.isArray(entries) ? { entries } : {}),
-          ...(form ? { form } : {}),
-        },
+        // 形状统一定义在 planner.mjs 的 memorySource()：v0 白名单只允许 kind + plugin。
+        // 差分状态不在这里，走上面 loadState/saveState 的侧车。
+        source: memorySource(),
       }),
     logger: ctx.logger,
     dueWithin: config.dueWithin ?? 0,

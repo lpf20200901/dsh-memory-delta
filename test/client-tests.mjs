@@ -353,12 +353,13 @@ section('在假 window 里执行：注册了 id = dsh-memory-delta 的 factory')
 
 /* ------------------------------------------------- 用假 require 物化 factory */
 
-section('物化 factory：导出 apply / inject');
+section('物化 factory：导出 apply（且**不**声明 inject）');
 {
   const mounted = mountPanel({ scope: { sessionId: 's1', cwd: 'D:\\proj' } });
   check('导出 apply 是函数', typeof mounted.exportsOf?.apply === 'function');
-  check('导出 inject 是数组', Array.isArray(mounted.exportsOf?.inject), JSON.stringify(mounted.exportsOf?.inject));
-  check("inject 含 'betterSidebar'", mounted.exportsOf?.inject?.includes('betterSidebar'), JSON.stringify(mounted.exportsOf?.inject));
+  // 2026-09-30 回归：inject 是**硬依赖**，没装 better-sidebar 的机器上条目会永远 pending，
+  // web boot 把 pending 当失败 → 整个界面起不来。所以这里必须**不**导出 inject。
+  check('不导出 inject（硬依赖会挂掉整个 web boot）', mounted.exportsOf?.inject === undefined, JSON.stringify(mounted.exportsOf?.inject));
   check(
     '只 require 基座内的模块（react / react-dom）',
     mounted.required.every((s) => s === 'react' || s === 'react-dom'),
@@ -373,16 +374,21 @@ section('apply：注册页签 descriptor');
   const mounted = mountPanel({ scope: { sessionId: 's1' } });
   const effects = [];
   let captured = null;
+  const sidebar = {
+    registerTab(descriptor) {
+      captured = descriptor;
+      return () => {};
+    },
+  };
+  // 宿主给动态包的 ctx 是门面：暴露 ctx.get（**可选查找**）与 ctx.effect；
+  // 直接读 ctx.betterSidebar 会被 inject 声明拦住，所以这里照真实形状造。
   const fakeCtx = {
     effect(fn) {
       effects.push(fn);
       return fn();
     },
-    betterSidebar: {
-      registerTab(descriptor) {
-        captured = descriptor;
-        return () => {};
-      },
+    get(name) {
+      return name === 'betterSidebar' ? sidebar : undefined;
     },
   };
   let thrown = null;
@@ -400,7 +406,23 @@ section('apply：注册页签 descriptor');
   // component 现在是一层包装（把 ctx 喂给面板，面板要用 ctx.betterSidebar.openFile）
   const wrapped = captured?.component?.({ scope: { sessionId: 's1' } });
   check('component 包的是导出的 MemoryPanel', wrapped?.type === mounted.exportsOf.MemoryPanel, String(wrapped?.type?.name));
-  check('包装层把 ctx 传给面板（面板靠它调 openFile）', wrapped?.props?.hostCtx === fakeCtx, String(wrapped?.props?.hostCtx));
+  check('包装层把侧边栏服务传给面板（面板靠它调 openFile）', wrapped?.props?.hostCtx?.betterSidebar === sidebar, JSON.stringify(Object.keys(wrapped?.props?.hostCtx ?? {})));
+}
+
+/* ----------------------------- apply 在"没装 better-sidebar"时必须安全 */
+
+section('apply：拿不到 betterSidebar 时跳过注册（不能让 web boot 失败）');
+{
+  const mounted = mountPanel({ scope: { sessionId: 's1' } });
+  let effects = 0;
+  let threw = null;
+  try {
+    mounted.exportsOf.apply({ effect(fn) { effects += 1; return fn(); }, get: () => undefined });
+  } catch (error) {
+    threw = error;
+  }
+  check('不抛异常', threw === null, threw ? `${threw.name}: ${threw.message}` : '');
+  check('一个 effect 都不注册（页签不出现，记忆功能照常）', effects === 0, String(effects));
 }
 
 /* --------------------------------------------- 组件：正常数据能渲染出来 */

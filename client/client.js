@@ -2885,27 +2885,39 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------------------------------------ 注册 */
 
-    /** 客户端服务依赖：`betterSidebar` 由 `dsh-better-sidebar` 提供（见 package.json 的 dsh.client.inject）。 */
-    const inject = ['betterSidebar'];
-
+    /**
+     * ⚠️ **不能**声明 `inject: ['betterSidebar']`：DSH 的客户端声明只接受字符串数组
+     * （`dsh-client-modules: … dsh.client.inject must be a string array`），没有"可选依赖"写法。
+     * 一旦声明成硬依赖，**没装 better-sidebar** 的机器上这个条目会永远 pending，
+     * 而 web boot 把 pending 当失败 —— 整个界面起不来、直接进安全模式（2026-09-30 实测踩到）。
+     *
+     * 改成运行时**可选查找**：宿主给动态包的 ctx 门面上，`ctx.get()` 是可选查询，
+     * 而直接读 `ctx.betterSidebar` 才会被 inject 声明拦住。拿得到就注册页签，
+     * 拿不到就只跳过页签 —— 记忆工具与侧车状态照常工作。
+     */
     function apply(ctx) {
+      // 老宿主 / 桩环境的 ctx 上没有 get：那时拿不到服务，同样走"跳过注册"这条路
+      const sidebar = typeof ctx?.get === 'function' ? ctx.get('betterSidebar') : null;
+      if (!sidebar || typeof sidebar.registerTab !== 'function') return;
+      // 面板只用到这一个服务（`hostCtx.betterSidebar.openFile`），别把整个 ctx 递进去
+      const hostCtx = { betterSidebar: sidebar };
       ctx.effect(() =>
-        ctx.betterSidebar.registerTab({
+        sidebar.registerTab({
           id: 'dsh-memory-delta:memory',
           title: '记忆',
           order: 60,
           // 单实例：多次打开只聚焦已有页签，不会叠出好几个「记忆」页
           single: true,
-          // 把 ctx 显式喂给组件：面板要调 `ctx.betterSidebar.openFile` 打开条目文件。
+          // 把上下文显式喂给组件：面板要调 `betterSidebar.openFile` 打开条目文件。
           // 组件本身在模块顶层定义（不能闭包到 apply 的 ctx），所以这里包一层。
-          component: (props) => h(MemoryPanel, Object.assign({}, props, { hostCtx: ctx })),
+          component: (props) => h(MemoryPanel, Object.assign({}, props, { hostCtx })),
         }),
       );
     }
 
     exports.apply = apply;
-    exports.inject = inject;
-    // 给测试用的额外出口（宿主只认 apply / inject，其余导出无害）
+    // ⚠️ 故意**不**导出 inject：声明成硬依赖会挂掉整个 web boot（见上）
+    // 给测试用的额外出口（宿主只认 apply，其余导出无害）
     exports.MemoryPanel = MemoryPanel;
     exports.ensureStyles = ensureStyles;
     return module.exports;

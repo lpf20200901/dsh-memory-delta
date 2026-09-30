@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the later improvements are covered by 1096 assertions
+> verified inside a real DSH session, and the later improvements are covered by 1206 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 >
 > **Questions?** → [FAQ](docs/faq.md) — "is the whole memory re-sent on every turn?", "what happens when a
@@ -74,17 +74,21 @@ Seven rules:
 - **The pushed part must be tiny.** Everything in the injected layer is paid for on every session, so the
   journal and design docs stay out of it. Measured on a real store (31 standing entries): **4369 bytes** total
   for 31 entries — about **141 bytes per entry**, so a 5 KB budget holds a store of this size. Two things are
-  deliberately left out of the text: entry **ids** (they ride along in the message's structured
-  `source.entries`; inlining them used to eat 34% of the budget) and keys that are **identical to the id**
+  deliberately left out of the text: entry **ids** (diff metadata, kept in a side-car state file and never
+  sent to the model at all; inlining them used to eat 34% of the budget) and keys that are **identical to the id**
   (`createEntry` names the file after the key, so on a real store 30 of 31 keys were byte-identical to the id —
   repeating them cost 15% of the budget for nothing). Each line is also clipped at 90 characters.
 - **Only the delta is pushed.** Every entry carries a 12-char content hash; the plugin remembers the
   previous round's state and next round pushes only *added / updated / removed*. When nothing changed it
   injects **nothing at all**. (The upstream `dsh-agent-instructions` plugin has no diffing: any file
   change re-injects the whole file — measured at ~58k wasted tokens for 15 edits of one 8.5 KB file.)
-- **State is recovered from the conversation itself.** No side-car state file: the plugin reads back the
-  `{id: hash}` map from the message it previously injected, so session resume, replay and compaction all
-  stay correct.
+- **State lives in a side-car file**, `$DSH_HOME/storages/dsh-memory-delta/inject-state/<session-id>.json`.
+  ⚠️ Changed 2026-09-30: the `{id: hash}` map used to ride inside the injected message's `source`, which
+  **violates the DSH session-format v0 whitelist** (a `plugin` source may only carry
+  `kind/plugin/form/sections/summary`). The format migration then refuses the **whole session**, leaving it
+  permanently unreadable (14 sessions were lost that way on the author's machine and had to be repaired by
+  hand). The state is also written **only after the message has actually entered the context**, so a queued
+  message that gets dropped again cannot silently advance the baseline.
 - **The model may only write to the inbox.** A wrong conclusion that silently reaches the standing layer
   gets **re-injected forever**. Promotion is an explicit `promote`.
 - **One key, one truth.** Facts and decisions carry a semantic `key`, and only one *active* entry may
@@ -237,7 +241,7 @@ Checked item by item inside a real DSH session:
 | no change → zero injection | the next step injected nothing, only the one-time nudge |
 | delta · added | "新增：<new entry>", explicitly noting "the other N entries are unchanged" |
 | delta · updated | after editing one entry, only "已更新：<that entry>" was pushed |
-| due-for-review reminder | adding an entry whose `verify_when` was 16 days overdue produced a one-time `form='due'` reminder on the next no-change step, and the step after it injected nothing (the reminder did not reset the diff baseline) |
+| due-for-review reminder | adding an entry whose `verify_when` was 16 days overdue produced a one-time review reminder on the next no-change step, and the step after it injected nothing (the reminder did not reset the diff baseline) |
 | sidebar **记忆** tab | the tab opened on a live store and showed the real root, the entry count, "注入 1792 / 3072 字节", the facts/decisions split and the (empty) inbox |
 | `memory_search` / `memory_write` | `memory_write` called successfully in a live session; `memory_search` **failed** — see the tool-output-contract entry below |
 | tool output contract | `test/preflight-import.mjs` now replays the runtime's own step (`validateJsonSchemaValue` over each tool's declared `output.schema`) against the values both tools actually return |
@@ -246,18 +250,18 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 1096 assertions, zero dependencies
+npm test        # 1206 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
 | --- | --- | --- |
-| `test/run-tests.mjs` | 274 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, reserved topic names, injection-text slimming, hand-written frontmatter fidelity, and reference cleanup on `restore`) |
-| `test/planner-tests.mjs` | 46 | the diff algorithm and the injected-text rendering (pure logic) |
+| `test/run-tests.mjs` | 295 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, reserved topic names, injection-text slimming, hand-written frontmatter fidelity, and reference cleanup on `restore`) |
+| `test/planner-tests.mjs` | 52 | the diff algorithm, the injected-text rendering, and the source shape having to pass DSH's format whitelist (pure logic) |
 | `test/search-tests.mjs` | 56 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
-| `test/hook-tests.mjs` | 63 | plugin wiring (fake agent / decision): diff injection, nudge, due reminder |
-| `test/plugin-tests.mjs` | 300 | plugin integration (stubbed DSH modules, real `apply()` + both tools + all three panel routes + promote/rename/topic/batch actually writing the store + 400-vs-500 error classification + whitelist/origin checks + tool-output contract and render text) |
-| `test/client-tests.mjs` | 264 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, batch selection, entry click → `openFile`, search timing and truncation, promote/tidy, failure states) |
+| `test/hook-tests.mjs` | 66 | plugin wiring (fake agent / decision): diff injection, when the side-car state is committed, nudge, due reminder |
+| `test/plugin-tests.mjs` | 303 | plugin integration (stubbed DSH modules, real `apply()` + both tools + all three panel routes + promote/rename/topic/batch actually writing the store + 400-vs-500 error classification + whitelist/origin checks + tool-output contract and render text) |
+| `test/client-tests.mjs` | 341 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, batch selection, entry click → `openFile`, search timing and truncation, promote/tidy, failure states; plus the "apply must stay safe when better-sidebar is absent" regression) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable
@@ -279,7 +283,14 @@ Regression tests baked in from real bugs:
   into "write into a path that does not exist" — always use `fileURLToPath`;
 - A field added to *some* early-return paths of an internal planner function (`due`) was destructured
   into `undefined` and threw on every step, which the outer `try/catch` silently reported as
-  "failed to load memory" — hence the defensive read and the zero-warning assertion.
+  "failed to load memory" — hence the defensive read and the zero-warning assertion;
+- An injected message's `source` must use the **DSH-recognised plugin wrapper with no extra members**
+  (`{kind:'plugin', plugin:'<package>'}`): a custom `source.kind` (the old `'memory'`) is refused by the
+  session-format **v2→v3** stage, while `entries` or a non-enumerated `form` on a `plugin` source is refused
+  by the **v0→v1** stage (whitelist: `kind/plugin/form/sections/summary`). Either way the migration refuses
+  the **whole session** and leaves the source artifact unchanged, so **every session that ever received such
+  a message becomes permanently unreadable**. The migrated read-back form (`{kind:'plugin:<package>'}`) must
+  be recognised too, and the diff state now lives in the side-car file instead of the source.
 - **`memory_search` never worked in a live session, and no test could see it.** The tool's declared
   `output.schema` omitted `tags` / `date` / `file` while `searchLibrary` attaches `file` to *every*
   hit, and DSH validates a tool's return value in `ToolRuntime.createSuccessResult()` with

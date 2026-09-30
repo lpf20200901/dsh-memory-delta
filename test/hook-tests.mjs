@@ -8,7 +8,7 @@
 
 import { createMemoryHook, isMemoryMessage, sameMemoryPayload } from '../src/hook.mjs';
 import { renderDue } from '../src/due.mjs';
-import { MEMORY_SOURCE_KIND } from '../src/planner.mjs';
+import { MEMORY_PLUGIN_ID, memorySource } from '../src/planner.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -29,24 +29,22 @@ const section = (t) => console.log(`\n${t}`);
 /* -------------------------------------------------------------- 假 DSH */
 
 let seq = 0;
-/** 等价于 createUserMessage({content:[{type:'text',text}], source:{kind:'memory', ...}}) */
-function fakeCreateMessage(text, entries, form) {
+/** 与真实插件同形：source 由 planner.mjs 的 memorySource() 构造（不带状态 —— 状态走侧车） */
+function fakeCreateMessage(text) {
   seq += 1;
   return {
     id: `mem-${seq}`,
     content: [{ type: 'text', text }],
-    source: {
-      kind: MEMORY_SOURCE_KIND,
-      ...(Array.isArray(entries) ? { entries } : {}),
-      ...(form ? { form } : {}),
-    },
+    source: memorySource(),
   };
 }
 
-function fakeAgent(cwd = 'D:\\proj') {
+const SESSION_ID = 'session-test';
+
+function fakeAgent(cwd = 'D:\\proj', id = SESSION_ID) {
   const nextStep = [];
   return {
-    session: { header: { cwd } },
+    session: { header: { cwd, id } },
     inbox: {
       nextStep,
       prepend(queue, message) {
@@ -68,11 +66,20 @@ function fakeAgent(cwd = 'D:\\proj') {
 
 const entry = (id, hash, extra = {}) => ({ id, hash, type: 'fact', key: null, line: `结论 ${id}`, ...extra });
 
-/** 造一个 hook；payload（条目集合）可以在测试中途改。 */
-function makeHook(entriesRef, { logger = { warn() {} }, nudgeAfterTurns = 99, today, dueWithin } = {}) {
+/**
+ * 造一个 hook；payload（条目集合）可以在测试中途改。
+ *
+ * 差分状态从 v1.3.1 起走**侧车**（`loadState`/`saveState`）。测试用一张 Map 当侧车，
+ * 用 `seedState()` 模拟"上一轮已经注入过"。
+ */
+function makeHook(entriesRef, { logger = { warn() {} }, nudgeAfterTurns = 99, today, dueWithin, states = new Map() } = {}) {
   return createMemoryHook({
     loadPayload: async () => ({ entries: entriesRef.current, budget: 3072 }),
     createMessage: fakeCreateMessage,
+    loadState: async (sessionId) => (sessionId && states.has(sessionId) ? states.get(sessionId) : null),
+    saveState: async (sessionId, payload) => {
+      if (sessionId) states.set(sessionId, payload);
+    },
     logger,
     // 默认把蒸馏提醒关掉（设很大），免得干扰别的用例；提醒本身有专门的测试段
     nudgeAfterTurns,
@@ -82,11 +89,17 @@ function makeHook(entriesRef, { logger = { warn() {} }, nudgeAfterTurns = 99, to
   });
 }
 
+/** 模拟"上一轮已经注入过这些条目"：把状态塞进侧车。 */
+function seedState(states, state, extra = {}) {
+  states.set(SESSION_ID, { state, ...extra });
+}
+
 /* --------------------------------------------------- 第一次：路走到 inbox */
 section('step 1（本步还没开始）→ 只排队进 inbox');
 {
   const entries = { current: [entry('a', 'h1')] };
-  const hook = makeHook(entries);
+  const states = new Map();
+  const hook = makeHook(entries, { states });
   const agent = fakeAgent();
   const messages = [];
   const decision = { kind: 'ok', messages: [] };
@@ -96,20 +109,24 @@ section('step 1（本步还没开始）→ 只排队进 inbox');
   check('消息进了 inbox', agent.inbox.nextStep.length === 1);
   check('进的是我们的消息', isMemoryMessage(agent.inbox.nextStep[0]));
   check('内容是全量 baseline', agent.inbox.nextStep[0].content[0].text.includes('结论 a'));
-  check('source 带上一轮状态（供下轮差分）', JSON.stringify(agent.inbox.nextStep[0].source.entries) === JSON.stringify([{ id: 'a', hash: 'h1' }]));
+  check('source 是合法 plugin 包装（只有 kind+plugin）', Object.keys(agent.inbox.nextStep[0].source).length === 2, JSON.stringify(agent.inbox.nextStep[0].source));
+  // 第 1 步只是排队（还没进上下文）→ 状态**不能**落盘，否则"排队后又被清掉"会永久丢一批注入
+  check('排队阶段不落盘', states.get(SESSION_ID) === undefined, JSON.stringify(states.get(SESSION_ID)));
 }
 
 /* ------------------------------------------- 第二次：没有变化 → 什么都不做 */
 section('第二轮（记忆没变化）→ 零注入');
 {
   const entries = { current: [entry('a', 'h1')] };
-  const hook = makeHook(entries);
+  const states = new Map();
+  seedState(states, { a: 'h1' });                  // 侧车：上一轮注入的就是当前这份
+  const hook = makeHook(entries, { states });
   const agent = fakeAgent();
-  const previous = fakeCreateMessage('whatever', [{ id: 'a', hash: 'h1' }]);
+  const previous = fakeCreateMessage('whatever');
   const messages = [previous];
   const decision = { kind: 'ok', messages: [previous] };
 
-  agent.inbox.nextStep.push(fakeCreateMessage('陈旧排队', [{ id: 'a', hash: 'OLD' }]));
+  agent.inbox.nextStep.push(fakeCreateMessage('陈旧排队'));
   const out = await hook.handlePreStep({ agent, messages, step: 2 }, async () => decision);
   check('没有新消息被插入', out.messages.length === decision.messages.length, JSON.stringify(out.messages.length));
   check('陈旧的排队消息被清掉', agent.inbox.nextStep.length === 0, `剩 ${agent.inbox.nextStep.length}`);
@@ -119,9 +136,11 @@ section('第二轮（记忆没变化）→ 零注入');
 section('第二轮（记忆变了）→ 只注入变化块，且插在已领取消息之后');
 {
   const entries = { current: [entry('a', 'h1'), entry('b', 'h2')] };
-  const hook = makeHook(entries);
+  const states = new Map();
+  seedState(states, { a: 'h1' });                  // 侧车：上一轮只有 a
+  const hook = makeHook(entries, { states });
   const agent = fakeAgent();
-  const prev = fakeCreateMessage('旧的全量', [{ id: 'a', hash: 'h1' }]);
+  const prev = fakeCreateMessage('旧的全量');
   const claimed = [{ id: 'user-1', content: [{ type: 'text', text: '你好' }], source: { kind: 'user' } }, prev];
   const decision = { kind: 'ok', messages: [...claimed] };
 
@@ -132,16 +151,24 @@ section('第二轮（记忆变了）→ 只注入变化块，且插在已领取�
   check('插入位置在最后一条已领取消息之后', out.messages.indexOf(inserted) === out.messages.indexOf(prev) + 1, `at ${out.messages.indexOf(inserted)} vs prev ${out.messages.indexOf(prev)}`);
   check('内容是 delta（含"新增"）', /新增：/.test(inserted.content[0].text), inserted.content[0].text.slice(0, 80));
   check('delta 不复述未变化条目', !inserted.content[0].text.includes('结论 a'));
-  check('带上了新的完整状态', JSON.stringify(inserted.source.entries) === JSON.stringify([{ id: 'a', hash: 'h1' }, { id: 'b', hash: 'h2' }]));
+  check('source 是合法 plugin 包装（不带状态）', inserted.source.kind === 'plugin' && Object.keys(inserted.source).length === 2, JSON.stringify(inserted.source));
+  // 新语义：这一步只是"插进 decision"，状态要等它真的进了上下文（下一次 pre-step 可见）才落盘 ——
+  // 否则"排队后又被清掉"的消息会让状态虚增、模型永久少看一批记忆。
+  check('还没落盘（可见后才记账）', states.get(SESSION_ID)?.state?.b === undefined, JSON.stringify(states.get(SESSION_ID)));
+  const dVisible = { kind: 'ok', messages: [...out.messages] };
+  await hook.handlePreStep({ agent, messages: out.messages, step: 3 }, async () => dVisible);
+  check('真的进了上下文之后把状态落盘', JSON.stringify(states.get(SESSION_ID)?.state) === JSON.stringify({ a: 'h1', b: 'h2' }), JSON.stringify(states.get(SESSION_ID)));
 }
 
 /* --------------------------------------------------------- 重复调用的幂等 */
 section('同一步里 pre-step 再次触发 → 不重复插入');
 {
   const entries = { current: [entry('a', 'h1')] };
-  const hook = makeHook(entries);
+  const states = new Map();
+  seedState(states, { a: 'h1' });
+  const hook = makeHook(entries, { states });
   const agent = fakeAgent();
-  const mine = fakeCreateMessage('已注入', [{ id: 'a', hash: 'h1' }]);
+  const mine = fakeCreateMessage('已注入');
   const claimed = [{ id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] }];
   const decision = { kind: 'ok', messages: [...claimed, mine] };
 
@@ -193,55 +220,57 @@ section('边界：reject 决策、空记忆库、加载失败');
 }
 
 /* ----------------------------------------------------------- 会话恢复场景 */
-section('会话恢复 / 回放：从会话表面恢复状态');
+section('会话恢复 / 回放：状态从侧车恢复');
 {
   const entries = { current: [entry('a', 'h1')] };
-  const hook = makeHook(entries);
-  const memoryMsg = fakeCreateMessage('之前注入过的全量', [{ id: 'a', hash: 'h1' }]);
+  const states = new Map();
+  seedState(states, { a: 'h1' });                 // 侧车：这个会话上一轮已经注入过 a
+  const hook = makeHook(entries, { states });
   const agent = fakeAgent();
-  // 模拟：消息已经落盘到会话表面（surface），本步还没有任何已领取消息
+  // 表面上仍留着我们发过的消息（用来认"自己人"），但状态以侧车为准
   agent.session.surface = { nodes: [1, 2] };
   agent.session.eventAt = (seq) =>
-    seq === 1 ? { type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] } } : { type: 'user/message', data: memoryMsg };
+    seq === 1 ? { type: 'user/message', data: { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] } } : { type: 'user/message', data: fakeCreateMessage('之前注入过的全量') };
 
   const decision = { kind: 'ok', messages: [{ id: 'u2', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] }] };
   const out = await hook.handlePreStep({ agent, messages: [], step: 5 }, async () => decision);
-  check('恢复后识别出状态、不重复注入', out.messages.length === 1, String(out.messages.length));
+  check('恢复后（侧车有状态）不重复注入', out.messages.length === 1, String(out.messages.length));
   check('恢复时 decision 原样返回', out === decision);
 
-  // 表面上的是旧状态 → 应该只推差异
+  // 侧车里的状态是旧的 → 应该只推差异
   const agent2 = fakeAgent();
-  agent2.session.surface = { nodes: [1] };
-  agent2.session.eventAt = () => ({ type: 'user/message', data: fakeCreateMessage('旧的', [{ id: 'a', hash: 'STALE' }]) });
+  const states2 = new Map();
+  seedState(states2, { a: 'STALE' });
   const entries2 = { current: [entry('a', 'h1')] };
-  const hook2 = makeHook(entries2);
+  const hook2 = makeHook(entries2, { states: states2 });
   const d2 = { kind: 'ok', messages: [{ id: 'u', source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] }] };
   const out2 = await hook2.handlePreStep({ agent: agent2, messages: [], step: 5 }, async () => d2);
-  check('表面状态陈旧 → 推差异而不是全量', out2.messages.length === 2 && /已更新：/.test(out2.messages[1].content[0].text), out2.messages.map((m) => m.content[0].text.slice(0, 20)).join(' | '));
+  check('侧车状态陈旧 → 推差异而不是全量', out2.messages.length === 2 && /已更新：/.test(out2.messages[1].content[0].text), out2.messages.map((m) => m.content[0].text.slice(0, 20)).join(' | '));
 }
 
 /* --------------------------------------------------------- 到期复核提醒 */
 section('到期复核（verify_when）：会话内提醒一次，且绝不污染差分状态');
 {
-  const steady = fakeCreateMessage('全量', [{ id: 'a', hash: 'h1' }]);
+  const steady = fakeCreateMessage('全量');
   const userTurn = { id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '继续' }] };
 
   // ① 一条已到期的条目 → 零注入的那一轮发出 due 提醒
   {
     // 记忆没变化（previous 与当前一致）→ plan 是 none，正好是到期提醒该出场的时机
     const entries = { current: [entry('a', 'h1', { date: '2026-01-01', verifyWhen: '2026-01-10', line: '该复核的结论' })] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' });               // 提醒只在"零注入"的那一轮出场
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
     const claimed = [userTurn, steady];
     const decision = { kind: 'ok', messages: [...claimed] };
 
     const out = await hook.handlePreStep({ agent, messages: claimed, step: 2 }, async () => decision);
     check('零注入的那一轮插入了到期提醒', out.messages.length === decision.messages.length + 1, String(out.messages.length));
-    const dueMsg = out.messages.find((m) => m.source?.form === 'due');
-    check('提醒消息带 form=due', !!dueMsg, JSON.stringify(out.messages.map((m) => m.source)));
-    // 关键回归：提醒**不能**带 entries，否则会被当成上一轮状态、把差分基线清零
-    check('提醒不带 entries（source.entries 是 undefined）', dueMsg && dueMsg.source.entries === undefined, JSON.stringify(dueMsg?.source));
-    check('提醒**不是**携带状态的消息', dueMsg && !('entries' in dueMsg.source), JSON.stringify(dueMsg?.source));
+    const dueMsg = out.messages.find((m) => m !== steady && /已超期/.test(m.content?.[0]?.text ?? ''));
+    check('提醒消息按文案能认出来', !!dueMsg, JSON.stringify(out.messages.map((m) => m.content[0].text.slice(0, 24))));
+    // 关键回归：提醒的 source 必须是白名单形状（只有 kind+plugin），不带任何状态
+    check('提醒的 source 只有 kind+plugin', dueMsg && dueMsg.source.kind === 'plugin' && Object.keys(dueMsg.source).length === 2, JSON.stringify(dueMsg?.source));
     check('提醒文案含结论正文', !!dueMsg && dueMsg.content[0].text.includes('该复核的结论'), dueMsg?.content[0].text.slice(0, 120));
     check('提醒文案含「已超期」', !!dueMsg && /已超期 \d+ 天/.test(dueMsg.content[0].text), dueMsg?.content[0].text.slice(0, 200));
     check('提醒插在已领取消息之后', out.messages.indexOf(dueMsg) === decision.messages.length, String(out.messages.indexOf(dueMsg)));
@@ -262,22 +291,24 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
   // 会话恢复 / 回放：提醒已落在会话表面上 → 从可见消息里认出来，不再提醒
   {
     const entries = { current: [entry('a', 'h1', { date: '2026-01-01', verifyWhen: '2026-01-10', line: '该复核的结论' })] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' }, { dueNotified: true });   // 侧车：这个会话已经提醒过了
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
-    const restored = fakeCreateMessage('提醒过了', null, 'due'); // 回放出来的提醒（不带 entries）
-    agent.session.surface = { nodes: [1, 2] };
-    agent.session.eventAt = (s) =>
-      s === 1 ? { type: 'user/message', data: userTurn } : { type: 'user/message', data: restored };
+    agent.session.surface = { nodes: [1] };
+    agent.session.eventAt = (s) => (s === 1 ? { type: 'user/message', data: userTurn } : undefined);
 
-    const decision = { kind: 'ok', messages: [fakeCreateMessage('全量', [{ id: 'a', hash: 'h1' }])] };
+    const decision = { kind: 'ok', messages: [fakeCreateMessage('全量')] };
     const out = await hook.handlePreStep({ agent, messages: [], step: 6 }, async () => decision);
-    check('会话恢复场景：表面已有提醒 → 不重复', out === decision, String(out.messages.length));
+    check('会话恢复场景：侧车记着提醒过 → 不重复', out === decision, String(out.messages.length));
   }
 
   // ④ 没有到期条目 → 什么都不注入
   {
     const entries = { current: [entry('a', 'h1', { date: '2026-01-01', verifyWhen: '2099-01-01' })] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' });               // 零注入的前提：状态已是最新
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
     const claimed = [userTurn, steady];
     const decision = { kind: 'ok', messages: [...claimed] };
@@ -288,7 +319,9 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
   // 没写 verify_when 的条目当然也不提醒
   {
     const entries = { current: [entry('a', 'h1')] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' });
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
     const claimed = [userTurn, steady];
     const decision = { kind: 'ok', messages: [...claimed] };
@@ -300,13 +333,15 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
   // 否则一条 `verify_when: 等换机器时` 会让每个会话都弹一次、而且用户怎么改都消不掉。
   {
     const entries = { current: [entry('a', 'h1', { date: '2026-01-01', verifyWhen: '等换机器时', line: '等换机器再说' })] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' });
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
     const claimed = [userTurn, steady];
     const decision = { kind: 'ok', messages: [...claimed] };
     const out = await hook.handlePreStep({ agent, messages: claimed, step: 2 }, async () => decision);
     check('verify_when 是人话（算不出日期）时不触发到期提醒', out === decision, String(out.messages.length));
-    check('人话写法不误判成"已到期"', !out.messages.some((m) => m.source?.form === 'due'), JSON.stringify(out.messages.map((m) => m.source?.form)));
+    check('人话写法不误判成"已到期"', !out.messages.some((m) => /已超期|还有 \d+ 天/.test(m.content?.[0]?.text ?? '')), JSON.stringify(out.messages.map((m) => m.content[0].text.slice(0, 20))));
     // 就算真的走到了渲染那一步，空列表也必须渲染成空串（不注入空消息）
     check('renderDue 对空列表返回空串', renderDue([]) === '');
   }
@@ -314,14 +349,16 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
   // ⑤ 本轮本来就要注入 baseline/delta → 到期提醒不抢那条消息
   {
     const entries = { current: [entry('a', 'h1', { date: '2026-01-01', verifyWhen: '2026-01-10' }), entry('b', 'h2', { date: '2026-01-01', verifyWhen: '2026-01-10' })] };
-    const hook = makeHook(entries, { today: () => '2026-03-01' });
+    const states = new Map();
+    seedState(states, { a: 'h1' });               // 上一轮只有 a → 这一轮是 delta
+    const hook = makeHook(entries, { today: () => '2026-03-01', states });
     const agent = fakeAgent();
-    const claimed = [userTurn, fakeCreateMessage('旧的全量', [{ id: 'a', hash: 'h1' }])];
+    const claimed = [userTurn, fakeCreateMessage('旧的全量')];
     const decision = { kind: 'ok', messages: [...claimed] };
     const out = await hook.handlePreStep({ agent, messages: claimed, step: 2 }, async () => decision);
-    const added = out.messages.filter((m) => m.source?.kind === MEMORY_SOURCE_KIND && m !== claimed[1]);
+    const added = out.messages.filter((m) => isMemoryMessage(m) && m !== claimed[1]);
     check('desired 不为 null 时只注入 delta', out.messages.length === decision.messages.length + 1, String(out.messages.length));
-    check('这一轮注入的是 delta 而不是 due', added.length === 1 && added[0].source.form === 'delta', JSON.stringify(added.map((m) => m.source.form)));
+    check('这一轮注入的是 delta 而不是 due', added.length === 1 && /新增：/.test(added[0].content[0].text), JSON.stringify(added.map((m) => m.content[0].text.slice(0, 24))));
     check('delta 没被 due 顶掉', /新增：/.test(added[0].content[0].text), added[0]?.content[0].text.slice(0, 80));
   }
 
@@ -340,16 +377,18 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
     const claimed = [userTurn, steady];
     const decision = { kind: 'ok', messages: [...claimed] };
 
-    const strict = makeHook(soon, { today: () => '2026-03-01' });
+    const strictStates = new Map(); seedState(strictStates, { a: 'h1' });
+    const strict = makeHook(soon, { today: () => '2026-03-01', states: strictStates });
     const outStrict = await strict.handlePreStep({ agent: fakeAgent(), messages: claimed, step: 2 }, async () => decision);
     check('dueWithin 默认 0：还有 4 天才到期 → 不提醒', outStrict === decision, String(outStrict.messages.length));
 
-    const early = makeHook(soon, { today: () => '2026-03-01', dueWithin: 7 });
+    const earlyStates = new Map(); seedState(earlyStates, { a: 'h1' });
+    const early = makeHook(soon, { today: () => '2026-03-01', dueWithin: 7, states: earlyStates });
     const outEarly = await early.handlePreStep({ agent: fakeAgent(), messages: claimed, step: 2 }, async () => decision);
-    const earlyMsg = outEarly.messages.find((m) => m.source?.form === 'due');
-    check('dueWithin=7：还没到期也提醒', !!earlyMsg, JSON.stringify(outEarly.messages.map((m) => m.source?.form)));
+    const earlyMsg = outEarly.messages.find((m) => m !== steady && /还有 \d+ 天/.test(m.content?.[0]?.text ?? ''));
+    check('dueWithin=7：还没到期也提醒', !!earlyMsg, JSON.stringify(outEarly.messages.map((m) => m.content[0].text.slice(0, 24))));
     check('还没到期时文案说「还有 N 天」', !!earlyMsg && /还有 \d+ 天/.test(earlyMsg.content[0].text), earlyMsg?.content[0].text.slice(0, 160));
-    check('提前提醒同样不带 entries', !!earlyMsg && earlyMsg.source.entries === undefined, JSON.stringify(earlyMsg?.source));
+    check('提前提醒的 source 同样只有 kind+plugin', !!earlyMsg && Object.keys(earlyMsg.source).length === 2, JSON.stringify(earlyMsg?.source));
   }
 }
 
@@ -358,23 +397,24 @@ section('会话结束蒸馏钩子：长会话里提醒一次，且不污染差�
 {
   const entries = { current: [entry('a', 'h1')] };
   const agent = fakeAgent();
-  const seen = fakeCreateMessage('已注入', [{ id: 'a', hash: 'h1' }]);
+  const seen = fakeCreateMessage('已注入');
   const claimed = [{ id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] }];
+  const seed = () => { const s = new Map(); seedState(s, { a: 'h1' }); return s; };
 
   // 轮次还没到 → 不提醒
-  const hook1 = makeHook(entries, { nudgeAfterTurns: 4 });
+  const hook1 = makeHook(entries, { nudgeAfterTurns: 4, states: seed() });
   const d1 = { kind: 'ok', messages: [...claimed, seen] };
   const o1 = await hook1.handlePreStep({ agent, messages: claimed, step: 2 }, async () => d1);
   check('轮次未到时不安慰/不提醒', o1.messages.length === d1.messages.length, String(o1.messages.length));
 
   // 轮次到了 → 提醒一次
-  const hook2 = makeHook(entries, { nudgeAfterTurns: 4 });
+  const hook2 = makeHook(entries, { nudgeAfterTurns: 4, states: seed() });
   const d2 = { kind: 'ok', messages: [...claimed, seen] };
   const o2 = await hook2.handlePreStep({ agent, messages: claimed, step: 5 }, async () => d2);
   check('长会话触发蒸馏提醒', o2.messages.length === d2.messages.length + 1, String(o2.messages.length));
-  const nudge = o2.messages.find((m) => m.source?.form === 'nudge');
-  check('提醒消息带 form=nudge', !!nudge, JSON.stringify(o2.messages.map((m) => m.source)));
-  check('提醒**不带** entries（不污染状态）', nudge && !('entries' in nudge.source), JSON.stringify(nudge?.source));
+  const nudge = o2.messages.find((m) => m !== seen && /memory_write/.test(m.content?.[0]?.text ?? ''));
+  check('提醒消息按文案能认出来', !!nudge, JSON.stringify(o2.messages.map((m) => m.content[0].text.slice(0, 20))));
+  check('提醒的 source 只有 kind+plugin', !!nudge && Object.keys(nudge.source).length === 2, JSON.stringify(nudge?.source));
   check('提醒文案提到 memory_write', !!nudge && /memory_write/.test(nudge.content[0].text));
 
   // 同会话再触发 → 不再提醒
@@ -385,12 +425,12 @@ section('会话结束蒸馏钩子：长会话里提醒一次，且不污染差�
 
   // 关键回归：提醒之后，下一轮仍能正确算差分（不能因为提醒而全量重灌）
   const agent2 = fakeAgent();
-  const hook3 = makeHook(entries, { nudgeAfterTurns: 4 });
-  const stateMsg = fakeCreateMessage('全量', [{ id: 'a', hash: 'h1' }]);
+  const hook3 = makeHook(entries, { nudgeAfterTurns: 4, states: seed() });
+  const stateMsg = fakeCreateMessage('全量');
   const c = [{ id: 'u', source: { kind: 'user' }, content: [{ type: 'text', text: 'x' }] }];
   const dNudge = { kind: 'ok', messages: [...c, stateMsg] };
   const outNudge = await hook3.handlePreStep({ agent: agent2, messages: c, step: 6 }, async () => dNudge);
-  check('提醒确实插进来了', outNudge.messages.some((m) => m.source?.form === 'nudge'));
+  check('提醒确实插进来了', outNudge.messages.some((m) => /memory_write/.test(m.content?.[0]?.text ?? '')));
   const afterNudge = [...outNudge.messages];
   const dNext = { kind: 'ok', messages: [...afterNudge] };
   const outNext = await hook3.handlePreStep({ agent: agent2, messages: afterNudge, step: 7 }, async () => dNext);
@@ -400,16 +440,17 @@ section('会话结束蒸馏钩子：长会话里提醒一次，且不污染差�
 /* ----------------------------------------------------------- 幂等与工具函数 */
 section('工具函数');
 {
-  check('isMemoryMessage 识别自己', isMemoryMessage({ source: { kind: MEMORY_SOURCE_KIND } }));
+  check('isMemoryMessage 识别自己', isMemoryMessage({ source: memorySource() }));
+  check('isMemoryMessage 认得迁移读回后的形态', isMemoryMessage({ source: { kind: `plugin:${MEMORY_PLUGIN_ID}` } }));
   check('isMemoryMessage 不误判别的插件', !isMemoryMessage({ source: { kind: 'agent-instructions' } }));
   check('isMemoryMessage 不误判用户消息', !isMemoryMessage({ source: { kind: 'user' } }));
   check('isMemoryMessage 容忍 null', !isMemoryMessage(null));
 
-  const a = fakeCreateMessage('same', [{ id: 'x', hash: 'h' }]);
-  const b = fakeCreateMessage('same', [{ id: 'x', hash: 'h' }]);
-  const c = fakeCreateMessage('same', [{ id: 'x', hash: 'DIFFERENT' }]);
-  check('同内容同状态 → 等价', sameMemoryPayload(a, b));
-  check('状态不同 → 不等价', !sameMemoryPayload(a, c));
+  const a = fakeCreateMessage('same');
+  const b = fakeCreateMessage('same');
+  const c = fakeCreateMessage('别的正文');
+  check('同内容 → 等价', sameMemoryPayload(a, b));
+  check('正文不同 → 不等价', !sameMemoryPayload(a, c));
   check('null 安全', !sameMemoryPayload(a, null));
 
   let threw = false;

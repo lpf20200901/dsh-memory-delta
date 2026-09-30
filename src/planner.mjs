@@ -6,15 +6,56 @@
  * 就白烧约 58k tokens）。这里改成：记住上一轮注入的每条 hash，下一轮**只注入变化块**；
  * 完全没变化时**一个字都不注入**。
  *
- * 状态从哪来：不存旁路文件，而是从**会话历史里我们自己发过的那条消息**里读
- * （消息的 source 带着上一轮的 {id → hash}）。这样会话恢复 / 回放 / 压缩之后状态依然正确。
+ * 状态从哪来：2026-09-30 起放**侧车文件**
+ * （`$DSH_HOME/storages/dsh-memory-delta/inject-state/<sessionId>.json`，见 src/plugin.mjs 的
+ * loadState/saveState）。此前把 `{id → hash}` 塞在消息的 `source` 里 —— 那会被 DSH 会话格式的
+ * v0 白名单 / v2→v3 来源表拒绝，让整条会话永久读不出来，已废弃。
+ * 落盘时机同样讲究：只有消息**真的进了上下文**才记账（见 src/hook.mjs 的可见性判断），
+ * 否则"排队后又被清掉"会让状态虚增，模型永久少看一批记忆。
  */
 
-export const MEMORY_SOURCE_KIND = 'memory';
+/**
+ * 插件身份：写进消息 `source.plugin` 的值（= 包名，见 cordis.patch.yml 的 name）。
+ */
+export const MEMORY_PLUGIN_ID = 'dsh-memory-delta';
 
 /**
- * 条目集合 → 状态表 { id: hash }。
- * @param {Array<{id: string, hash: string}>} entries
+ * 自己发的消息长什么样 —— 写出去和读回来**不是同一个形状**，两边都要认。
+ *
+ * ⚠️ source 的形状受 DSH 会话格式 **v0 白名单**约束
+ * （`@deepseek-ai/dsh-session-format-v0-to-v1/lib/index.js:919 pluginSourceValue`）：
+ *   `kind:'plugin'` 只允许成员 `kind, plugin[, form, sections, summary]`；
+ *   `form` ∈ instructions|catalog|snapshot|notice|relay|recall，snapshot 必须带 sections、notice 必须带 summary。
+ * 所以**差分状态不能塞进 source**：老写法 `kind:'memory'` 会被 v2→v3 拒、带 `entries` 或自定义 `form`
+ * 的 plugin 包装会被 v0→v1 拒 —— 两种都会让整条会话**永久读不出来**（2026-09-30 实测踩到，
+ * 本机 14 条会话因此打不开）。状态改放 inject-state 侧车（见 src/plugin.mjs）。
+ *
+ * 形状变化（v3→v4 的 `rewritePluginSource`）：
+ *   写入 `{kind:'plugin', plugin:'dsh-memory-delta'}` → 读回 `{kind:'plugin:dsh-memory-delta'}`
+ * 只认写入形态的话，会话重启后就认不出自己发过的消息（提醒去重、清理排队都会失准）。
+ *
+ * @param {unknown} src 消息的 `source`
+ * @returns {boolean} 是不是我们发的
+ */
+export function isMemorySource(src) {
+  if (!src || typeof src !== 'object') return false;
+  if (src.kind === 'plugin') return src.plugin === MEMORY_PLUGIN_ID; // 写入形态（会话未重启）
+  if (src.kind === `plugin:${MEMORY_PLUGIN_ID}`) return true;        // 从日志读回（迁移抬升后）
+  if (src.kind === MEMORY_PLUGIN_ID) return true;                    // 上游同名白名单收录时的形态
+  return src.kind === 'memory';                                     // 历史遗留（≤1.3.0 写进日志的）
+}
+
+/**
+ * 构造写进消息 `source` 的来源标记 —— **唯一构造点**。
+ * 只用 v0 白名单允许的两个键；多任何成员都会让 v0→v1 迁移拒绝整条会话。
+ */
+export function memorySource() {
+  return { kind: 'plugin', plugin: MEMORY_PLUGIN_ID };
+}
+
+/**
+ * 条目集合 → 状态表 { id: hash }（差分基线）。
+ * 由 src/plugin.mjs 落到 inject-state 侧车；不再随消息 `source.entries` 走 —— 见文件头。
  */
 export function stateOf(entries) {
   const out = {};
@@ -33,8 +74,8 @@ export const LINE_CAP = 90;
 /**
  * key 在**正文里**显示的上限。
  *
- * ⚠️ 只影响正文 —— 完整 key 依然随消息的 `source.entries` 结构化带给模型（那是差分的依据，
- * 也是它 `memory_search` 的检索词）。截短只是别让一个 43 字的 key 白占预算。
+ * ⚠️ 只影响正文 —— 截短是因为一个 43 字的 key 会白占注入预算；正文里那个 `[key]` 只有
+ * 在它与 id 不同时才写（见 renderKey），而 id 本身从 v1.3.1 起**不再进上下文**（只做差分元数据）。
  */
 export const KEY_CAP = 24;
 
@@ -48,7 +89,7 @@ const clip = (text, cap = LINE_CAP) => {
  *
  * 判据：**key 只在它不等于 id 时才写**。这是实测出来的 —— `createEntry` 的规则是
  * "给了 key 就用 key 当文件名"，于是真实库里 31 条常驻有 **30 条的 key 与 id 一字不差**，
- * 而 id 已经通过 `source.entries` 给到模型：正文里那个 `[key]` 是**第二遍**，
+ * 而两者对模型是同一个词：写出去就是**第二遍**，
  * 实测占 912 字节 / 注入总量的 15%（其中 879 字节是纯重复）。
  * 只有 key 与 id 不同时（既有语义键、文件名又是另起的）它才携带新信息。
  */
@@ -61,8 +102,8 @@ const renderKey = (e) => {
 /**
  * 渲染一条记忆。
  *
- * ⚠️ **故意不写 id**：id 是机器用来做差分的元数据，已经随消息的 `source.entries`
- * 结构化携带（见 sourceEntries），把它再写进正文只会白占注入预算 ——
+ * ⚠️ **故意不写 id**：id 是机器用来做差分的元数据，从 v1.3.1 起只落在侧车状态文件里
+ * （不进上下文），把它写进正文纯属白占注入预算 ——
  * 实测它曾占掉**全部注入字节的 40%**（1066 字节里 431 是 id）。
  * 去掉后 3 KB 预算能装的条目从约 17 条升到约 29 条。
  * （同一条道理现在也用在 key 上 —— 见 renderKey。）
@@ -131,30 +172,9 @@ export function planInjection(current, previous) {
 }
 
 /**
- * 从会话历史里找回上一轮注入的状态。
- * 只认自己发的消息（source.kind === 'memory'），并取**最后一条**（最近的状态）。
- *
- * @param {Array} messages 会话里可见的消息（或本步已领取的消息）
- * @returns {object|null} { id: hash }，找不到返回 null
+ * 侧车状态的数组形式（`{id: hash}` → `[{id, hash}]`）。
+ * 只给调试 / CLI / 测试看；注入链路不再把状态写进消息 —— 见文件头。
  */
-export function previousStateFrom(messages) {
-  let found = null;
-  for (const m of messages) {
-    const src = m?.source;
-    if (!src || typeof src !== 'object') continue;
-    if (src.kind !== MEMORY_SOURCE_KIND) continue;
-    if (!Array.isArray(src.entries)) continue;
-    found = src.entries;
-  }
-  if (!found) return null;
-  const state = {};
-  for (const e of found) {
-    if (e && typeof e.id === 'string') state[e.id] = String(e.hash ?? '');
-  }
-  return state;
-}
-
-/** 构造要写进消息 source 的状态（供下一轮差分）。 */
 export function sourceEntries(state) {
   return Object.entries(state).map(([id, hash]) => ({ id, hash }));
 }
