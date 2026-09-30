@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the later improvements are covered by 1206 assertions
+> verified inside a real DSH session, and the later improvements are covered by 1224 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 >
 > **Questions?** → [FAQ](docs/faq.md) — "is the whole memory re-sent on every turn?", "what happens when a
@@ -250,7 +250,7 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 1206 assertions, zero dependencies
+npm test        # 1224 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -259,6 +259,7 @@ npm test        # 1206 assertions, zero dependencies
 | `test/planner-tests.mjs` | 53 | the diff algorithm, the injected-text rendering, and the source shape having to pass DSH's session-format admission (from v4 the `kind` must be a producer-owned kind, never `plugin`) |
 | `test/search-tests.mjs` | 56 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
+| `test/session-format-tests.mjs` | 17 | **the session-format contract, checked against the kernel's own admission function** (the written source passes v4 admission, the retired `plugin` wrapper is still refused by it, all four historical read shapes are recognised, and no file hand-writes a `kind` literal outside `memorySource()`) |
 | `test/hook-tests.mjs` | 66 | plugin wiring (fake agent / decision): diff injection, when the side-car state is committed, nudge, due reminder |
 | `test/plugin-tests.mjs` | 303 | plugin integration (stubbed DSH modules, real `apply()` + both tools + all three panel routes + promote/rename/topic/batch actually writing the store + 400-vs-500 error classification + whitelist/origin checks + tool-output contract and render text) |
 | `test/client-tests.mjs` | 341 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, batch selection, entry click → `openFile`, search timing and truncation, promote/tidy, failure states; plus the "apply must stay safe when better-sidebar is absent" regression) |

@@ -45,7 +45,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --check src/plugin.mjs && node --check src/panel.mjs && node --check client/client.js && node test/run-tests.mjs && node test/planner-tests.mjs && node test/search-tests.mjs && node test/due-tests.mjs && node test/hook-tests.mjs && node --import ./test/stub-loader.mjs test/plugin-tests.mjs && node test/client-tests.mjs"
+    "test": "node --check src/plugin.mjs && node --check src/panel.mjs && node --check client/client.js && node test/run-tests.mjs && node test/planner-tests.mjs && node test/search-tests.mjs && node test/due-tests.mjs && node test/session-format-tests.mjs && node test/hook-tests.mjs && node --import ./test/stub-loader.mjs test/plugin-tests.mjs && node test/client-tests.mjs"
   },
   "keywords": [
     "memory",

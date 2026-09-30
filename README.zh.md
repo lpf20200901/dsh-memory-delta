@@ -229,7 +229,7 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 1206 个断言，零依赖
+npm test        # 1224 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
@@ -238,6 +238,7 @@ npm test        # 1206 个断言，零依赖
 | `test/planner-tests.mjs` | 53 | 差分算法 + 注入正文渲染 + 来源形状必须过 DSH 会话格式准入（v4 起 `kind` 必须是生产者自有 kind，绝不能是 `plugin`） |
 | `test/search-tests.mjs` | 56 | 分词 / 按层加权 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
+| `test/session-format-tests.mjs` | 17 | **会话格式契约：拿内核自己的准入函数验我们写出去的来源**（现行形态过 v4 准入、退役的 `plugin` 包装仍被它拒、四种历史读回形态都认得出、全仓没有第二处手写 `kind` 字面量）。内核模块找不到时打印 SKIP 跳过 |
 | `test/hook-tests.mjs` | 66 | 插件接线（假 agent / decision）：差分注入、状态侧车落盘时机、蒸馏提醒、到期提醒 |
 | `test/plugin-tests.mjs` | 303 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename/topic/batch 真的写库 + 400/500 错误码分类 + 白名单/来源校验 + 工具输出契约与 render 文本） |
 | `test/client-tests.mjs` | 341 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、四个维度覆盖三个阶段、归类、批量勾选、点条目调 openFile、检索时序与截断提示、提升/整理文件名、失败态；含"没装 better-sidebar 时 apply 必须安全跳过"的回归） |
