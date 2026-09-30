@@ -396,7 +396,7 @@ const preStep = ctx.handlers.get('agent/pre-step');
   check('第 1 轮把 baseline 排进 inbox', agent.inbox.nextStep.length === 1);
   const baseline = agent.inbox.nextStep[0];
   check('baseline 内容是记忆条目', baseline.content[0].text.includes('不要用 rmSync'), baseline.content[0].text.slice(0, 60));
-  check('baseline 的 source 是白名单形状（只有 kind+plugin）', baseline.source.kind === 'plugin' && Object.keys(baseline.source).length === 2, JSON.stringify(baseline.source));
+  check('baseline 的 source 是 v4 生产者自有 kind（只有 kind 一个键）', baseline.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(baseline.source).length === 1, JSON.stringify(baseline.source));
 
   // 第 2 轮：已领取里含上轮那条 → 状态一致 → 零注入
   const claimed = [userMsg, baseline];
@@ -416,9 +416,14 @@ const preStep = ctx.handlers.get('agent/pre-step');
   check('第 3 轮插入 1 条', o3.messages.length === d3.messages.length + 1, String(o3.messages.length));
   const delta = o3.messages.find((m) => isMemorySource(m.source) && m.content[0].text.includes('新增'));
   check('第 3 轮推的是 delta', !!delta, JSON.stringify(o3.messages.map((m) => m.content[0].text.slice(0, 24))));
-  // 2026-09-30 回归：注入消息的来源必须是 DSH 认可的 plugin 包装。
-  // 自定义 kind（老的 'memory'）会让 v2→v3 迁移拒绝整条会话 —— 会话从此打不开，且日志不会自动修复。
-  check('注入消息的来源是 plugin 包装', !!delta && delta.source.kind === 'plugin' && delta.source.plugin === MEMORY_PLUGIN_ID, JSON.stringify(delta?.source));
+  // 2026-09-30 两次事故，规则被 DSH 反向改过一次：
+  //   · v3 及以前：唯一合法写法是插件包装 `{kind:'plugin', plugin:'<包名>'}`，
+  //     自定义 kind（老的 'memory'）会让 v2→v3 迁移拒绝整条会话 —— 会话从此打不开。
+  //   · v4 起（DSH 0.1.7）：反过来，`kind` 必须是**生产者自有 kind**（非空、≠『plugin』），
+  //     还写 `{kind:'plugin'}` 会让**编码器每次写会话日志都抛** `format v4 message requires a
+  //     producer-owned source kind` → 每个会话第一轮就「本轮运行失败」。
+  //   现行形态 = `plugin:<包名>`（也是 v3→v4 迁移抬升出来的形态）。
+  check('注入消息的来源是 v4 生产者自有 kind', !!delta && delta.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(delta.source).length === 1, JSON.stringify(delta?.source));
   check('delta 只含新条目', delta && /沙箱禁管道/.test(delta.content[0].text) && !/rmSync/.test(delta.content[0].text), delta?.content[0].text.slice(0, 120));
   // 回归：id 只进侧车状态，不进正文（曾占掉 40% 注入字节）
   check('注入正文不含 id 注释', delta && !delta.content[0].text.includes('<!--'), delta?.content[0].text.slice(0, 120));
@@ -666,7 +671,7 @@ section('到期复核：通过插件真实接线发出提醒（按文案认领�
   const dueMsg = out.messages.find((m) => /该复核的老结论/.test(m.content?.[0]?.text ?? ''));
   check('插件接线能发出到期提醒', !!dueMsg, JSON.stringify(out.messages.map((m) => m.content[0].text.slice(0, 24))));
   check('提醒通过真实 createUserMessage 构造', !!dueMsg && dueMsg.role === 'user' && Array.isArray(dueMsg.content), JSON.stringify(dueMsg?.content));
-  check('提醒的 source 是白名单形状（不带状态）', !!dueMsg && Object.keys(dueMsg.source).length === 2, JSON.stringify(dueMsg?.source));
+  check('提醒的 source 是 v4 生产者自有 kind（不带状态）', !!dueMsg && dueMsg.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(dueMsg.source).length === 1, JSON.stringify(dueMsg?.source));
   check('提醒文案含该复核的条目', !!dueMsg && /该复核的老结论/.test(dueMsg.content[0].text), dueMsg?.content[0].text.slice(0, 160));
   check('这一轮不重复注入记忆（desired 本来就是 null）', out.messages.filter((m) => isMemorySource(m.source)).length === 2, String(out.messages.length));
 
@@ -718,7 +723,7 @@ section('到期复核：通过插件真实接线发出提醒（按文案认领�
   const dueSoon = outSoonOn.messages.find((m) => m !== seenSoon && /还有 \d+ 天/.test(m.content?.[0]?.text ?? ''));
   check('dueWithin=30：还没到期但快了 → 提醒（Config 真的透传到了 hook）', !!dueSoon, JSON.stringify(outSoonOn.messages.map((m) => m.content[0].text.slice(0, 24))));
   check('到期提醒里带上 verify_when 原值', !!dueSoon && dueSoon.content[0].text.includes(inTenDays), dueSoon?.content[0].text.slice(0, 120));
-  check('dueWithin 生效时 source 也是白名单形状', !!dueSoon && Object.keys(dueSoon.source).length === 2, JSON.stringify(dueSoon?.source));
+  check('dueWithin 生效时 source 也是 v4 生产者自有 kind', !!dueSoon && dueSoon.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(dueSoon.source).length === 1, JSON.stringify(dueSoon?.source));
 }
 
 /* --------------------------------------- 侧边栏「记忆」页签的数据路由 */

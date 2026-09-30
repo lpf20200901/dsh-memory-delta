@@ -130,18 +130,32 @@ section('渲染与框架转义');
   check('未超长的不动', renderBaseline([entry('s', 'h', { line: '短的' })]).includes('- 短的'));
 }
 
-/* ------------------------------------ 来源形状：必须过 DSH 的格式白名单 */
-section('memorySource：写出去的形状必须过 DSH 会话格式白名单');
+/* ------------------------------------ 来源形状：必须过 DSH 的格式准入 */
+section('memorySource：写出去的形状必须过 DSH 会话格式准入');
 {
-  /* 2026-09-30 事故（本机 14 条会话因此永久打不开）：老写法 `kind:'memory'` 会被 v2→v3 拒；
-     带 entries 或自定义 form 的 plugin 包装会被 v0→v1 拒（v0 白名单只允许
-     kind/plugin/form/sections/summary，form 限 6 个值）。这里把形状钉死。 */
+  /* ⚠️ 这条规则被 DSH **反向改过一次**，两个方向都出过"整条会话废掉"的事故，别改混：
+     · v3 及以前（2026-09-30 事故，本机 14 条会话永久打不开）：**唯一合法**写法是
+       `{kind:'plugin', plugin:'<包名>'}`；`kind:'memory'` 被 v2→v3 拒，
+       多带 `entries` / 自定义 `form` 被 v0→v1 拒（白名单只允许 kind/plugin/form/sections/summary）。
+     · **v4 起（DSH 0.1.7）**：kind 必须是**生产者自有 kind** —— 非空字符串且 ≠ `plugin`，
+       否则**编码器当场抛** `format v4 message requires a producer-owned source kind`，
+       会话日志一个字都写不进去 → 每个会话第一轮「本轮运行失败」（社区版 DSH Desktop 0.10.0 实测）。
+       第三方插件的规范形态 = `plugin:<包名>`（= v3→v4 迁移给未知插件的分配规则）。
+     对照组：把 memorySource() 改回 `{kind:'plugin', ...}`，本节的第 2、4 条断言必红。 */
   const written = memorySource();
-  check('是 plugin 包装', written.kind === 'plugin' && written.plugin === MEMORY_PLUGIN_ID, JSON.stringify(written));
-  check('只有两个键（多任何成员都会被 v0 白名单拒）', Object.keys(written).length === 2, JSON.stringify(Object.keys(written)));
-  check('不带差分状态（状态走侧车文件）', written.entries === undefined && written.form === undefined);
+  check('是 plugin:<包名> 形态', written.kind === `plugin:${MEMORY_PLUGIN_ID}`, JSON.stringify(written));
+  check(
+    '满足 v4 准入：kind 非空 且 ≠ plugin',
+    typeof written.kind === 'string' && written.kind.length > 0 && written.kind !== 'plugin',
+    JSON.stringify(written),
+  );
+  check('只有 kind 一个键', Object.keys(written).length === 1, JSON.stringify(Object.keys(written)));
+  check(
+    '不带差分状态（状态走侧车文件）',
+    written.entries === undefined && written.form === undefined && written.plugin === undefined,
+  );
   check('写入形态能被认出来', isMemorySource(written));
-  check('迁移读回形态（plugin:<包名>）也认', isMemorySource({ kind: `plugin:${MEMORY_PLUGIN_ID}` }));
+  check('v3 老写法（plugin 包装）仍认 —— 老日志里全是它', isMemorySource({ kind: 'plugin', plugin: MEMORY_PLUGIN_ID }));
   check('上游同名白名单形态也认', isMemorySource({ kind: MEMORY_PLUGIN_ID }));
   check('历史遗留 kind 也认（老日志里还有）', isMemorySource({ kind: 'memory' }));
   check('不误判别的插件', !isMemorySource({ kind: 'plugin', plugin: 'someone-else' }));

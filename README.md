@@ -256,7 +256,7 @@ npm test        # 1206 assertions, zero dependencies
 | Suite | Assertions | Covers |
 | --- | --- | --- |
 | `test/run-tests.mjs` | 295 | CLI end-to-end (incl. a non-ASCII path regression, ranked recall, `mem due`, `mem rename` with reference sync, key-as-file-name, the `topic` lifecycle, reserved topic names, injection-text slimming, hand-written frontmatter fidelity, and reference cleanup on `restore`) |
-| `test/planner-tests.mjs` | 52 | the diff algorithm, the injected-text rendering, and the source shape having to pass DSH's format whitelist (pure logic) |
+| `test/planner-tests.mjs` | 53 | the diff algorithm, the injected-text rendering, and the source shape having to pass DSH's session-format admission (from v4 the `kind` must be a producer-owned kind, never `plugin`) |
 | `test/search-tests.mjs` | 56 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/hook-tests.mjs` | 66 | plugin wiring (fake agent / decision): diff injection, when the side-car state is committed, nudge, due reminder |
@@ -284,13 +284,19 @@ Regression tests baked in from real bugs:
 - A field added to *some* early-return paths of an internal planner function (`due`) was destructured
   into `undefined` and threw on every step, which the outer `try/catch` silently reported as
   "failed to load memory" — hence the defensive read and the zero-warning assertion;
-- An injected message's `source` must use the **DSH-recognised plugin wrapper with no extra members**
-  (`{kind:'plugin', plugin:'<package>'}`): a custom `source.kind` (the old `'memory'`) is refused by the
-  session-format **v2→v3** stage, while `entries` or a non-enumerated `form` on a `plugin` source is refused
-  by the **v0→v1** stage (whitelist: `kind/plugin/form/sections/summary`). Either way the migration refuses
-  the **whole session** and leaves the source artifact unchanged, so **every session that ever received such
-  a message becomes permanently unreadable**. The migrated read-back form (`{kind:'plugin:<package>'}`) must
-  be recognised too, and the diff state now lives in the side-car file instead of the source.
+- An injected message's `source` was tightened **in opposite directions** by two session-format
+  generations, and getting either wrong makes a session unusable:
+  **from v4 on (DSH 0.1.7)** the `kind` must be a **producer-owned kind** — a nonempty string that is
+  **not `plugin`**. The canonical form is `{kind:'plugin:<package>'}` (exactly what the v3→v4 migration
+  assigns to a third-party plugin). Writing the old `{kind:'plugin', plugin:'<package>'}` makes the
+  **encoder throw** `format v4 message requires a producer-owned source kind` on **every** session-log
+  write, so **every session fails on its first turn**.
+  **v3 and earlier** still constrain the historical log: a `plugin` wrapper may carry only
+  `kind/plugin/form/sections/summary` (the v0→v1 whitelist), and a custom `source.kind` (the older
+  `'memory'`) is refused by the v2→v3 stage (`cannot safely transform unclassified message source`).
+  The migration leaves the source artifact unchanged, so **every older session that ever received such
+  a message is permanently unreadable**. The diff state therefore lives in a side-car file instead of
+  the source.
 - **`memory_search` never worked in a live session, and no test could see it.** The tool's declared
   `output.schema` omitted `tags` / `date` / `file` while `searchLibrary` attaches `file` to *every*
   hit, and DSH validates a tool's return value in `ToolRuntime.createSuccessResult()` with

@@ -109,7 +109,7 @@ section('step 1（本步还没开始）→ 只排队进 inbox');
   check('消息进了 inbox', agent.inbox.nextStep.length === 1);
   check('进的是我们的消息', isMemoryMessage(agent.inbox.nextStep[0]));
   check('内容是全量 baseline', agent.inbox.nextStep[0].content[0].text.includes('结论 a'));
-  check('source 是合法 plugin 包装（只有 kind+plugin）', Object.keys(agent.inbox.nextStep[0].source).length === 2, JSON.stringify(agent.inbox.nextStep[0].source));
+  check('source 是合法 v4 来源（生产者自有 kind，只有 kind 一个键）', agent.inbox.nextStep[0].source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(agent.inbox.nextStep[0].source).length === 1, JSON.stringify(agent.inbox.nextStep[0].source));
   // 第 1 步只是排队（还没进上下文）→ 状态**不能**落盘，否则"排队后又被清掉"会永久丢一批注入
   check('排队阶段不落盘', states.get(SESSION_ID) === undefined, JSON.stringify(states.get(SESSION_ID)));
 }
@@ -151,7 +151,7 @@ section('第二轮（记忆变了）→ 只注入变化块，且插在已领取�
   check('插入位置在最后一条已领取消息之后', out.messages.indexOf(inserted) === out.messages.indexOf(prev) + 1, `at ${out.messages.indexOf(inserted)} vs prev ${out.messages.indexOf(prev)}`);
   check('内容是 delta（含"新增"）', /新增：/.test(inserted.content[0].text), inserted.content[0].text.slice(0, 80));
   check('delta 不复述未变化条目', !inserted.content[0].text.includes('结论 a'));
-  check('source 是合法 plugin 包装（不带状态）', inserted.source.kind === 'plugin' && Object.keys(inserted.source).length === 2, JSON.stringify(inserted.source));
+  check('source 是合法 v4 来源（不带状态）', inserted.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(inserted.source).length === 1, JSON.stringify(inserted.source));
   // 新语义：这一步只是"插进 decision"，状态要等它真的进了上下文（下一次 pre-step 可见）才落盘 ——
   // 否则"排队后又被清掉"的消息会让状态虚增、模型永久少看一批记忆。
   check('还没落盘（可见后才记账）', states.get(SESSION_ID)?.state?.b === undefined, JSON.stringify(states.get(SESSION_ID)));
@@ -269,8 +269,8 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
     check('零注入的那一轮插入了到期提醒', out.messages.length === decision.messages.length + 1, String(out.messages.length));
     const dueMsg = out.messages.find((m) => m !== steady && /已超期/.test(m.content?.[0]?.text ?? ''));
     check('提醒消息按文案能认出来', !!dueMsg, JSON.stringify(out.messages.map((m) => m.content[0].text.slice(0, 24))));
-    // 关键回归：提醒的 source 必须是白名单形状（只有 kind+plugin），不带任何状态
-    check('提醒的 source 只有 kind+plugin', dueMsg && dueMsg.source.kind === 'plugin' && Object.keys(dueMsg.source).length === 2, JSON.stringify(dueMsg?.source));
+    // 关键回归：提醒的 source 必须是 v4 的**生产者自有 kind**（非空、≠'plugin'），不带任何状态
+    check('提醒的 source 是生产者自有 kind', dueMsg && dueMsg.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(dueMsg.source).length === 1, JSON.stringify(dueMsg?.source));
     check('提醒文案含结论正文', !!dueMsg && dueMsg.content[0].text.includes('该复核的结论'), dueMsg?.content[0].text.slice(0, 120));
     check('提醒文案含「已超期」', !!dueMsg && /已超期 \d+ 天/.test(dueMsg.content[0].text), dueMsg?.content[0].text.slice(0, 200));
     check('提醒插在已领取消息之后', out.messages.indexOf(dueMsg) === decision.messages.length, String(out.messages.indexOf(dueMsg)));
@@ -388,7 +388,7 @@ section('到期复核（verify_when）：会话内提醒一次，且绝不污染
     const earlyMsg = outEarly.messages.find((m) => m !== steady && /还有 \d+ 天/.test(m.content?.[0]?.text ?? ''));
     check('dueWithin=7：还没到期也提醒', !!earlyMsg, JSON.stringify(outEarly.messages.map((m) => m.content[0].text.slice(0, 24))));
     check('还没到期时文案说「还有 N 天」', !!earlyMsg && /还有 \d+ 天/.test(earlyMsg.content[0].text), earlyMsg?.content[0].text.slice(0, 160));
-    check('提前提醒的 source 同样只有 kind+plugin', !!earlyMsg && Object.keys(earlyMsg.source).length === 2, JSON.stringify(earlyMsg?.source));
+    check('提前提醒的 source 同样是生产者自有 kind', !!earlyMsg && earlyMsg.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(earlyMsg.source).length === 1, JSON.stringify(earlyMsg?.source));
   }
 }
 
@@ -414,7 +414,7 @@ section('会话结束蒸馏钩子：长会话里提醒一次，且不污染差�
   check('长会话触发蒸馏提醒', o2.messages.length === d2.messages.length + 1, String(o2.messages.length));
   const nudge = o2.messages.find((m) => m !== seen && /memory_write/.test(m.content?.[0]?.text ?? ''));
   check('提醒消息按文案能认出来', !!nudge, JSON.stringify(o2.messages.map((m) => m.content[0].text.slice(0, 20))));
-  check('提醒的 source 只有 kind+plugin', !!nudge && Object.keys(nudge.source).length === 2, JSON.stringify(nudge?.source));
+  check('提醒的 source 是生产者自有 kind', !!nudge && nudge.source.kind === `plugin:${MEMORY_PLUGIN_ID}` && Object.keys(nudge.source).length === 1, JSON.stringify(nudge?.source));
   check('提醒文案提到 memory_write', !!nudge && /memory_write/.test(nudge.content[0].text));
 
   // 同会话再触发 → 不再提醒

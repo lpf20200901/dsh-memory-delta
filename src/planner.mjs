@@ -20,37 +20,50 @@
 export const MEMORY_PLUGIN_ID = 'dsh-memory-delta';
 
 /**
- * 自己发的消息长什么样 —— 写出去和读回来**不是同一个形状**，两边都要认。
+ * 自己发的消息长什么样 —— 历史上一共有四种形态，**全都要认**（老会话日志里都还在）。
  *
- * ⚠️ source 的形状受 DSH 会话格式 **v0 白名单**约束
- * （`@deepseek-ai/dsh-session-format-v0-to-v1/lib/index.js:919 pluginSourceValue`）：
- *   `kind:'plugin'` 只允许成员 `kind, plugin[, form, sections, summary]`；
- *   `form` ∈ instructions|catalog|snapshot|notice|relay|recall，snapshot 必须带 sections、notice 必须带 summary。
- * 所以**差分状态不能塞进 source**：老写法 `kind:'memory'` 会被 v2→v3 拒、带 `entries` 或自定义 `form`
- * 的 plugin 包装会被 v0→v1 拒 —— 两种都会让整条会话**永久读不出来**（2026-09-30 实测踩到，
- * 本机 14 条会话因此打不开）。状态改放 inject-state 侧车（见 src/plugin.mjs）。
+ * ⚠️ source 的形状被 DSH 会话格式**逐代收紧过两次**，两次都是"整条会话读不出来/跑不起来"级别的事故：
  *
- * 形状变化（v3→v4 的 `rewritePluginSource`）：
- *   写入 `{kind:'plugin', plugin:'dsh-memory-delta'}` → 读回 `{kind:'plugin:dsh-memory-delta'}`
- * 只认写入形态的话，会话重启后就认不出自己发过的消息（提醒去重、清理排队都会失准）。
+ * ① v3 及以前：**唯一合法**写法是插件包装 `{kind:'plugin', plugin:'<包名>'}`
+ *    （v0 白名单只允许 `kind, plugin[, form, sections, summary]`；
+ *    见 `@deepseek-ai/dsh-session-format-v0-to-v1` 的 `pluginSourceValue`）。
+ *    所以 `kind:'memory'` 会被 v2→v3 拒、往 source 里塞 `entries` 会被 v0→v1 拒 ——
+ *    2026-09-30 实测：本机 14 条会话因此**永久打不开**（源日志按设计保持原样，修不回来）。
+ *    差分状态从那以后改放 inject-state 侧车（见 src/plugin.mjs）。
+ *
+ * ② **v4 起（DSH 0.1.7）规则反过来了**：`kind` 必须是**生产者自有 kind** ——
+ *    非空字符串，且**不能是 `plugin`**。
+ *    （`@deepseek-ai/dsh-session-format-v3-to-v4` 的 `source()`；README：「其他任何插件名 → `plugin:` 后接完整原始名称」。）
+ *    这时还写 `{kind:'plugin', ...}` → **编码器当场抛**
+ *    `format v4 message requires a producer-owned source kind`：会话日志一个字都写不进去，
+ *    界面上表现为**每个会话第一轮就「本轮运行失败」**（社区版 DSH Desktop 0.10.0 / 内核 0.1.7-rc.2 实测，
+ *    新会话文件只剩 196 字节表头）。复现脚本：`.dbg/repro-v4-source.mjs`。
+ *
+ * 结论：**写 `{kind:'plugin:dsh-memory-delta'}`** —— 正好等于 v4 迁移给本插件分配的 kind，
+ * 写出去和读回来是同一个形态。另外三种（`plugin` 包装、裸包名、`memory`）只为读老日志保留。
  *
  * @param {unknown} src 消息的 `source`
  * @returns {boolean} 是不是我们发的
  */
 export function isMemorySource(src) {
   if (!src || typeof src !== 'object') return false;
-  if (src.kind === 'plugin') return src.plugin === MEMORY_PLUGIN_ID; // 写入形态（会话未重启）
-  if (src.kind === `plugin:${MEMORY_PLUGIN_ID}`) return true;        // 从日志读回（迁移抬升后）
+  if (src.kind === `plugin:${MEMORY_PLUGIN_ID}`) return true;        // 现行写入形态（= 迁移抬升后的形态）
+  if (src.kind === 'plugin') return src.plugin === MEMORY_PLUGIN_ID; // ≤1.3.0 写进日志的插件包装
   if (src.kind === MEMORY_PLUGIN_ID) return true;                    // 上游同名白名单收录时的形态
-  return src.kind === 'memory';                                     // 历史遗留（≤1.3.0 写进日志的）
+  return src.kind === 'memory';                                     // 更早的历史遗留（'memory' 自定义 kind）
 }
 
 /**
  * 构造写进消息 `source` 的来源标记 —— **唯一构造点**。
- * 只用 v0 白名单允许的两个键；多任何成员都会让 v0→v1 迁移拒绝整条会话。
+ *
+ * v4 的准入只看一件事：`kind` 是非空字符串、且 ≠ `plugin`（未知 kind 一律放行，见文件头 ②）。
+ * `plugin:<包名>` 是第三方插件的规范形态：v3→v4 迁移把老 `plugin` 包装抬升出来的也正是它，
+ * 所以写/读同形 —— 重启后仍认得出自己发过的消息（提醒去重、清理排队都靠这个）。
+ *
+ * ⚠️ 别改回 `kind:'plugin'`：那会让装了本插件的 DSH ≥ 0.1.7 **每个会话都跑不起来**。
  */
 export function memorySource() {
-  return { kind: 'plugin', plugin: MEMORY_PLUGIN_ID };
+  return { kind: `plugin:${MEMORY_PLUGIN_ID}` };
 }
 
 /**

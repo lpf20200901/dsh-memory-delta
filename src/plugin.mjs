@@ -158,7 +158,7 @@ export function apply(ctx, config = {}) {
     createMessage: (text) =>
       createUserMessage({
         content: [{ type: 'text', text }],
-        // 形状统一定义在 planner.mjs 的 memorySource()：v0 白名单只允许 kind + plugin。
+        // 形状统一定义在 planner.mjs 的 memorySource()：v4 要求 kind 是**生产者自有 kind**（非空、≠'plugin'）。
         // 差分状态不在这里，走上面 loadState/saveState 的侧车。
         source: memorySource(),
       }),

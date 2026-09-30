@@ -235,7 +235,7 @@ npm test        # 1206 个断言，零依赖
 | 套件 | 断言 | 覆盖 |
 | --- | --- | --- |
 | `test/run-tests.mjs` | 295 | CLI 端到端（含非 ASCII 路径回归、相关度检索、`mem due`、`mem rename` 与引用同步、key 当文件名、`topic` 全生命周期、保留主题名、注入正文瘦身、手写 frontmatter 保真） |
-| `test/planner-tests.mjs` | 52 | 差分算法 + 注入正文渲染 + 来源形状必须过 DSH 白名单（纯逻辑） |
+| `test/planner-tests.mjs` | 53 | 差分算法 + 注入正文渲染 + 来源形状必须过 DSH 会话格式准入（v4 起 `kind` 必须是生产者自有 kind，绝不能是 `plugin`） |
 | `test/search-tests.mjs` | 56 | 分词 / 按层加权 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/hook-tests.mjs` | 66 | 插件接线（假 agent / decision）：差分注入、状态侧车落盘时机、蒸馏提醒、到期提醒 |
@@ -258,12 +258,16 @@ npm test        # 1206 个断言，零依赖
   "往一个根本不存在的路径里写" —— 一律用 `fileURLToPath`；
 - 内部函数只给**部分** return 路径补字段（`due`），解构出来就是 `undefined`，每一步都抛错、
   又被外层 try/catch 包装成"加载记忆失败" —— 于是有了防御式取值 + "零告警"断言；
-- 注入消息的 `source` 必须用 **DSH 认可的插件包装**（`{kind:'plugin', plugin:'<包名>'}`）：
-  自定义 `source.kind`（老写法 `'memory'`）会让会话格式 v2→v3 迁移**拒绝整条会话**
+- 注入消息的 `source` 被 DSH 会话格式**反向收紧过两次**，两次都会让会话彻底不能用 —— 写的时候必须同时满足两代规则：
+  **v4 起（DSH 0.1.7）**：`kind` 必须是**生产者自有 kind**，即非空字符串且 **≠ `plugin`**。
+  规范形态是 `{kind:'plugin:<包名>'}`（也就是 v3→v4 迁移给第三方插件分配的形态）。
+  还按老写法写 `{kind:'plugin', plugin:'<包名>'}` 的话，**编码器每次写会话日志都抛**
+  `format v4 message requires a producer-owned source kind` —— 会话一个字都存不进去，
+  界面上表现为**每个会话第一轮就「本轮运行失败」**。
+  **v3 及以前**的约束仍在（历史日志要能读）：插件包装里只能有 `kind/plugin/form/sections/summary`
+  （v0→v1 白名单），自定义 `source.kind`（更老的 `'memory'`）会被 v2→v3 拒
   （`cannot safely transform unclassified message source`），而源日志按设计**保持原样** ——
-  于是**凡是收到过这条消息的会话都会永久打不开**；迁移读回后的形态（`{kind:'plugin:<包名>'}`）
-  也必须认；**并且 plugin source 不能带 `entries` 或自定义 `form`**（v0→v1 的白名单只允许
-  `kind/plugin/form/sections/summary`）—— 差分状态因此改存侧车文件，不再随消息走。
+  于是**凡是收到过这种消息的老会话都永久打不开**。差分状态因此改存侧车文件，不随消息走。
 
 ## 路线图
 
