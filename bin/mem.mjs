@@ -21,7 +21,7 @@ import { renderBaseline } from '../src/planner.mjs';
 import { collectDue, duePhrase } from '../src/due.mjs';
 import { LAYER_WEIGHT, MAX_LINE_HITS, findMatches, rankDocs } from '../src/search.mjs';
 
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const CONFIG_FILE = 'memory.config.json';
 const TYPES = ['fact', 'decision'];
 const STATUSES = ['active', 'superseded', 'expired'];
