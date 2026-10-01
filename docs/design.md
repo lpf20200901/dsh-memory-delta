@@ -625,3 +625,22 @@ DSH 注入的还有 `<工作区>/AGENTS.md` 与 `AGENTS.local.md`（项目层）
   反过来，**技能正文不参与记忆库的检索**（`collectDocs` 只索引条目 + `journal.md` + `sessions.md`）——
   想让内容能被 `memory_search` 搜到，它必须进记忆库（条目或 journal）。
 
+
+---
+
+## 九、已知问题（待修，不阻塞使用）
+
+- **差分状态的侧车没有落盘**（2026-10-01 发现，低优先级）
+  - **现象**：`$DSH_HOME/storages/dsh-memory-delta/inject-state/<会话id>.json` 只在 2026-09-30 15:18 写过一次，
+    此后再没有新文件（社区版内核 0.1.7-rc.2 与官方版 0.2.0-rc.2 都一样）。
+  - **影响很小**：进程内的差分照常工作 —— `planFor()` 的 `previous` 优先取本进程 `commit()` 的结果
+    （那条记忆消息真的进了 `collectVisibleMessages` 之后回填），所以同一进程里不会重复注入。
+    侧车只承担两件事：**跨进程的差分基准**（重启后重灌一次全量，属设计内的降级）与
+    `dueNotified` 的持久化（重启后到期提醒可能再弹一次）。
+  - **怀疑点**：`sessionIdOf(agent)` 取 `agent?.session?.header?.id`，而 `loadState` / `saveState` 都以它为键；
+    若该字段在 0.1.7+ 上不再是这个形状，就会拿到 `null` → 两个函数都直接 return（`loadState` 返回 null、
+    `saveState` 静默跳过），现象与实测完全吻合。
+  - **修之前先做**：用一次真实会话打印 `Object.keys(agent.session)` 与 `agent.session.header`（或直接读内核
+    里 `Session` 的形状），确认会话 id 现在的取法；再决定是改取值路径还是加"从 `agent.session.id` 兜底"。
+  - **顺带**：这属于"跨进程状态"那一类，修的时候补一条断言（假 agent 上把 id 放在新位置，期望仍能落盘），
+    并做一次真机的"重启前/重启后注入字节数"对照。

@@ -402,6 +402,8 @@ section('apply：注册页签 descriptor');
   check('注册了 descriptor', !!captured);
   check('id 正确（包名:memory）', captured?.id === 'dsh-memory-delta:memory', String(captured?.id));
   check('title 是「记忆」', captured?.title === '记忆', String(captured?.title));
+  // better-sidebar 0.19+ 的 TabDescriptor 有 description（宿主不再给兜底描述；它显示在「新页签」列表里）
+  check('description 填了（宿主不再兜底）', typeof captured?.description === 'string' && captured.description.length > 0, String(captured?.description));
   check('component 是函数', typeof captured?.component === 'function');
   // component 现在是一层包装（把 ctx 喂给面板，面板要用 ctx.betterSidebar.openFile）
   const wrapped = captured?.component?.({ scope: { sessionId: 's1' } });
@@ -411,18 +413,80 @@ section('apply：注册页签 descriptor');
 
 /* ----------------------------- apply 在"没装 better-sidebar"时必须安全 */
 
-section('apply：拿不到 betterSidebar 时跳过注册（不能让 web boot 失败）');
+section('apply：拿不到 betterSidebar 时先不注册、排一次重试（不能让 web boot 失败）');
 {
   const mounted = mountPanel({ scope: { sessionId: 's1' } });
   let effects = 0;
   let threw = null;
+  const timers = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms) => {
+    timers.push({ fn, ms });
+    return timers.length;
+  };
   try {
     mounted.exportsOf.apply({ effect(fn) { effects += 1; return fn(); }, get: () => undefined });
   } catch (error) {
     threw = error;
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
   }
   check('不抛异常', threw === null, threw ? `${threw.name}: ${threw.message}` : '');
   check('一个 effect 都不注册（页签不出现，记忆功能照常）', effects === 0, String(effects));
+  // 2026-10-01：服务"后到"是常态 —— 一次性放弃会让「记忆」页签永不出现
+  check('排了一次有界重试（不是永久放弃）', timers.length === 1, String(timers.length));
+  check('重试间隔 300ms', timers[0]?.ms === 300, String(timers[0]?.ms));
+}
+
+/* ----------------------- apply：服务后到时必须补注册（轮询 / inject 两条路） */
+
+section('apply：betterSidebar 后到时补注册（轮询路径 / inject 路径）');
+{
+  const mounted = mountPanel({ scope: { sessionId: 's1' } });
+  const registered = [];
+  const sidebar = { registerTab(d) { registered.push(d); return () => {}; } };
+
+  // ① 轮询路径：门面上只有 get，且服务第二次才出现
+  const effects = [];
+  let answer;
+  const ctx = { effect(fn) { effects.push(fn); return fn(); }, get: () => answer };
+  const timers = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => {
+    timers.push(fn);
+    return timers.length;
+  };
+  mounted.exportsOf.apply(ctx);
+  globalThis.setTimeout = realSetTimeout;
+  check('服务未到时没有注册', registered.length === 0, String(registered.length));
+  answer = sidebar; // 服务到达
+  if (timers[0]) timers[0](); // 触发那一次重试
+  check('轮询到服务后补注册了页签', registered.length === 1, String(registered.length));
+  check('补注册走的是 ctx.effect', effects.length === 1, String(effects.length));
+
+  // ② inject 路径：门面提供 cordis 的 ctx.inject（better-sidebar 接入文档推荐的写法）
+  const childEffects = [];
+  let injected = null;
+  const ctx2 = {
+    effect() {
+      throw new Error('不该在父 ctx 上注册 effect');
+    },
+    get: () => undefined,
+    inject(deps, cb) {
+      injected = { deps, cb };
+    },
+  };
+  let injectThrew = null;
+  try {
+    mounted.exportsOf.apply(ctx2);
+  } catch (error) {
+    injectThrew = error;
+  }
+  check('inject 路径不抛异常', injectThrew === null, injectThrew ? injectThrew.message : '');
+  check('走 ctx.inject 等待服务', Array.isArray(injected?.deps) && injected.deps[0] === 'betterSidebar', JSON.stringify(injected?.deps));
+  const child = { effect(fn) { childEffects.push(fn); return fn(); }, get: () => sidebar };
+  if (injected) injected.cb(child);
+  check('服务到达后注册到派生子 ctx（不是在父 ctx 上）', childEffects.length === 1 && registered.length === 2, `${childEffects.length}/${registered.length}`);
 }
 
 /* --------------------------------------------- 组件：正常数据能渲染出来 */

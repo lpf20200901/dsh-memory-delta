@@ -12,7 +12,7 @@ zero-dependency standalone CLI. It borrows the *spec / change / archive* discipl
 > please file issues and pull requests on GitHub.
 
 > Status: **M1–M4 done**; M3/M4 (differential injection, both tools, the distillation nudge) were
-> verified inside a real DSH session, and the later improvements are covered by 1224 assertions
+> verified inside a real DSH session, and the later improvements are covered by 1254 assertions
 > plus a real-machine preflight. See [Verification](#verification).
 >
 > **Questions?** → [FAQ](docs/faq.md) — "is the whole memory re-sent on every turn?", "what happens when a
@@ -250,7 +250,7 @@ Checked item by item inside a real DSH session:
 ## Development
 
 ```bash
-npm test        # 1224 assertions, zero dependencies
+npm test        # 1254 assertions, zero dependencies
 ```
 
 | Suite | Assertions | Covers |
@@ -260,9 +260,10 @@ npm test        # 1224 assertions, zero dependencies
 | `test/search-tests.mjs` | 56 | tokenizing / per-layer weighting / scoring / snippet selection (pure logic) |
 | `test/due-tests.mjs` | 93 | `verify_when` parsing (dates, relative phrases, prose) and due collection (pure logic) |
 | `test/session-format-tests.mjs` | 17 | **the session-format contract, checked against the kernel's own admission function** (the written source passes v4 admission, the retired `plugin` wrapper is still refused by it, all four historical read shapes are recognised, and no file hand-writes a `kind` literal outside `memorySource()`) |
+| `test/peer-range-tests.mjs` | 21 | **the peer contract: the declared host ranges must cover every kernel we claim to support** — written as an explicit lower/upper bound with a prerelease clause, because a `^0.1.x` caret cannot cross a minor and that is exactly how the plugin got silently disabled on a 0.2.0 kernel; also pins the vendor pairings and carries a reverse control for the rule itself (SKIPs the 9 semantic assertions without `semver`) |
 | `test/hook-tests.mjs` | 66 | plugin wiring (fake agent / decision): diff injection, when the side-car state is committed, nudge, due reminder |
 | `test/plugin-tests.mjs` | 303 | plugin integration (stubbed DSH modules, real `apply()` + both tools + all three panel routes + promote/rename/topic/batch actually writing the store + 400-vs-500 error classification + whitelist/origin checks + tool-output contract and render text) |
-| `test/client-tests.mjs` | 341 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, batch selection, entry click → `openFile`, search timing and truncation, promote/tidy, failure states; plus the "apply must stay safe when better-sidebar is absent" regression) |
+| `test/client-tests.mjs` | 350 | the sidebar panel bundle (fake React + fake `fetch`: grouping/collapse, the four dimensions across all three stages, topic assignment, batch selection, entry click → `openFile`, search timing and truncation, promote/tidy, failure states; plus the "apply must stay safe when better-sidebar is absent" regression) |
 
 `test/plugin-tests.mjs` replaces the four `@deepseek-ai/*` packages with the stubs in `test/stubs/`
 (via `test/stub-loader.mjs`) and **actually `apply()`s the plugin**, so its behaviour is verifiable

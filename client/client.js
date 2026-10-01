@@ -2892,19 +2892,30 @@ window.__ModuleLoader__.load({
      * 而 web boot 把 pending 当失败 —— 整个界面起不来、直接进安全模式（2026-09-30 实测踩到）。
      *
      * 改成运行时**可选查找**：宿主给动态包的 ctx 门面上，`ctx.get()` 是可选查询，
-     * 而直接读 `ctx.betterSidebar` 才会被 inject 声明拦住。拿得到就注册页签，
-     * 拿不到就只跳过页签 —— 记忆工具与侧车状态照常工作。
+     * 而直接读 `ctx.betterSidebar` 才会被 inject 声明拦住。
+     *
+     * ⚠️ 2026-10-01 修：**服务后到是常态**（去掉硬依赖后，我们的客户端可能先于
+     * better-sidebar 的 service 就绪），原来拿不到就 `return` = 永久放弃，表现为
+     * "侧边栏在、就是没有「记忆」页签"。现在改成**等到服务出现再注册**：
+     * 首选 cordis 的服务等待原语 `ctx.inject([...], cb)`（better-sidebar 自己的接入文档
+     * 也是这么做的），门面上没有 inject 时退回**有界轮询**（最坏 ~12 秒）。
      */
-    function apply(ctx) {
-      // 老宿主 / 桩环境的 ctx 上没有 get：那时拿不到服务，同样走"跳过注册"这条路
-      const sidebar = typeof ctx?.get === 'function' ? ctx.get('betterSidebar') : null;
-      if (!sidebar || typeof sidebar.registerTab !== 'function') return;
+    function pickSidebar(ctx) {
+      const svc = typeof ctx?.get === 'function' ? ctx.get('betterSidebar') : null;
+      return svc && typeof svc.registerTab === 'function' ? svc : null;
+    }
+
+    /** 真正注册一次；`owner` 是持有 effect 的 ctx（注入路径下是派生子 ctx，随其释放）。 */
+    function registerMemoryTab(owner, sidebar) {
       // 面板只用到这一个服务（`hostCtx.betterSidebar.openFile`），别把整个 ctx 递进去
       const hostCtx = { betterSidebar: sidebar };
-      ctx.effect(() =>
+      owner.effect(() =>
         sidebar.registerTab({
           id: 'dsh-memory-delta:memory',
           title: '记忆',
+          // better-sidebar 0.19+ 的 TabDescriptor 有 description（宿主不再给兜底描述），
+          // 它显示在「新页签」列表的标题下；不填就只剩标题。
+          description: '跨会话记忆：分层 Markdown 库、差分注入、检索与复核',
           order: 60,
           // 单实例：多次打开只聚焦已有页签，不会叠出好几个「记忆」页
           single: true,
@@ -2915,11 +2926,43 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /** 兜底等待：有界轮询（40 × 300ms），拿到就注册、一直拿不到就静默放弃。 */
+    function pollForSidebar(ctx, attempt) {
+      const svc = pickSidebar(ctx);
+      if (svc) {
+        registerMemoryTab(ctx, svc);
+        return;
+      }
+      if (attempt >= 40 || typeof setTimeout !== 'function') return;
+      setTimeout(() => pollForSidebar(ctx, attempt + 1), 300);
+    }
+
+    function apply(ctx) {
+      const ready = pickSidebar(ctx);
+      if (ready) {
+        registerMemoryTab(ctx, ready);
+        return;
+      }
+      if (typeof ctx?.inject === 'function') {
+        try {
+          ctx.inject(['betterSidebar'], (child) => {
+            const svc = pickSidebar(child) || pickSidebar(ctx);
+            if (svc) registerMemoryTab(child && typeof child.effect === 'function' ? child : ctx, svc);
+          });
+          return;
+        } catch (err) {
+          // 门面上没有可用的 inject → 落到轮询（老宿主 / 桩环境）
+        }
+      }
+      pollForSidebar(ctx, 0);
+    }
+
     exports.apply = apply;
     // ⚠️ 故意**不**导出 inject：声明成硬依赖会挂掉整个 web boot（见上）
     // 给测试用的额外出口（宿主只认 apply，其余导出无害）
     exports.MemoryPanel = MemoryPanel;
     exports.ensureStyles = ensureStyles;
+    exports.__pollForSidebar = pollForSidebar;
     return module.exports;
   },
 });
