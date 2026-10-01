@@ -628,19 +628,72 @@ DSH 注入的还有 `<工作区>/AGENTS.md` 与 `AGENTS.local.md`（项目层）
 
 ---
 
-## 九、已知问题（待修，不阻塞使用）
+## 九、已修：差分状态的侧车从不落盘（2026-10-01 发现，同日修好）
 
-- **差分状态的侧车没有落盘**（2026-10-01 发现，低优先级）
-  - **现象**：`$DSH_HOME/storages/dsh-memory-delta/inject-state/<会话id>.json` 只在 2026-09-30 15:18 写过一次，
-    此后再没有新文件（社区版内核 0.1.7-rc.2 与官方版 0.2.0-rc.2 都一样）。
-  - **影响很小**：进程内的差分照常工作 —— `planFor()` 的 `previous` 优先取本进程 `commit()` 的结果
-    （那条记忆消息真的进了 `collectVisibleMessages` 之后回填），所以同一进程里不会重复注入。
-    侧车只承担两件事：**跨进程的差分基准**（重启后重灌一次全量，属设计内的降级）与
-    `dueNotified` 的持久化（重启后到期提醒可能再弹一次）。
-  - **怀疑点**：`sessionIdOf(agent)` 取 `agent?.session?.header?.id`，而 `loadState` / `saveState` 都以它为键；
-    若该字段在 0.1.7+ 上不再是这个形状，就会拿到 `null` → 两个函数都直接 return（`loadState` 返回 null、
-    `saveState` 静默跳过），现象与实测完全吻合。
-  - **修之前先做**：用一次真实会话打印 `Object.keys(agent.session)` 与 `agent.session.header`（或直接读内核
-    里 `Session` 的形状），确认会话 id 现在的取法；再决定是改取值路径还是加"从 `agent.session.id` 兜底"。
-  - **顺带**：这属于"跨进程状态"那一类，修的时候补一条断言（假 agent 上把 id 放在新位置，期望仍能落盘），
-    并做一次真机的"重启前/重启后注入字节数"对照。
+- **现象**：`<harness home>/storages/dsh-memory-delta/inject-state/<会话id>.json` 只在 2026-09-30 15:18
+  写过一次，此后再没有新文件；**官方版一个都没有**（`~/.dsh/storages/dsh-memory-delta/` 目录根本不存在）。
+- **真因：取值通道选窄了，不是会话 id 取不到。** 旧实现只认 `process.env.DSH_HOME`，拿不到就
+  `return null`（当成"脱离 DSH 单独跑"的降级）。但 `$DSH_HOME` 是内核的**覆盖**变量：
+  `dsh-home-paths` 的 `resolveDshHome` 顺序是 `configured（启动器给的）> $DSH_HOME > ~/.dsh`，
+  而**官方桌面版的 home 就是默认的 `~/.dsh`** —— 启动器没有任何理由去设这个环境变量
+  → `dir = null` → `saveState` 直接 return，一个文件都不写。
+  社区版之所以在 15:18 写出来过，是因为它的 home 是 `%APPDATA%\dsh-desktop\harness`（**非默认**），
+  启动器把 `DSH_HOME` 设上了 —— 所以现象是"两个版本行为不一样"。
+- ⚠️ **之前记的怀疑点 `sessionIdOf(agent)` 是错的**，别再顺着它查：`agent.session.header.id` 正是内核的
+  权威取法 —— 内核自己的 `dsh-shell-env` 用**同一表达式**给 shell 注入 `DSH_SESSION_ID`（同一次会话里
+  实测有值），`dsh-session` 的 `Session.get id()` 也是 `return this.header.id`。
+- **修法**（`resolveInjectStateDir`，src/plugin.mjs）：解析顺序 =
+  `config.stateDir`（新配置项，支持 `~`）→ `$DSH_MEMORY_DELTA_STATE_DIR`（测试沙箱）→
+  内核服务 `ctx.dshHomePath`（app boot 的 `ctx.provide("dshHomePath", dshHomePath)`；内核自带的 profile
+  就写 `!!js dshHomePath('storages')`，这是官方通道）→ `$DSH_HOME`（空白视为未设，与内核一致）→
+  `~/.dsh`（内核默认 home，**官方桌面版走的就是这条**）。
+  **永远给得出目录**，那条"null = 不持久化"的静默分支被删掉了。
+  服务那一层做了防御：抛异常 / 不是函数 / 返回的路径不像我们要的三段时，安静退回下一层。
+- **测试**：`test/plugin-tests.mjs` 新增 14 条（解析顺序 11 + 真接线 3），其中端到端那条是
+  "宿主**没有** `$DSH_HOME`、只有 `dshHomePath` 服务 → 侧车必须真的落盘"。
+  对照组：把解析器临时退回旧行为，其中 **7 条立刻变红**（含端到端那条）。
+- **影响**：跨进程差分基准恢复（重启后不再重灌一次全量记忆），`dueNotified` 也能持久化
+  （重启后到期提醒不再重复弹一次）。
+- **顺带留下的判据**：读环境变量之前先问一句 —— **这个变量是"内核的覆盖项"还是"内核的必设项"？**
+  覆盖项（`$DSH_HOME`）在默认配置下**根本不会存在**；要拿这类路径，优先用内核提供的服务
+  （`ctx.dshHomePath`），别自己读 env。
+
+---
+
+## 十、v1.3.2 的代码审查（2026-10-01）：两条路径都对，但有三处要收口
+
+审查对象是 `71ea80a`（v1.3.2），结论：`ctx.inject` 等服务 与 peer 逐条线声明这两条**语义都对**
+（在 0.1.7-rc.2 / 0.2.0-rc.2 内核源码与 better-sidebar 0.22.1 的类型定义上逐条核过），
+但抓出一条 P1、两条 P2，和一条**注释里写反了的因果**。
+
+- **P1（已修，客户端的兜底反而会在门面上炸）**：`client/client.js` 里"门面上没有 `inject` 就退回轮询"
+  用 `typeof ctx?.inject === 'function'` 判形状，而这行**在 try 之外**。动态包的 ctx 门面对
+  **没暴露的属性是抛异常**、不是返回 `undefined`（`dsh-cordis-client-runner` 的 `rejectGuard`：
+  `dynamic ctx does not expose "inject"`）→ 异常冲出 `apply`，条目变 FAILED。
+  修法：把**读取**也放进 try（`ctx.get` 的读取同样收口），`inject` 先取出来再调用。
+- **P2（已修，timer 回调里的未捕获异常）**：轮询的 timer 没挂 fiber。这 12 秒窗口里条目被热更/禁用时，
+  `registerMemoryTab` 会在**已释放的 fiber** 上调 `ctx.effect` → 抛 `INACTIVE_EFFECT`，
+  而它发生在 **timer 回调**里 = 没人接。修法：`pollForSidebar` 的"取服务 + 注册"整段进 try，
+  失败就安静收工（不再排下一次）。
+- **P2（已处理）**：`exports.__pollForSidebar` 曾是**死导出**（测试里零引用）——
+  现在"有界轮询最多 40 次 / 串行触发不抛"那条测试就用它驱动，不再是死代码。
+- **注释里的因果反了（已改）**：`test/peer-range-tests.mjs` 原写"插件正是这样在 0.2.0 内核上被静默禁用的"。
+  实测两代内核的 peer 预检**都**带 `{ includePrerelease: true }`
+  （0.1.7-rc.2：`@deepseek-ai/dsh-app-boot/lib/index.js:300`；0.2.0-rc.2 从它自己的 `app.asar` 解出来核过，
+  同一行同一选项），所以旧范围 `>=0.1.2-rc.1 <0.3.0` 在**真预检**下两边都过 ——
+  那次"官方版没加载"是**我测错了**（搜了压缩的会话文件），不是 peer 的锅。
+  把范围改成逐条线仍然是对的，但性质是**防御性收窄**（排除 0.1.6 及更早、且在两种
+  `includePrerelease` 模式下都成立），不是"修一个已发生的事故"。
+- **审查顺带查清的真差别（写进来给将来用）**：peer 不匹配时两条内核线**失败语义不同** ——
+  0.1.7 线当**建议**（`[desktop] compatibility warning: …`，插件照常加载，app-boot:323-332）；
+  0.2.x 线把不匹配升级成 deny → **整行 disabled**（界面上无感，stderr 只有 `disabling profile plugin …`）。
+  所以在 0.2.x 线上，peer 范围是一道**硬闸门**：将来内核抬到 0.3.x 而范围没跟上，
+  我们会**整行静默消失**。
+  → **发版检查表加一条**：内核抬 minor 之前先复核 peer 范围。
+- **测试变化**：`client-tests` +8（敌意门面、fiber 已释放、宿主无 `setTimeout`、inject 回调的 ctx 没 effect
+  时落父 ctx）、`peer-range-tests` 21 → 28（版本边界 + 两条**纠正过的因果**对照 +
+  `DSH_REQUIRE_SEMVER=1` 时"缺 semver"从 SKIP 变失败）。合计 1254 → **1283**。
+  对照组：把这两处保护临时退回旧写法，**3 条断言立刻变红**（门面抛异常、没排重试、`INACTIVE_EFFECT`）。
+- **明确没做（记录在案）**：① 与 better-sidebar 的 `TabDescriptor` 做类型级交叉检查
+  （要装了 better-sidebar 才能跑，属于"可选契约测试"）；② "服务后到是常态"这个前提只有真机现象，
+  **没有加载顺序的直接证据** —— 目前是解释，不是事实。

@@ -11,6 +11,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -45,6 +46,11 @@ export const Config = z.object({
    * 默认开；不想要技能目录里多一行（约 20~40 tokens/会话）就关掉。
    */
   skill: z.boolean().default(true),
+  /**
+   * 差分状态（侧车）目录；留空 = 自动解析（见 `resolveInjectStateDir`）。
+   * 只在"想把状态放到别处"时才需要写，支持 `~` 前缀。
+   */
+  stateDir: z.string().default(''),
 });
 
 /**
@@ -100,26 +106,80 @@ const ENTRY_WHERE = new Set(['facts', 'decisions', 'inbox', 'archive']);
  */
 const defined = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 
+/** `~` / `~/` 展开（用户手写的 `stateDir` 可能带它）。 */
+const expandTilde = (p) => (p === '~' ? os.homedir() : /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(2)) : p);
+
+/** 侧车目录在 harness home 下的相对路径（唯一一份，避免两处手写）。 */
+export const INJECT_STATE_SEGMENTS = ['storages', 'dsh-memory-delta', 'inject-state'];
+
+/**
+ * 解析差分状态（侧车）目录 —— **这是 2026-10-01 那个"侧车从不落盘"的真因所在**。
+ *
+ * ⚠️ 原来只认 `process.env.DSH_HOME`，拿不到就 `return null`（"降级为不持久化"）。但
+ * `$DSH_HOME` 是**内核的覆盖变量**，不是"宿主一定有"的东西：内核自己的解析顺序是
+ * `configured（启动器给的）> $DSH_HOME > ~/.dsh`（`dsh-home-paths` 的 `resolveDshHome`），
+ * 而**官方桌面版的 home 就是默认的 `~/.dsh`** —— 启动器没有任何理由再设这个环境变量。
+ * 实测（2026-10-01）：官方版从装上到现在**一个状态文件都没写出来**（`~/.dsh/storages/dsh-memory-delta/`
+ * 根本不存在），社区版那边能写（它的 home 是 `%APPDATA%\dsh-desktop\harness`，不是默认值，
+ * 启动器把 `DSH_HOME` 设上了）。所以现象是"两边行为不一样"，根因是**取值通道选窄了**。
+ *
+ * ⚠️ 别再怀疑 `sessionIdOf(agent)`：`agent.session.header.id` 就是内核的权威取法
+ * （内核自己的 `dsh-shell-env` 用同一表达式给 shell 注入 `DSH_SESSION_ID`，同一次会话里实测有值），
+ * `Session` 的 `get id()` 也是 `return this.header.id`。
+ *
+ * 顺序（先到先用）：
+ *   1. `config.stateDir` —— 用户显式指定，最不可能出错
+ *   2. `$DSH_MEMORY_DELTA_STATE_DIR` —— 测试沙箱用（历史变量名，保持兼容，**必须在真实 home 之前**）
+ *   3. 内核服务 `ctx.dshHomePath` —— app boot `ctx.provide("dshHomePath", dshHomePath)` 提供的官方通道
+ *      （内核自带的 profile 就写 `!!js dshHomePath('storages')`）；它自己按 `$DSH_HOME > ~/.dsh` 解析
+ *   4. `$DSH_HOME`（空白视为未设，与内核 `resolveDshHome` 一致）
+ *   5. `~/.dsh` —— 内核默认 home（**官方桌面版走的就是这一条**）
+ *
+ * @param {{config?: object, env?: Record<string, string|undefined>, homePath?: unknown}} [o]
+ * @returns {string} 绝对路径（一定给得出，不再返回 null）
+ */
+export function resolveInjectStateDir({ config = {}, env = process.env, homePath } = {}) {
+  const explicit = typeof config.stateDir === 'string' ? config.stateDir.trim() : '';
+  if (explicit) return path.resolve(expandTilde(explicit));
+  const sandbox = env?.DSH_MEMORY_DELTA_STATE_DIR;
+  if (typeof sandbox === 'string' && sandbox.trim()) return path.resolve(expandTilde(sandbox.trim()));
+  if (typeof homePath === 'function') {
+    // 门面语义不符（比如 cordis 把它当服务工厂去调用）就安静往下走，绝不让它把注入搞崩；
+    // 再验一下"它拼出来的确实是我们要的那三段"，避免把一个来路不明的路径当成状态目录。
+    try {
+      const dir = homePath(...INJECT_STATE_SEGMENTS);
+      if (typeof dir === 'string' && dir.endsWith(INJECT_STATE_SEGMENTS.join(path.sep))) return dir;
+    } catch { /* 见上 */ }
+  }
+  const home = env?.DSH_HOME;
+  if (typeof home === 'string' && home.trim()) return path.join(path.resolve(expandTilde(home.trim())), ...INJECT_STATE_SEGMENTS);
+  return path.join(os.homedir(), '.dsh', ...INJECT_STATE_SEGMENTS);
+}
+
 export function apply(ctx, config = {}) {
   const storeOf = (cwd, opts) => openStore(config, cwd, opts);
 
   /* ------------------------------------------------ 差分状态（侧车文件） */
 
   /**
-   * 状态放 `$DSH_HOME/storages/dsh-memory-delta/inject-state/<sessionId>.json`。
+   * 状态放 `<harness home>/storages/dsh-memory-delta/inject-state/<sessionId>.json`。
    *
    * ⚠️ 为什么必须外置：DSH 会话格式的 v0 白名单只允许 plugin source 带
    * `kind/plugin/form/sections/summary`（见 planner.mjs 注释），把差分状态塞进 source 会被
    * 迁移拒绝、让整个会话**永久打不开**。放这里既不受格式约束，也不占模型预算。
-   * DSH_HOME 拿不到（脱离 DSH 单独跑）时降级为不持久化：进程内存里照常差分，
-   * 重启后重灌一次全量记忆（正确性不受影响）。
+   *
+   * 目录的解析顺序与坑见 `resolveInjectStateDir`（曾经的写法只认 `$DSH_HOME`，
+   * 而官方桌面版的宿主进程里它可能根本不存在 → 侧车永不落盘）。`dshHomePath` 是内核
+   * app boot 提供的服务（`ctx.get('dshHomePath')`），拿它当官方通道。
    */
-  const stateDir = () => {
-    // 测试 / CI 显式指向沙箱，免得把差分状态写进真实的 DSH_HOME
-    if (process.env.DSH_MEMORY_DELTA_STATE_DIR) return process.env.DSH_MEMORY_DELTA_STATE_DIR;
-    const home = process.env.DSH_HOME;
-    return home ? path.join(home, 'storages', 'dsh-memory-delta', 'inject-state') : null;
-  };
+  const homePath = (() => {
+    try {
+      const svc = typeof ctx?.get === 'function' ? ctx.get('dshHomePath') : undefined;
+      return typeof svc === 'function' ? svc : undefined;
+    } catch { return undefined; }
+  })();
+  const stateDir = () => resolveInjectStateDir({ config, env: process.env, homePath });
+
   const loadState = (sessionId) => {
     const dir = stateDir();
     if (!dir || !sessionId) return null;

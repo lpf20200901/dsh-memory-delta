@@ -489,6 +489,93 @@ section('apply：betterSidebar 后到时补注册（轮询路径 / inject 路径
   check('服务到达后注册到派生子 ctx（不是在父 ctx 上）', childEffects.length === 1 && registered.length === 2, `${childEffects.length}/${registered.length}`);
 }
 
+/* ------------- apply：门面与卸载时机的"敌意形状"（2026-10-01 代码审查抓到的） ------------- */
+
+section('apply：门面不给 inject、fiber 已被释放、宿主没有 setTimeout —— 一律不许把异常扔进宿主');
+{
+  const mounted = mountPanel({ scope: { sessionId: 's1' } });
+  const sidebarService = { registerTab() { return () => {}; } };
+  const realSetTimeout = globalThis.setTimeout;
+
+  // ① 动态包的 ctx 门面：读它**没暴露**的属性是**抛异常**，不是返回 undefined
+  //    （dsh-cordis-client-runner 的 rejectGuard：`dynamic ctx does not expose "inject"`）。
+  //    这行以前在 try 之外，"门面上没有 inject 就退回轮询"的兜底反而会在门面上炸掉。
+  const hostile = new Proxy(
+    { effect(fn) { return fn(); }, get: () => undefined },
+    {
+      get(target, prop) {
+        if (typeof prop === 'symbol' || prop in target) return Reflect.get(target, prop);
+        throw new Error(`dynamic ctx does not expose "${String(prop)}"`);
+      },
+    },
+  );
+  const timers = [];
+  let threw = null;
+  globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+  try {
+    mounted.exportsOf.apply(hostile);
+  } catch (error) {
+    threw = error;
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  check('门面读 .inject 会抛时，apply 仍然不抛', threw === null, threw ? `${threw.name}: ${threw.message}` : '');
+  check('门面上安静退回有界轮询（排了一次重试）', timers.length === 1 && timers[0].ms === 300, `${timers.length}/${timers[0]?.ms}`);
+
+  // ② 轮询到服务，但这时条目已经被卸载（fiber 释放）：ctx.effect 会抛 INACTIVE_EFFECT，
+  //    而它发生在 **timer 回调**里 —— 必须被吞掉，宿主不该看到未捕获异常。
+  let disposedThrew = null;
+  try {
+    mounted.exportsOf.__pollForSidebar({ effect() { throw new Error('INACTIVE_EFFECT'); }, get: () => sidebarService }, 0);
+  } catch (error) {
+    disposedThrew = error;
+  }
+  check('fiber 已释放时"轮询到服务"也不抛（静默收工）', disposedThrew === null, disposedThrew ? disposedThrew.message : '');
+
+  // ③ 有界：一直拿不到服务时最多排 40 次（~12 秒），不是无限轮询
+  const scheduled = [];
+  let runaway = null;
+  globalThis.setTimeout = (fn) => { scheduled.push(fn); return scheduled.length; };
+  try {
+    mounted.exportsOf.__pollForSidebar({ effect(fn) { return fn(); }, get: () => undefined }, 0);
+    for (let i = 0; i < 60 && scheduled[i]; i += 1) scheduled[i]();
+  } catch (error) {
+    runaway = error;
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  check('无服务时最多排 40 次重试（有界）', scheduled.length === 40, String(scheduled.length));
+  check('串行触发 60 次也不抛', runaway === null, runaway ? runaway.message : '');
+
+  // ④ 老宿主没有 setTimeout：安静收工（不抛、不注册、不排重试）
+  let noTimerThrew = null;
+  let noTimerEffects = 0;
+  delete globalThis.setTimeout;
+  try {
+    mounted.exportsOf.apply({ effect(fn) { noTimerEffects += 1; return fn(); }, get: () => undefined });
+  } catch (error) {
+    noTimerThrew = error;
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  check('宿主没有 setTimeout 时也不抛（安静收工）', noTimerThrew === null, noTimerThrew ? noTimerThrew.message : '');
+  check('宿主没有 setTimeout 时不注册、也没有重试', noTimerEffects === 0, String(noTimerEffects));
+
+  // ⑤ inject 回调递来的子 ctx 没有 effect → 注册要落到父 ctx（三元 false 分支）
+  const parentEffects = [];
+  let branchThrew = null;
+  try {
+    mounted.exportsOf.apply({
+      effect(fn) { parentEffects.push(fn); return fn(); },
+      get: () => undefined,
+      inject(deps, cb) { cb({ get: () => sidebarService }); },
+    });
+  } catch (error) {
+    branchThrew = error;
+  }
+  check('inject 回调拿到没有 effect 的 ctx 时落到父 ctx', branchThrew === null && parentEffects.length === 1, `${parentEffects.length}${branchThrew ? ` / ${branchThrew.message}` : ''}`);
+}
+
 /* --------------------------------------------- 组件：正常数据能渲染出来 */
 
 const SAMPLE = {

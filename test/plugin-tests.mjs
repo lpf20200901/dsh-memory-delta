@@ -7,11 +7,12 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { Config, apply, inject as injectServices, name } from '../src/plugin.mjs';
+import { Config, INJECT_STATE_SEGMENTS, apply, inject as injectServices, name, resolveInjectStateDir } from '../src/plugin.mjs';
 import { createEntry, ensureLayout, injectPayload, loadConfig, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
 import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_PLUGIN_ID, isMemorySource, memorySource } from '../src/planner.mjs';
@@ -432,6 +433,90 @@ const preStep = ctx.handlers.get('agent/pre-step');
   // 到期复核要用 payload 里的 date / verify_when —— 缺了它们，hook 就算不出"到点了"
   check('injectPayload 每条都带 date 键', payload.entries.every((e) => 'date' in e), JSON.stringify(payload.entries.map((e) => e.date)));
   check('injectPayload 每条都带 verifyWhen 键（没写则为 null）', payload.entries.every((e) => 'verifyWhen' in e && (e.verifyWhen === null || typeof e.verifyWhen === 'string')), JSON.stringify(payload.entries.map((e) => e.verifyWhen)));
+}
+
+/* -------------------------------------- 差分状态（侧车）目录的解析顺序 */
+
+section('差分状态（侧车）目录解析：$DSH_HOME 不是唯一通道（官方桌面版宿主里它就不存在）');
+{
+  // 背景（2026-10-01 实测）：侧车只在 2026-09-30 15:18 写过一个文件，此后两边都不再落盘。
+  // 真因**不是** sessionIdOf 取不到会话 id（`agent.session.header.id` 是内核权威取法，
+  // 内核自己在 dsh-shell-env 里用同一表达式给 shell 注入 DSH_SESSION_ID，实测有值），
+  // 而是旧实现只认 `process.env.DSH_HOME`：`$DSH_HOME` 是内核的**覆盖**变量，官方版的 home
+  // 就是默认的 `~/.dsh`，启动器没理由设它 → dir=null → saveState 直接 return，一个文件都不写。
+  const segs = INJECT_STATE_SEGMENTS;
+  const cfg = (stateDir = '') => ({ stateDir });
+  const HOME = path.join(SANDBOX, 'fake-home');
+  const defaultHome = path.join(os.homedir(), '.dsh', ...segs);
+
+  // ① 解析器必须**永远给得出目录**（旧实现会返回 null —— 那正是"静默不落盘"的来源）
+  const bare = resolveInjectStateDir({ config: cfg(), env: {}, homePath: undefined });
+  check('没有 $DSH_HOME 时也给出绝对路径（绝不返回 null）', typeof bare === 'string' && path.isAbsolute(bare), String(bare));
+  check('没有 $DSH_HOME 时落到内核默认 home（~/.dsh）', bare === defaultHome, bare);
+
+  // ② 显式配置最优先（并支持 ~）
+  check('config.stateDir 优先于服务与 $DSH_HOME',
+    resolveInjectStateDir({ config: cfg(path.join(SANDBOX, 'explicit')), env: { DSH_HOME: HOME }, homePath: () => path.join(SANDBOX, 'svc', ...segs) }) === path.resolve(path.join(SANDBOX, 'explicit')));
+  check('config.stateDir 支持 ~ 展开',
+    resolveInjectStateDir({ config: cfg('~/mem-state'), env: {} }) === path.join(os.homedir(), 'mem-state'));
+
+  // ③ 测试沙箱变量仍在真实 home 之前（历史行为，重构别丢）
+  check('$DSH_MEMORY_DELTA_STATE_DIR 优先于服务与 $DSH_HOME',
+    resolveInjectStateDir({
+      config: cfg(),
+      env: { DSH_MEMORY_DELTA_STATE_DIR: path.join(SANDBOX, 'sandbox-state'), DSH_HOME: HOME },
+      homePath: () => path.join(SANDBOX, 'svc', ...segs),
+    }) === path.resolve(path.join(SANDBOX, 'sandbox-state')));
+
+  // ④ 内核服务 ctx.dshHomePath（app boot 的 `ctx.provide("dshHomePath", dshHomePath)`）是官方通道
+  const asked = [];
+  const svcHome = path.join(SANDBOX, 'svc-home');
+  const svc = (...parts) => { asked.push(parts); return path.join(svcHome, ...parts); };
+  check('有 dshHomePath 服务时用它',
+    resolveInjectStateDir({ config: cfg(), env: {}, homePath: svc }) === path.join(svcHome, ...segs));
+  check('问服务时带的就是那三段（常量只有一份）',
+    JSON.stringify(asked[0]) === JSON.stringify(segs), JSON.stringify(asked[0]));
+
+  // ⑤ 服务不靠谱时必须安静退回 —— 否则"修好落盘"会变成"把注入搞崩"
+  check('服务抛异常 → 退回 $DSH_HOME',
+    resolveInjectStateDir({ config: cfg(), env: { DSH_HOME: HOME }, homePath: () => { throw new Error('boom'); } }) === path.join(path.resolve(HOME), ...segs));
+  check('服务返回来路不明的路径 → 退回 $DSH_HOME',
+    resolveInjectStateDir({ config: cfg(), env: { DSH_HOME: HOME }, homePath: () => 'C:\\somewhere\\else' }) === path.join(path.resolve(HOME), ...segs));
+  check('服务不是函数（门面形状变了）→ 退回 $DSH_HOME',
+    resolveInjectStateDir({ config: cfg(), env: { DSH_HOME: HOME }, homePath: { nope: true } }) === path.join(path.resolve(HOME), ...segs));
+
+  // ⑥ 空白 $DSH_HOME 视为未设（与内核 resolveDshHome 一致：空白绝不能解析成 cwd）
+  check('$DSH_HOME 是空白 → 当未设处理',
+    resolveInjectStateDir({ config: cfg(), env: { DSH_HOME: '   ' } }) === defaultHome);
+
+  // ⑦ 真接线：宿主**没有** $DSH_HOME、但有 dshHomePath 服务 → 侧车必须真的落盘。
+  //    对照组（旧实现）：这条路径下 stateDir() 返回 null，saveState 直接 return，文件永远不存在。
+  const wiringRoot = path.join(SANDBOX, 'home-service');
+  const wiringCtx = fakeCtx();
+  wiringCtx.get = (n) => (n === 'dshHomePath' ? (...parts) => path.join(wiringRoot, ...parts) : undefined);
+  const savedSandboxEnv = process.env.DSH_MEMORY_DELTA_STATE_DIR;
+  delete process.env.DSH_MEMORY_DELTA_STATE_DIR;
+  try {
+    apply(wiringCtx, { root: ROOT });
+    const pre = wiringCtx.handlers.get('agent/pre-step');
+    const sid = 'session-sidecar-home';
+    const a1 = fakeAgent(cwdOfProject, sid);
+    const d1 = { kind: 'ok', messages: [] };
+    await pre({ agent: a1, messages: [], step: 1 }, async () => d1);
+    const baseline = a1.inbox.nextStep[0];
+    check('接线：第 1 轮把 baseline 排进 inbox', !!baseline, JSON.stringify(a1.inbox.nextStep.length));
+    const claimed = [{ id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: '干活' }] }, baseline];
+    const d2 = { kind: 'ok', messages: [...claimed] };
+    await pre({ agent: fakeAgent(cwdOfProject, sid), messages: claimed, step: 2 }, async () => d2);
+    const file = path.join(wiringRoot, ...segs, `${sid}.json`);
+    const exists = fs.existsSync(file);
+    check('接线：没有 $DSH_HOME 时侧车也落盘（走 dshHomePath 服务）', exists, file);
+    const state = exists ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+    check('接线：落盘内容确实是差分基线', !!state && !!state.state && Object.keys(state.state).length > 0, JSON.stringify(state).slice(0, 120));
+  } finally {
+    if (savedSandboxEnv === undefined) delete process.env.DSH_MEMORY_DELTA_STATE_DIR;
+    else process.env.DSH_MEMORY_DELTA_STATE_DIR = savedSandboxEnv;
+  }
 }
 
 /* ------------------------------------------------------------------ 工具 */

@@ -2899,10 +2899,23 @@ window.__ModuleLoader__.load({
      * "侧边栏在、就是没有「记忆」页签"。现在改成**等到服务出现再注册**：
      * 首选 cordis 的服务等待原语 `ctx.inject([...], cb)`（better-sidebar 自己的接入文档
      * 也是这么做的），门面上没有 inject 时退回**有界轮询**（最坏 ~12 秒）。
+     *
+     * ⚠️ 2026-10-01 二修（代码审查抓到的）：在**动态包**那种 ctx 门面上，读一个它不暴露的
+     * 属性不是"返回 undefined"而是**抛异常**（`dsh-cordis-client-runner` 的 `rejectGuard`：
+     * `dynamic ctx does not expose "inject"`）。所以"读 `.inject` 前先 typeof 一下"这件事本身
+     * 就得包在 try 里 —— 否则这段"门面上没有 inject 就退回轮询"的兜底代码，恰好会在门面上炸掉。
+     * 同理：轮询里的注册可能落在**已经被释放的 fiber** 上（这 12 秒窗口里条目被热更/禁用），
+     * `ctx.effect` 会抛 `INACTIVE_EFFECT`，而它是在 **timer 回调**里抛的 = 未捕获异常。
+     * 两处都收口在本函数里：**拿不到就等、等不到就安静收工，绝不把异常扔进宿主**。
      */
     function pickSidebar(ctx) {
-      const svc = typeof ctx?.get === 'function' ? ctx.get('betterSidebar') : null;
-      return svc && typeof svc.registerTab === 'function' ? svc : null;
+      try {
+        const svc = typeof ctx?.get === 'function' ? ctx.get('betterSidebar') : null;
+        return svc && typeof svc.registerTab === 'function' ? svc : null;
+      } catch {
+        // 门面连 get 都不给（或查询本身被拒）—— 当作"服务还没到"
+        return null;
+      }
     }
 
     /** 真正注册一次；`owner` 是持有 effect 的 ctx（注入路径下是派生子 ctx，随其释放）。 */
@@ -2928,9 +2941,15 @@ window.__ModuleLoader__.load({
 
     /** 兜底等待：有界轮询（40 × 300ms），拿到就注册、一直拿不到就静默放弃。 */
     function pollForSidebar(ctx, attempt) {
-      const svc = pickSidebar(ctx);
-      if (svc) {
-        registerMemoryTab(ctx, svc);
+      try {
+        const svc = pickSidebar(ctx);
+        if (svc) {
+          registerMemoryTab(ctx, svc);
+          return;
+        }
+      } catch {
+        // 这条 ctx 已经没法注册了（多半是 fiber 被释放：热更 / 禁用 / 服务消失）。
+        // 不再排下一次，也不把异常抛给宿主 —— timer 回调里的异常没人接。
         return;
       }
       if (attempt >= 40 || typeof setTimeout !== 'function') return;
@@ -2943,15 +2962,22 @@ window.__ModuleLoader__.load({
         registerMemoryTab(ctx, ready);
         return;
       }
-      if (typeof ctx?.inject === 'function') {
+      // ⚠️ 读 `.inject` 本身就可能抛（门面不给这个动词），所以**读取**也在 try 里
+      let inject = null;
+      try {
+        if (typeof ctx?.inject === 'function') inject = ctx.inject.bind(ctx);
+      } catch {
+        inject = null;
+      }
+      if (inject) {
         try {
-          ctx.inject(['betterSidebar'], (child) => {
+          inject(['betterSidebar'], (child) => {
             const svc = pickSidebar(child) || pickSidebar(ctx);
             if (svc) registerMemoryTab(child && typeof child.effect === 'function' ? child : ctx, svc);
           });
           return;
-        } catch (err) {
-          // 门面上没有可用的 inject → 落到轮询（老宿主 / 桩环境）
+        } catch {
+          // 门面拒绝注入 → 落到轮询（老宿主 / 桩环境）
         }
       }
       pollForSidebar(ctx, 0);

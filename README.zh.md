@@ -73,7 +73,10 @@ AI 编码助手有两个反复出现的毛病：
 - **只推变化的部分**：每条条目带 12 位内容 hash，插件记住上一轮的状态，下一轮**只推新增/已更新/已失效**；
   **完全没变化时一个字都不注入**。（上游 `dsh-agent-instructions` 没有差分：文件一变就整篇重注入，
   实测一个会话里改 15 次某个 8.5 KB 的文件 ≈ 白烧 58k tokens。）
-- **状态存侧车文件**：`$DSH_HOME/storages/dsh-memory-delta/inject-state/<会话id>.json`。
+- **状态存侧车文件**：`<harness home>/storages/dsh-memory-delta/inject-state/<会话id>.json`
+  （目录按 `config.stateDir` → 内核服务 `ctx.dshHomePath` → `$DSH_HOME` → `~/.dsh` 的顺序解析；
+  ⚠️ 2026-10-01 修：以前只认 `$DSH_HOME`，而**官方桌面版的 home 就是默认的 `~/.dsh`**、
+  宿主进程里没有这个环境变量 → 侧车静默不落盘、每次重启重灌一次全量记忆）。
   ⚠️ 2026-09-30 改的：早先把 `{id: hash}` 塞在消息的 `source` 里，那**违反了 DSH 会话格式 v0 白名单**
   （plugin source 只允许 `kind/plugin/form/sections/summary`），会让整条会话在格式迁移时被拒、
   **永久打不开**（本机 14 条会话因此报废，只能手工修日志）。现在状态不碰会话格式，
@@ -229,7 +232,7 @@ mem journal add "流水一行"
 ## 开发
 
 ```bash
-npm test        # 1254 个断言，零依赖
+npm test        # 1283 个断言，零依赖
 ```
 
 | 套件 | 断言 | 覆盖 |
@@ -239,10 +242,10 @@ npm test        # 1254 个断言，零依赖
 | `test/search-tests.mjs` | 56 | 分词 / 按层加权 / 打分 / 片段选择（纯逻辑） |
 | `test/due-tests.mjs` | 93 | `verify_when` 解析（日期、相对说法、人话）与到期收集（纯逻辑） |
 | `test/session-format-tests.mjs` | 17 | **会话格式契约：拿内核自己的准入函数验我们写出去的来源**（现行形态过 v4 准入、退役的 `plugin` 包装仍被它拒、四种历史读回形态都认得出、全仓没有第二处手写 `kind` 字面量）。内核模块找不到时打印 SKIP 跳过 |
-| `test/peer-range-tests.mjs` | 21 | **peer 契约：声明的宿主范围必须覆盖我们声称支持的每个内核** —— 必须写成「显式下界 + 显式上界 + 下界带预发布子句」，因为 `^0.1.x` 的 caret **跨不过 minor**，插件正是这样在 0.2.0 内核上被静默禁用的；另含 vendor 配对与一条把该规则本身钉住的反向对照（没装 semver 时那 9 条语义断言打印 SKIP） |
+| `test/peer-range-tests.mjs` | 28 | **peer 契约：声明的宿主范围必须覆盖我们声称支持的每个内核** —— 写成「每条支持线一个带预发布子句的 caret」（`^0.1.x` 的 caret **跨不过 minor**，且预发布的 tuple 规则会让"一条大范围"在不开 `includePrerelease` 的检查器上全判 false）；另含 vendor 配对、版本边界，以及两条**纠正过的因果**对照（真预检两代内核都开 `includePrerelease`，所以旧范围其实能过 —— "官方版被 peer 静默禁用"是当时的误判）。没装 semver 时那 23 条语义断言打印 SKIP；`DSH_REQUIRE_SEMVER=1` 时 SKIP 变失败（发版自检用） |
 | `test/hook-tests.mjs` | 66 | 插件接线（假 agent / decision）：差分注入、状态侧车落盘时机、蒸馏提醒、到期提醒 |
-| `test/plugin-tests.mjs` | 303 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename/topic/batch 真的写库 + 400/500 错误码分类 + 白名单/来源校验 + 工具输出契约与 render 文本） |
-| `test/client-tests.mjs` | 350 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、四个维度覆盖三个阶段、归类、批量勾选、点条目调 openFile、检索时序与截断提示、提升/整理文件名、失败态；含"没装 better-sidebar 时 apply 必须安全跳过"的回归） |
+| `test/plugin-tests.mjs` | 317 | 插件集成（桩 DSH 模块，真 apply + 两个工具 + 三条面板路由 + promote/rename/topic/batch 真的写库 + 400/500 错误码分类 + 白名单/来源校验 + 工具输出契约与 render 文本） |
+| `test/client-tests.mjs` | 358 | 侧边栏面板 bundle（假 React + 假 `fetch`：分组/折叠、四个维度覆盖三个阶段、归类、批量勾选、点条目调 openFile、检索时序与截断提示、提升/整理文件名、失败态；含"没装 better-sidebar 时 apply 必须安全跳过"的回归，以及**敌意门面/卸载时机**那组：读不到 `inject` 也不能抛、fiber 释放后 timer 不许把异常扔进宿主、有界轮询 40 次封顶） |
 
 `test/plugin-tests.mjs` 用 `test/stubs/` 下的桩模块替换 4 个 `@deepseek-ai/*` 包，
 通过 `test/stub-loader.mjs` **真正 `apply()` 这个插件并驱动它**，所以即使没有 DSH 也能验证插件行为。
