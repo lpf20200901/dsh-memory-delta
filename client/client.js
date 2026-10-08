@@ -1933,7 +1933,7 @@ window.__ModuleLoader__.load({
               { className: 'dsh-memory-delta-over-list' },
               h('li', null, '把不再需要的「归档」或「撤回」—— 就在下面各组条目上'),
               h('li', null, '把条目的结论首行写短：注入只取首行 + key，正文写多长都不花预算'),
-              h('li', null, '确实每条都要：把插件配置 maxBytes 调大（如 4096）'),
+              h('li', null, '确实每条都要：调大预算 —— 先改记忆库 memory.config.json 的 injectBudget（插件配置里显式写 maxBytes 也行）'),
             ),
           )
         : null;

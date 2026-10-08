@@ -136,7 +136,7 @@ Seven rules:
          name: dsh-memory-delta
          config:
            root: ''              # empty = <session cwd>/memory
-           maxBytes: 3072        # byte budget for the baseline injection
+           # maxBytes: 4096      # optional. Omit = the store's memory.config.json#injectBudget decides (then 3072)
            enabled: true
            dueWithin: 0          # remind this many days before verify_when (0 = only when due)
            panel: true           # the memory tab's state/action routes
@@ -148,7 +148,17 @@ Seven rules:
 
 **Uninstall**: remove that `- insert:` block and delete `node_modules\dsh-memory-delta`.
 
-> The market/registry publishing flow was not investigated yet; the above is the local install path.
+> Listed in the plugin market (`lpf20200901/dsh-memory-delta`) — installing from there goes through the
+> **bundle patch shipped in this package**, which deliberately does *not* set `maxBytes` (the store's own
+> config decides). The manual steps above remain the local-development path.
+
+> ⚠️ **Known hazard: installing or removing another plugin through the market rewrites the profile's
+> `cordis.patch.yml`, and a hand-written `- insert:` block — comments included — is dropped.** Observed
+> 2026-10-08: installing a third-party plugin silently removed this plugin's block, leaving it in a
+> "files present, never loaded" state — the files were still in `node_modules`, but nothing was injected
+> any more and `/dsh-memory-delta` had vanished from the skill catalog, **with no log line anywhere**.
+> Check: does `cordis.patch.yml` still contain `- id: dsh-memory-delta`?
+> Fix: paste the `- insert:` block back and save — it hot-reloads (refresh the page for the client tab).
 
 ### What the plugin provides
 

@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { Config, INJECT_STATE_SEGMENTS, apply, inject as injectServices, name, resolveInjectStateDir } from '../src/plugin.mjs';
-import { createEntry, ensureLayout, injectPayload, loadConfig, promoteEntry, readAll, searchLibrary } from '../bin/mem.mjs';
+import { createEntry, ensureLayout, injectPayload, loadConfig, promoteEntry, readAll, resolveBudget, searchLibrary } from '../bin/mem.mjs';
 import { MEMORY_ACTION_PATH, MEMORY_ROUTE_PATH, MEMORY_SEARCH_PATH, createActionRoute, createMemoryRoute, createSearchRoute, memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute, resolvePanelRoot } from '../src/panel.mjs';
 import { MEMORY_PLUGIN_ID, isMemorySource, memorySource } from '../src/planner.mjs';
 
@@ -729,6 +729,82 @@ section('超预算：memory_write 当场给一句可读告警');
   const roomyWrite = roomy.registered.find((t) => t.name === 'memory_write');
   const loose = await roomyWrite.execute({ type: 'fact', conclusion: '不超预算' }, { agent: fakeAgent(path.join(SANDBOX, 'roomy-budget'), 'session-loose') });
   check('预算宽裕时不带 budgetNote（整条省掉）', !('budgetNote' in loose), JSON.stringify(loose).slice(0, 140));
+}
+
+/* ---------------- 预算的来源顺序（2026-10-08：库配置那一档曾经是**死配置**） */
+
+section('预算来源顺序：显式 maxBytes > 库 injectBudget > 3072（全仓库只此一份实现）');
+{
+  /**
+   * DSH 在 `apply` 之前会拿 schema **归一化**配置（把声明的默认值补上）。
+   * 桩模块把声明的默认值记在 `__fallback` 上，这里把那一步补出来。
+   *
+   * ⚠️ 不补的话，"schema 里偷偷带个默认值"这类回归**测试根本看不见** —— 2026-10-08 那个
+   * 死配置 bug 就是这么漏过去的：库配置明明写着 5000，却被 schema 的 `.default(3072)` 顶掉，
+   * 而测试一直把**原始** config 直接交给 `apply()`，永远走不到默认值那条路。
+   * 桩模块分不清"没声明默认值"和"默认值就是 0"（`number()` 的 `__fallback` 是 0），
+   * 所以 `maxBytes` 按"0 = 没给"理解 —— 这与 `resolveBudget()` 的语义一致（0 本来就不是合法预算）。
+   * 真实 schemastery 下的同一条契约由 `test/preflight-import.mjs` 兜底。
+   */
+  const dshConfig = (raw = {}) => {
+    const out = {};
+    for (const [key, node] of Object.entries(Config)) {
+      const declared = node && typeof node === 'object' && '__fallback' in node ? node.__fallback : undefined;
+      out[key] = raw[key] !== undefined ? raw[key] : declared;
+    }
+    return out;
+  };
+  check(
+    'schema 里 maxBytes **不钉默认值**（钉了它就永远盖过库配置）',
+    dshConfig({}).maxBytes === 0,
+    `dshConfig({}).maxBytes = ${String(dshConfig({}).maxBytes)}`,
+  );
+
+  check('都没给 → 3072', resolveBudget(undefined, undefined) === 3072, String(resolveBudget(undefined, undefined)));
+  check('只有库配置 → 用库的', resolveBudget(undefined, 5000) === 5000, String(resolveBudget(undefined, 5000)));
+  check('只有显式配置 → 用显式的', resolveBudget(2000, undefined) === 2000, String(resolveBudget(2000, undefined)));
+  check('都给了 → 显式的优先', resolveBudget(2000, 5000) === 2000, String(resolveBudget(2000, 5000)));
+  check('字符串（CLI `--budget`）也认', resolveBudget('4096', 5000) === 4096, String(resolveBudget('4096', 5000)));
+  check(
+    '垃圾值（0 / 负数 / NaN / 空串）不算"给了" → 退回库配置',
+    [0, -1, Number.NaN, ''].every((v) => resolveBudget(v, 5000) === 5000),
+    [0, -1, Number.NaN, ''].map((v) => resolveBudget(v, 5000)).join(','),
+  );
+
+  // 接线：插件配置**不写** maxBytes 时，真正生效的必须是库配置那个数。
+  // （对照组：把 schema 的 `.default(3072)` 加回来，下面第一条必红 —— 库配置 300 会被 3072 顶掉，
+  //   于是"没超预算"，budgetNote 整条消失。）
+  const storeRoot = path.join(SANDBOX, 'budget-from-store', 'memory');
+  const Ls = ensureLayout(storeRoot);
+  fs.writeFileSync(path.join(storeRoot, 'memory.config.json'), JSON.stringify({ version: 1, injectBudget: 300 }), 'utf8');
+  for (let i = 0; i < 4; i += 1) {
+    const c = createEntry(Ls, { type: 'fact', conclusion: `库里定预算的第 ${i} 条：${'很长很长'.repeat(6)}`, key: `store-budget-${i}`, tags: [] });
+    promoteEntry(Ls, c.id);
+  }
+  check('前置条件：这个库按 300 算是超预算的', injectPayload(Ls, 300).overBudget === true, String(injectPayload(Ls, 300).bytes));
+
+  const storeCtx = fakeCtx();
+  apply(storeCtx, dshConfig({ root: storeRoot }));
+  const storeWrite = storeCtx.registered.find((t) => t.name === 'memory_write');
+  const fromStore = await storeWrite.execute(
+    { type: 'fact', conclusion: '看看到底用谁的预算' },
+    { agent: fakeAgent(path.join(SANDBOX, 'budget-from-store'), 'session-store-budget') },
+  );
+  check(
+    '没写 maxBytes → 真按库配置的 300 算（它不再是死配置）',
+    /\/ 300 bytes/.test(String(fromStore.budgetNote)),
+    String(fromStore.budgetNote).slice(0, 200),
+  );
+
+  // 显式写了就以它为准：同一个库、同一个 300，被 4096 顶掉 → 不再超预算
+  const overrideCtx = fakeCtx();
+  apply(overrideCtx, dshConfig({ root: storeRoot, maxBytes: 4096 }));
+  const overrideWrite = overrideCtx.registered.find((t) => t.name === 'memory_write');
+  const overridden = await overrideWrite.execute(
+    { type: 'fact', conclusion: '显式配置应当顶掉库里的 300' },
+    { agent: fakeAgent(path.join(SANDBOX, 'budget-from-store'), 'session-store-budget-2') },
+  );
+  check('显式 maxBytes 顶掉库配置 → 不超预算就不带 budgetNote', !('budgetNote' in overridden), JSON.stringify(overridden).slice(0, 160));
 }
 
 /* ------------------------------------------------- 到期复核：真接线跑一遍 */

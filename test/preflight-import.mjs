@@ -81,8 +81,8 @@ try {
   try {
     const normalized = typeof mod.Config === 'function' ? mod.Config({}) : null;
     check(
-      'Config({}) 能取到默认值 maxBytes=3072 / dueWithin=0',
-      !normalized || (normalized.maxBytes === 3072 && normalized.dueWithin === 0),
+      'Config({}) 里 maxBytes **不设默认**（库配置才有资格定它）/ dueWithin=0',
+      !normalized || (normalized.maxBytes === undefined && normalized.dueWithin === 0),
       JSON.stringify(normalized),
     );
   } catch (error) {

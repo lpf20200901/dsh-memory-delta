@@ -40,10 +40,14 @@ Fixes, cheapest first:
 
 1. **Write shorter conclusion first lines** (only the first line is injected; the body costs nothing)
 2. **Archive / withdraw** entries you no longer need
-3. **Raise the budget** (`injectBudget` in `memory.config.json`, or `maxBytes` in the plugin config)
+3. **Raise the budget** (`injectBudget` in `memory.config.json` — the library's own declaration of what it needs)
 
-> ⚠️ There are **two** budget settings and the **plugin config wins**:
-> `plugin maxBytes || store injectBudget || 3072`. Changing only the store value has no effect after a restart.
+> Resolution order: an **explicitly configured `maxBytes`** → the store's `injectBudget` → 3072, implemented
+> once (`resolveBudget()` in `bin/mem.mjs`).
+> ⚠️ Until 2026-10-08 the plugin's Config schema defaulted `maxBytes` to 3072, which always shadowed the
+> store value: changing only the store had no effect after a restart, so the number ended up pinned in the
+> profile instead and the two sources fought each other. `maxBytes` now has **no default** — leave it unset
+> and the store decides.
 
 ### Q: Why is there a limit at all?
 

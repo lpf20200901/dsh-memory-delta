@@ -120,7 +120,7 @@ AI 编码助手有两个反复出现的毛病：
          name: dsh-memory-delta
          config:
            root: ''             # 留空 = 会话工作目录下的 memory/
-           maxBytes: 3072       # baseline 注入的字节预算
+           # maxBytes: 4096     # 可选。**不写 = 听库配置 memory.config.json#injectBudget**（再没有才是 3072）
            enabled: true
            dueWithin: 0         # verify_when 提前几天提醒复核（0 = 只在已到期时）
            panel: true          # 侧边栏「记忆」页签的数据/动作路由
@@ -132,7 +132,16 @@ AI 编码助手有两个反复出现的毛病：
 
 **卸载**：删掉 patch 里那段 `- insert:`，再删掉 `node_modules\dsh-memory-delta` 目录。
 
-> 官方分发渠道（插件市场）的发布流程我还没摸；目前是本机安装方式。
+> 插件市场已收录（`lpf20200901/dsh-memory-delta`），市场里直接装即可 —— 那条路走的是**本包自带的
+> `cordis.patch.yml`**（它**故意不写** `maxBytes`，预算由记忆库自己的配置决定）。上面的手工步骤
+> 仍然适用于本地开发。
+
+> ⚠️ **已知危险：插件市场装/卸别的插件会重写 profile 的 `cordis.patch.yml`，手写的 `- insert:` 块
+> 会连注释一起被抹掉。** 2026-10-08 实测：装一个第三方插件时本插件那一段整块消失，表现为
+> **「文件在、没挂上」** —— `node_modules` 里文件都在，但每轮不再注入记忆、技能目录里
+> `/dsh-memory-delta` 也没了，而且**日志里没有任何提示**。
+> 体检：看一眼 `cordis.patch.yml` 里还找不找得到 `- id: dsh-memory-delta`。
+> 恢复：把上面那段 `- insert:` 贴回去、保存即热加载生效（客户端页签要刷新一次页面）。
 
 ### 插件提供什么
 

@@ -21,7 +21,7 @@ import { renderBaseline } from '../src/planner.mjs';
 import { collectDue, duePhrase } from '../src/due.mjs';
 import { LAYER_WEIGHT, MAX_LINE_HITS, findMatches, rankDocs } from '../src/search.mjs';
 
-const VERSION = '1.3.3';
+const VERSION = '1.3.4-dev';
 const CONFIG_FILE = 'memory.config.json';
 const TYPES = ['fact', 'decision'];
 const STATUSES = ['active', 'superseded', 'expired'];
@@ -50,11 +50,40 @@ function resolveRoot(explicit) {
   return path.join(process.cwd(), 'memory');
 }
 
+/**
+ * 默认注入字节预算 —— **只在所有来源都没说话时**才用它。
+ *
+ * ⚠️ 它只能出现在预算解析的**最后一档**。2026-10-08 修的真问题：插件的 Config schema 给
+ * `maxBytes` 带了 `.default(3072)`，于是那一档**永远有值**、库配置成了死配置 ——
+ * 用户把库的 `injectBudget` 改成 5000，重启后仍按 3072 报超预算，只好反过来再去 profile 里
+ * 钉一个 5000，两个来源互相打架。教训：**带优先级的档位不能有默认值。**
+ */
+export const DEFAULT_INJECT_BUDGET = 3072;
+
+/**
+ * 决定"这次生效的注入字节预算" —— **全仓库只此一份顺序**。
+ *
+ * 顺序：显式给的（插件配置 `maxBytes` / CLI `--budget`）→ 记忆库 `memory.config.json#injectBudget`
+ * → `DEFAULT_INJECT_BUDGET`。插件侧 `openStore()`、面板 `memoryStateOf()`、CLI `mem inject` 与
+ * `mem validate` 全部走它 —— **别再各写一遍**（这次就是"五处各写一遍顺序"写歪的）。
+ *
+ * @param {unknown} explicit 显式来源（插件配置 maxBytes / CLI --budget）；没给就是 undefined
+ * @param {unknown} storeBudget 记忆库 memory.config.json#injectBudget
+ * @returns {number} 字节
+ */
+export function resolveBudget(explicit, storeBudget) {
+  const e = Number(explicit);
+  if (Number.isFinite(e) && e > 0) return e;
+  const s = Number(storeBudget);
+  if (Number.isFinite(s) && s > 0) return s;
+  return DEFAULT_INJECT_BUDGET;
+}
+
 function defaultConfig(root) {
   return {
     version: 1,
     scope: `workspace:${path.resolve(process.env.DSH_MEMORY_WORKSPACE || process.cwd())}`,
-    injectBudget: 3072,
+    injectBudget: DEFAULT_INJECT_BUDGET,
     createdAt: new Date().toISOString().slice(0, 10),
   };
 }
@@ -1668,7 +1697,7 @@ function cmdInject(opts) {
   const root = resolveRoot(opts.root);
   const cfg = loadConfigOrFail(root) || defaultConfig(root);
   const L = ensureLayout(root, { create: false });
-  const budget = opts.budget ? Number(opts.budget) : cfg.injectBudget;
+  const budget = resolveBudget(opts.budget, cfg.injectBudget);
   const payload = injectPayload(L, budget);
 
   if (opts.json) {
@@ -1684,7 +1713,7 @@ function cmdInject(opts) {
       console.log(dim('  超了会怎样：不会丢条目（注入不截断），但每轮都多花这些 token，validate 也会报问题。'));
       console.log(dim('  怎么办：① 不再需要的条目 mem archive <id> / mem demote <id>'));
       console.log(dim('          ② 把条目的**结论首行**写短（注入只取首行 + key，正文写多长都不花预算）'));
-      console.log(dim('          ③ 确实每条都要：把插件配置 maxBytes 调大（如 4096），或 mem init 后改 memory.config.json 的 injectBudget'));
+      console.log(dim('          ③ 确实每条都要：调大预算 —— 改记忆库 memory.config.json 的 injectBudget（插件配置里显式写 maxBytes 也行）'));
       process.exitCode = 1; // 供 CI / 插件调用判断：超预算就是失败，不能只看输出文字
     } else {
       ok(`${head} —— 在预算内（${payload.entries.length} 条，已带 hash 供差分注入）`);
@@ -2059,7 +2088,7 @@ function cmdValidate(opts) {
   // 注入预算
   const text = renderInject(L);
   const bytes = Buffer.byteLength(text, 'utf8');
-  const budget = cfg?.injectBudget ?? 3072;
+  const budget = resolveBudget(undefined, cfg?.injectBudget);
   if (bytes > budget) {
     // 这条**是问题**（退出码 1）：每轮都超预算 = 每轮都在多花钱，值得卡住 CI。
     // 说明里带上"为什么"和"怎么办"，否则使用者只知道超了、不知道该怎么办。

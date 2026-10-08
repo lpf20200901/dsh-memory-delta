@@ -13,5 +13,7 @@
       name: dsh-memory-delta
       config:
         root: ''
-        maxBytes: 3072
+        # maxBytes **故意不写**：这里写死一个数就会盖过记忆库自己的
+        # memory.config.json#injectBudget，变成"两个来源互相打架"（2026-10-08 的教训）。
+        # 要调预算先改库配置；只有"这份部署必须钉死一个数"时才在这里写。
         enabled: true

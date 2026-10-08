@@ -27,7 +27,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CONFIG_FILE, applyBatch, archiveEntry, categoryOf, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, renameTopic, restoreEntry, searchLibrary, setArchiveCategory, setTopicEntry, today } from '../bin/mem.mjs';
+import { CONFIG_FILE, applyBatch, archiveEntry, categoryOf, demoteEntry, ensureLayout, firstLine, injectPayload, promoteEntry, readAll, readEntryFile, removeEntry, renameEntry, renameTopic, resolveBudget, restoreEntry, searchLibrary, setArchiveCategory, setTopicEntry, today } from '../bin/mem.mjs';
 import { collectDue } from './due.mjs';
 
 /** 状态路由：exact 匹配。（包名是 dsh-memory-delta，路由跟着包名走） */
@@ -268,7 +268,7 @@ function emptyState(root, scope, budget, workspace = null) {
  * @returns {object} 无损 JSON（没有 undefined 值）
  */
 export function buildMemoryState(L, opts = {}) {
-  const budget = Number.isFinite(opts.budget) && opts.budget > 0 ? opts.budget : 3072;
+  const budget = resolveBudget(opts.budget, null);
   // 注意：这里处理的是 `injectPayload` 的**扁平载荷条目**（scope 是字符串），
   // 不是 mem.mjs 的原始条目（scope 在 `e.data.scope`）。以前在这里按 raw 形状取值，
   // 结果整条路由回 500（"Cannot read properties of undefined (reading 'scope')"）。
@@ -415,15 +415,15 @@ export function memoryStateOf(input = {}) {
   const { root, workspace } = resolvePanelRoot(input);
   const cfg = root ? safeConfig(root) : { budget: null, scope: null };
   /**
-   * 预算以谁为准：**插件配置的 `maxBytes` 优先**（`input.budget`），其次才是库配置的
-   * `memory.config.json#injectBudget`。
+   * 预算以谁为准：**显式配了的 `maxBytes` 优先**（`input.budget`），其次才是库配置的
+   * `memory.config.json#injectBudget`，最后才是 3072。
    *
-   * ⚠️ 这里踩过：面板原来只看库配置，于是"插件 maxBytes=4096、库配置还是 3072"时，
-   * 面板显示的上限跟**真正生效**的上限不一致 —— 超没超预算会算错、告警会撒谎。
-   * 插件侧 `openStore()` 的顺序就是 `config.maxBytes || fileConfig.injectBudget || 3072`，
-   * 面板必须与它一致。
+   * ⚠️ 这里踩过两次：① 面板原来只看库配置，于是"插件 maxBytes=4096、库配置还是 3072"时，
+   * 面板显示的上限跟**真正生效**的上限不一致 —— 超没超预算会算错、告警会撒谎；
+   * ② 反过来，插件侧曾因为 Config schema 带 `.default(3072)` 而**永远**把 3072 传下来，
+   * 库配置那一档成了死配置。现在两边都只走 `resolveBudget()` 这一份实现。
    */
-  const budget = Number.isFinite(input.budget) && input.budget > 0 ? input.budget : (cfg.budget ?? 3072);
+  const budget = resolveBudget(input.budget, cfg.budget);
   const scope = cfg.scope ?? (workspace ? `workspace:${workspace}` : '');
   /**
    * 找「工作区规范」用哪个目录。

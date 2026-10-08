@@ -16,7 +16,7 @@ import path from 'node:path';
 import z from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import { createEntry, ensureLayout, injectPayload, loadConfig, searchLibrary } from '../bin/mem.mjs';
+import { createEntry, ensureLayout, injectPayload, loadConfig, resolveBudget, searchLibrary } from '../bin/mem.mjs';
 import { createMemoryHook } from './hook.mjs';
 import { memoryStateOf, registerActionRoute, registerMemoryRoute, registerSearchRoute } from './panel.mjs';
 import { memorySource } from './planner.mjs';
@@ -28,8 +28,14 @@ export const inject = ['tools'];
 export const Config = z.object({
   /** 记忆库根目录；留空则用会话工作目录下的 `memory/`。 */
   root: z.string().default(''),
-  /** 首次（baseline）注入的字节预算；差分注入通常远小于它。 */
-  maxBytes: z.number().step(1).min(256).default(3072),
+  /**
+   * 首次（baseline）注入的字节预算；差分注入通常远小于它。
+   *
+   * **不写**（推荐）= 听记忆库自己的 `memory.config.json#injectBudget`，再没有才是 3072。
+   * ⚠️ 这里**故意不给 default**：给了的话 `config.maxBytes` 永远有值，库配置那一档就成了
+   * 死配置（2026-10-08 修的真问题）。优先级全仓库只有一份实现 —— `bin/mem.mjs` 的 `resolveBudget()`。
+   */
+  maxBytes: z.number().step(1).min(256),
   /** 关掉注入但保留工具（调试用）。 */
   enabled: z.boolean().default(true),
   /** `verify_when` 提前几天提醒复核（0 = 只在已到期时提醒）。 */
@@ -76,7 +82,7 @@ function openStore(config, cwd, { forWrite = false } = {}) {
   // 工具会抛出让人摸不着头脑的 ENOENT（真机预检抓到的）。
   const L = ensureLayout(root, { create: forWrite });
   const fileConfig = loadConfig(root);
-  const budget = config.maxBytes || fileConfig?.injectBudget || 3072;
+  const budget = resolveBudget(config.maxBytes, fileConfig?.injectBudget);
   // 会话工作区是权威的 scope，显式传下去 —— 否则 createEntry 会退到记忆库声明或
   // process.cwd()，而插件的 process.cwd() 是 harness 的 launch-root（真机试用踩到）。
   // 只有在**没有工作区**时（插件配了固定 root 的那种部署）才退回用库根当 scope 名。
@@ -448,8 +454,9 @@ export function apply(ctx, config = {}) {
           configRoot: config.root || undefined,
           workspace: input?.workspace,
           dueWithin: config.dueWithin ?? 0,
-          // 预算必须传**实际生效**的那个（插件 maxBytes 优先）—— 否则面板算超没超预算会和真实注入不一致
-          budget: config.maxBytes || undefined,
+          // 只传**显式**配的那个（没配就是 undefined）—— 面板会用同一份 `resolveBudget()`
+          // 补上"库配置"那一档。要是这里替它填个默认值，面板算"超没超预算"会和真实注入不一致。
+          budget: config.maxBytes ?? undefined,
         }),
       effectOwner?.effect?.bind(effectOwner) ?? ctx.effect?.bind(ctx),
     );
