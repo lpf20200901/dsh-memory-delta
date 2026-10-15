@@ -136,6 +136,10 @@ AI 编码助手有两个反复出现的毛病：
 > `cordis.patch.yml`**（它**故意不写** `maxBytes`，预算由记忆库自己的配置决定）。上面的手工步骤
 > 仍然适用于本地开发。
 
+> **npm 上也有一份**（`dsh-memory-delta`）：`npm i -g dsh-memory-delta` 装的是 `mem` 这个 CLI
+> （同一份记忆库、同一套检索实现）；DSH 里也可以直接按包名装：
+> `cd ~/.dsh && dsh plugin --profile web add dsh-memory-delta`。
+
 > ⚠️ **已知危险：插件市场装/卸别的插件会重写 profile 的 `cordis.patch.yml`，手写的 `- insert:` 块
 > 会连注释一起被抹掉。** 2026-10-08 实测：装一个第三方插件时本插件那一段整块消失，表现为
 > **「文件在、没挂上」** —— `node_modules` 里文件都在，但每轮不再注入记忆、技能目录里

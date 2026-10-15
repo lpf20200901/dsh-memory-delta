@@ -152,6 +152,10 @@ Seven rules:
 > **bundle patch shipped in this package**, which deliberately does *not* set `maxBytes` (the store's own
 > config decides). The manual steps above remain the local-development path.
 
+> Also published on **npm** as `dsh-memory-delta`: `npm i -g dsh-memory-delta` gives you the `mem` CLI
+> (same store, same ranking code as the plugin), and DSH can install straight from the registry with
+> `cd ~/.dsh && dsh plugin --profile web add dsh-memory-delta`.
+
 > ⚠️ **Known hazard: installing or removing another plugin through the market rewrites the profile's
 > `cordis.patch.yml`, and a hand-written `- insert:` block — comments included — is dropped.** Observed
 > 2026-10-08: installing a third-party plugin silently removed this plugin's block, leaving it in a

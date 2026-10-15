@@ -1,0 +1,49 @@
+name: publish-npm
+
+# 走 npm 的 **Trusted Publishing**（OIDC）：不需要在仓库里放 NPM_TOKEN，
+# 公开仓库 + id-token 就能拿到短期凭据，并自动带 provenance 证明。
+# 在 npmjs.com 上要先把本仓库的 Trusted Publisher 配好：
+#   Package → Settings → Trusted Publisher → GitHub Actions
+#   Repository: lpf20200901/dsh-memory-delta    Workflow: publish-npm.yml    Environment: (留空)
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Trusted Publishing / provenance 必需
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing 要求 npm >= 11.5.1；Node 22 自带的 10.x 不够
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Run tests
+        run: npm test
+
+      - name: Skip if this version is already on npm
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION 已经在 npm 上了，跳过发布"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.already == 'false'
+        run: npm publish --access public --provenance
